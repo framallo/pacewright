@@ -15,3 +15,4 @@ async-trait.workspace = true
 thiserror.workspace = true
 croner.workspace = true
 tracing.workspace = true
+tokio = { workspace = true }
