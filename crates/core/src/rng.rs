@@ -35,7 +35,7 @@ mod tests {
         let a = SeededRng::new(7).jitter(1000, 0.5);
         let b = SeededRng::new(7).jitter(1000, 0.5);
         assert_eq!(a, b);
-        assert!(a >= 500 && a <= 1500);
+        assert!((500..=1500).contains(&a));
     }
     #[test]
     fn test_fixed_rng() {

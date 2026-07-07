@@ -39,7 +39,7 @@ pub fn check_limits(
     let date = local_date_str(now);
     let now_min = minutes_since_local_midnight(now);
     let mut worst: Option<(i64, String)> = None;
-    let mut consider = |until: i64, reason: String, worst: &mut Option<(i64, String)>| {
+    let consider = |until: i64, reason: String, worst: &mut Option<(i64, String)>| {
         match worst {
             Some((u, _)) if *u >= until => {}
             _ => *worst = Some((until, reason)),
