@@ -657,6 +657,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "croner",
+ "pacewright-adapter-dummy",
  "rand",
  "rusqlite",
  "serde",

@@ -18,3 +18,7 @@ thiserror.workspace = true
 croner.workspace = true
 tracing.workspace = true
 tokio = { workspace = true }
+
+[dev-dependencies]
+pacewright-adapter-dummy = { path = "../adapter-dummy" }
+tokio = { workspace = true }
