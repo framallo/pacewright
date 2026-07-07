@@ -1,6 +1,5 @@
-mod server;
-
 use anyhow::Result;
+use pacewright_daemon::server;
 use pacewright_core::adapter::AdapterRegistry;
 use pacewright_core::clock::SystemClock;
 use pacewright_core::config::Config;
