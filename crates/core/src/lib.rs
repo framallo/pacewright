@@ -5,5 +5,6 @@ pub mod config;
 pub mod limits;
 pub mod model;
 pub mod rng;
+pub mod runner;
 pub mod scheduler;
 pub mod store;
