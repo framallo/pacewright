@@ -2,3 +2,4 @@
 pub mod clock;
 pub mod model;
 pub mod rng;
+pub mod store;
