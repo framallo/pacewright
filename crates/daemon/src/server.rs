@@ -67,7 +67,19 @@ pub async fn handle_request(engine: &Arc<Mutex<Engine>>, req: Request) -> Respon
                     Ok(serde_json::json!({ "ok": true }))
                 } else { Err(format!("no task {id}")) }
             }
-            Request::Limits => Ok(serde_json::json!({ "note": "counters are per-key per-day in the store" })),
+            Request::Limits => {
+                let date = pacewright_core::limits::local_date_str(e.clock.now_ms());
+                let counters = e.store.list_counters(&date).map_err(|e| e.to_string())?;
+                let counters: Vec<_> = counters
+                    .into_iter()
+                    .map(|(key, count, last_spent_at)| serde_json::json!({
+                        "key": key,
+                        "count": count,
+                        "last_spent_at": last_spent_at,
+                    }))
+                    .collect();
+                Ok(serde_json::json!({ "date": date, "counters": counters }))
+            }
             Request::Adapters => {
                 let list: Vec<_> = e.registry.all().iter().map(|a| serde_json::json!({ "name": a.name(), "actions": a.actions() })).collect();
                 Ok(serde_json::json!({ "adapters": list }))
@@ -128,8 +140,22 @@ pub async fn serve(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()>
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let e = engine.lock().await;
-                if let Err(err) = e.tick().await { tracing::error!("tick error: {err}"); }
+                // Run each tick in its own task so a panic inside `tick()`
+                // can't take down the whole loop and silently freeze the
+                // scheduler forever (the socket would keep accepting).
+                let engine = engine.clone();
+                let handle = tokio::spawn(async move {
+                    let e = engine.lock().await;
+                    e.tick().await
+                });
+                match handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(tick_err)) => tracing::error!("tick error: {tick_err}"),
+                    Err(join_err) if join_err.is_panic() => {
+                        tracing::error!("tick task panicked: {join_err}");
+                    }
+                    Err(join_err) => tracing::error!("tick task failed: {join_err}"),
+                }
             }
         });
     }

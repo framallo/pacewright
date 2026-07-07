@@ -198,6 +198,21 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// All limit counters recorded for a given local date, ordered by key.
+    /// Returns `(limit_key, count, last_spent_at)` tuples.
+    pub fn list_counters(&self, date: &str) -> rusqlite::Result<Vec<(String, i64, Option<i64>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT limit_key, count, last_spent_at FROM limit_counters WHERE window_date=?1 ORDER BY limit_key",
+        )?;
+        let rows = stmt.query_map(params![date], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
 }
 
 fn status_from_str(s: &str) -> TaskStatus {
@@ -255,6 +270,26 @@ mod tests {
         assert_eq!(last, Some(200));
         // different day is a fresh counter
         assert_eq!(s.counter_get("linkedin.post", "2026-07-08").unwrap(), (0, None));
+    }
+
+    #[test]
+    fn test_list_counters_for_date() {
+        let s = Store::open_in_memory().unwrap();
+        s.counter_spend("linkedin.post", "2026-07-07", 100).unwrap();
+        s.counter_spend("linkedin.post", "2026-07-07", 200).unwrap();
+        s.counter_spend("email.send", "2026-07-07", 150).unwrap();
+        s.counter_spend("email.send", "2026-07-08", 50).unwrap();
+
+        let rows = s.list_counters("2026-07-07").unwrap();
+        assert_eq!(rows.len(), 2);
+        // ordered by limit_key
+        assert_eq!(rows[0], ("email.send".to_string(), 1, Some(150)));
+        assert_eq!(rows[1], ("linkedin.post".to_string(), 2, Some(200)));
+
+        let other_day = s.list_counters("2026-07-08").unwrap();
+        assert_eq!(other_day, vec![("email.send".to_string(), 1, Some(50))]);
+
+        assert!(s.list_counters("2026-01-01").unwrap().is_empty());
     }
 
     #[test]
