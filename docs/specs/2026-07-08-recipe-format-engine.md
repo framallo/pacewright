@@ -180,12 +180,33 @@ recipe "linkedin/scrape_profile" {
   | `screenshot` | `screenshot "<key>"` | capture PNG bytes into the result under `<key>` (base64) |
 
 - **Locator** (`locator <props> { <child locators> }`): the match fields are KDL **properties** —
-  `role`, `name`, `text` (string or `/regex/` via a raw string `#"…"#`), `label`, `css`, `level`
-  (heading level), `nth`. Two fields are **child nodes**, not properties, because KDL property
-  values are scalars and these are themselves locators: `fallback <props>` (tried when the primary
-  resolves nothing) and `within <props>` (scopes the search to a subtree). Validated against the
-  `kdl` crate — `within={…}` as a property is a parse error. Locators are how *every* targeting
-  verb (`click`/`fill`/`extract`/`wait`) names an element.
+  `role`, `name`, `text` (string or `/regex/` via a raw string `#"…"#`), `label`, `tag`, `css`,
+  `level` (heading level), `nth`. Several fields are **child nodes**, not properties, because KDL
+  property values are scalars and these are themselves locators: `fallback <props>` (tried when the
+  primary resolves nothing), `within <props>` (scopes the search to a subtree), and the
+  **relative anchors** `after <props>` / `near <props>` (§4a). Validated against the `kdl` crate —
+  `within={…}` / `after={…}` as a *property* is a parse error; they must be child nodes. Locators
+  are how *every* targeting verb (`click`/`fill`/`extract`/`wait`) names an element.
+
+### 4a. The robustness ladder (relative locators)
+
+Some data has no semantic handle of its own — e.g. a LinkedIn `headline`/`location` is just "the
+paragraph under the name," a bare `<p>` with a build-hashed class. Rather than pin it with a
+brittle absolute position, anchor it to a *semantic* element with a relative locator. `after <loc>`
+resolves the first element (matching the outer locator's props) that follows the anchor in document
+order; `near <loc>` the nearest. Authors — and the LLM-repair loop (subsystem E) — should prefer
+the highest tier that resolves:
+
+| Tier | Form | Survives | Example |
+|---|---|---|---|
+| 1 semantic | `role`/`text`/`label` | class + layout churn | `locator role="heading"` |
+| 2 relative | `after`/`near` an anchor | class churn, most layout | `locator tag="p" nth=0 { after role="heading" }` |
+| 3 positional | `nth` + `within` | class churn only | `locator css="main p" nth=1` |
+| 4 raw | `css` / xpath | nothing | `locator css=".pv-text-details__left"` |
+
+Tier-2 makes fields *pinnable*; it does not make them immortal — a structural reshuffle still
+breaks them, which is what subsystem D (golden tests on a frozen page) catches and subsystem E
+(re-derive the locator, climbing the ladder) heals.
 
 - **`expect` is a tripwire, not an assertion.** It names a *bad state*; if that state holds, the
   step aborts the run with the `on-fail` error class. Conditions: `settled-url-matches "<regex>"`
@@ -206,8 +227,9 @@ recipe "linkedin/scrape_profile" {
 2. To resolve a locator the engine serializes the locator spec to JSON and calls
    `__pw.resolve(spec)` via `browser.eval`. The runtime implements semantic matching:
    `role` → ARIA role, `text`/`/regex/` → visible-text match, `level` → heading level,
-   `within` → scoped subtree, `nth` → index, `fallback` → second attempt. It returns
-   `{found, backendNodeId, text, count}`.
+   `tag` → element name, `within` → scoped subtree, `after`/`near` → resolve the anchor first
+   then take the following/nearest match (§4a), `nth` → index, `fallback` → second attempt. It
+   returns `{found, backendNodeId, text, count}`.
 3. **Auto-wait:** targeting verbs poll `__pw.resolve` every ~250ms until `found` (or a
    per-step `timeout-ms`, default e.g. 10s). Timeout ⇒ `AdapterError::Retryable` (the page may
    just be slow; the runner backs off and requeues).
