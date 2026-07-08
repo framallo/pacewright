@@ -1,3 +1,4 @@
+use crate::browser::BrowserHandle;
 use crate::model::{ActionSpec, AdapterError};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -6,7 +7,9 @@ use std::sync::Arc;
 
 pub struct RunCtx {
     pub task_id: String,
-    // M2+: pub browser: BrowserHandle
+    /// The live browser page. Browser-free adapters (e.g. `DummyAdapter`) simply
+    /// ignore it; the daemon wires in a real handle, tests a `FakeBrowser`.
+    pub browser: Arc<dyn BrowserHandle>,
 }
 
 #[async_trait]
@@ -61,7 +64,7 @@ mod tests {
         assert_eq!(a.name(), "fake");
         assert_eq!(a.limit_keys_for("go"), vec!["fake.go".to_string()]);
         assert!(a.limit_keys_for("missing").is_empty());
-        let ctx = RunCtx { task_id: "t1".into() };
+        let ctx = RunCtx { task_id: "t1".into(), browser: Arc::new(crate::browser::NullBrowser) };
         assert_eq!(a.execute(&ctx, "go", Value::Null).await.unwrap(), Value::Null);
     }
 }
