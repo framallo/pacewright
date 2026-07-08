@@ -50,8 +50,9 @@ Start every shell with: `source ~/.cargo/env` (Rust 1.96, pinned via `rust-toolc
 `rustfmt`/`clippy` are installed for the 1.96.1 toolchain.
 
 Gates that must stay green before any commit:
-- `cargo test --workspace` — currently **72 tests, all passing** (+3 `#[ignore]`d live browser
-  tests: `cargo test -p pacewright-browser -- --ignored`, needs `chrome-agent` + Chrome).
+- `cargo test --workspace` — currently **86 tests, all passing** (+3 `#[ignore]`d live browser
+  tests: `cargo test -p pacewright-browser -- --ignored`, needs `chrome-agent` + Chrome;
+  +1 `#[ignore]`d live-git test: `cargo test -p pacewright-cli -- --ignored live_clone`).
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean, zero warnings.
 - `cargo fmt` before committing your own changes.
 
@@ -107,6 +108,17 @@ and deleted — history is preserved by the `--no-ff` merge commits above.
    written up under "chrome-agent gotchas": the machine-global `default` page collision
    (the Riverside tooling navigated our page mid-task), and `goto` echoing the requested
    URL so auth-wall detection read a stale URL.
+
+4. **`recipe add`/`list` (recipe distribution).** `crates/cli/src/recipe_install.rs`.
+   `pacewright recipe add owner/repo[@ref][#subdir]` shallow-clones the repo, discovers
+   and validates every `.kdl` (skipping non-recipe / invalid files), copies the valid ones
+   under `~/.pacewright/recipes/<owner>__<repo>/`, and records provenance (URL, ref, pinned
+   HEAD SHA, recipe names) in a `.sources.toml` manifest — reproducible + listable via
+   `recipe list`. Pure local FS op, no daemon round-trip. Post-clone logic is factored into
+   `install_from_dir` so discover/validate/copy/record is unit-tested against a local dir;
+   the live git path has an `#[ignore]`d smoke test. NOTE: this installs recipes as *data*;
+   the engine that *executes* KDL recipes is not built yet (needs the chrome-agent fork — see
+   roadmap). LinkedIn recipes live in `/recipes/` (gitignored) as a local testbed only.
 
 Progress ledger with full detail: `.superpowers/sdd/progress.md` (gitignored, local only).
 
