@@ -1,6 +1,6 @@
 # pacewright — handoff
 
-Last updated: 2026-07-07. Written for the next agent picking up development.
+Last updated: 2026-07-07 (M1-hardening pass). Written for the next agent picking up development.
 
 ## What this is
 
@@ -47,7 +47,7 @@ Start every shell with: `source ~/.cargo/env` (Rust 1.96, pinned via `rust-toolc
 `rustfmt`/`clippy` are installed for the 1.96.1 toolchain.
 
 Gates that must stay green before any commit:
-- `cargo test --workspace` — currently **47 tests, all passing**.
+- `cargo test --workspace` — currently **49 tests, all passing**.
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean, zero warnings.
 - `cargo fmt` before committing your own changes.
 
@@ -71,17 +71,17 @@ Commit-message trailer convention used in this repo:
 ## State of the tree (git log, newest first)
 
 ```
+e97abe4 Merge m1-hardening: single-source terminal set, dedup index, pause/resume RPC test
+4b962f7 harden(core): single-source terminal set, dedup index, pause/resume RPC test
+81e278a docs: add HANDOFF.md for the next agent
 953a39e Merge m1-adapter-panic-isolation: catch adapter panics at the runner boundary
 66ad34a feat(core): isolate adapter panics at the runner boundary
 d650bfa Merge m1-runtime-control: real pause/resume + per-adapter scopes
 1717a84 feat(core): real pause/resume for daemon + per-adapter scopes
-9a70271 docs: expand README ...
-8a0befa Merge M1: pacewright core engine ...
 ```
 
-`main` is the integration branch. The old `m1-core-engine`, `m1-runtime-control`, and
-`m1-adapter-panic-isolation` branches are fully merged into `main` and can be deleted
-(`git branch -d ...`) — kept around only as history markers.
+`main` is the integration branch. All old `m1-*` feature branches are fully merged into
+`main` and deleted — history is preserved by the `--no-ff` merge commits above.
 
 ## What just landed (this session)
 
@@ -141,21 +141,27 @@ into `execute()`, then a first thin real adapter can prove the seam.
 - Pause/resume state is in-memory; a `pause_scopes` table (or a row in an existing meta
   table) would make it survive daemon restarts if operators expect that.
 - `paused_scopes()` returns an unordered `Vec` from a `HashSet` — fine for JSON/TUI, but
-  sort it if you ever add a snapshot-style test.
-- No daemon-level (RPC round-trip) test for `Pause`/`Resume`/`Status` shape yet — only
-  core-engine tests. Cheap hardening: add `test_pause_resume_via_dispatch` in
-  `crates/daemon/src/server.rs` tests.
-- `limits.rs` local-time helpers use `.single().unwrap()` — would panic on a
-  DST-ambiguous local time (inherited from spec). Consider `.earliest()`/`.latest()`.
-- Terminal-status set is hardcoded in `store.rs` SQL AND in `model::is_terminal` — drift
-  risk if you add a status. No index on `dedup_key`.
+  sort it if you ever add a snapshot-style test. (The new `test_pause_resume_via_dispatch`
+  in `crates/daemon/src/server.rs` avoids order-dependence with `contains`.)
 - `flaky_state` map in `DummyAdapter` is unbounded (test-only adapter, so harmless).
+
+**Resolved in the M1-hardening pass (2026-07-07), no longer open:**
+- ✅ Daemon-level RPC round-trip test for `Pause`/`Resume`/`Status` — added
+  `test_pause_resume_via_dispatch` (`crates/daemon/src/server.rs`).
+- ✅ Terminal-status drift — `store.rs` no longer hardcodes the terminal set in SQL;
+  `find_active_by_dedup` derives it from `TaskStatus::terminal_strs()` (single source of
+  truth over `is_terminal`), guarded by an exhaustive-match test in `model.rs`. Added a
+  partial index `idx_tasks_dedup` on `tasks(dedup_key)`.
+- ✅ DST `.single().unwrap()` — was *already* resolved in production code before this pass:
+  `limits.rs` uses non-panicking `resolve_local`/`local_from_millis`. The only remaining
+  `.single().unwrap()` is a test helper (`noon_ms()`) on a fixed non-DST date. The old
+  note here was stale.
 
 ## First moves for the next agent
 
 1. `source ~/.cargo/env && cd /Users/agente/work/pacewright`
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` —
-   confirm the 47-test / clippy-clean baseline before changing anything.
+   confirm the 49-test / clippy-clean baseline before changing anything.
 3. Read `docs/specs/2026-07-07-core-engine-design.md` and the `Adapter`/`RunCtx` trait in
    `crates/core/src/adapter.rs`.
 4. Pick up M2 (browser handle in `RunCtx`) — or ask Federico which milestone he wants next.
