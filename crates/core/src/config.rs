@@ -1,0 +1,118 @@
+use anyhow::{anyhow, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LimitConfig {
+    pub daily_cap: i64,
+    pub min_gap_ms: i64,
+    pub jitter: f64,
+    pub active_start_min: i32,
+    pub active_end_min: i32,
+}
+
+impl LimitConfig {
+    pub fn permissive() -> Self {
+        LimitConfig { daily_cap: i64::MAX, min_gap_ms: 0, jitter: 0.0, active_start_min: 0, active_end_min: 1440 }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Config {
+    pub limits: HashMap<String, LimitConfig>,
+}
+
+#[derive(Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    limits: HashMap<String, RawLimit>,
+}
+#[derive(Deserialize)]
+struct RawLimit {
+    #[serde(default)]
+    daily_cap: Option<i64>,
+    #[serde(default)]
+    min_gap: Option<String>,
+    #[serde(default)]
+    jitter: Option<f64>,
+    #[serde(default)]
+    active: Option<String>,
+}
+
+fn parse_duration_ms(s: &str) -> Result<i64> {
+    let s = s.trim();
+    let (num, mult) = if let Some(v) = s.strip_suffix("ms") { (v, 1) }
+        else if let Some(v) = s.strip_suffix('s') { (v, 1000) }
+        else if let Some(v) = s.strip_suffix('m') { (v, 60_000) }
+        else if let Some(v) = s.strip_suffix('h') { (v, 3_600_000) }
+        else { (s, 1) };
+    Ok(num.trim().parse::<i64>().map_err(|_| anyhow!("bad duration {s}"))? * mult)
+}
+
+fn parse_active(s: &str) -> Result<(i32, i32)> {
+    let (a, b) = s.split_once('-').ok_or_else(|| anyhow!("bad active window {s}"))?;
+    let to_min = |hm: &str| -> Result<i32> {
+        let (h, m) = hm.trim().split_once(':').ok_or_else(|| anyhow!("bad time {hm}"))?;
+        Ok(h.trim().parse::<i32>()? * 60 + m.trim().parse::<i32>()?)
+    };
+    Ok((to_min(a)?, to_min(b)?))
+}
+
+impl Config {
+    pub fn from_toml(s: &str) -> Result<Config> {
+        let raw: RawConfig = toml::from_str(s)?;
+        let mut limits = HashMap::new();
+        for (k, v) in raw.limits {
+            let (astart, aend) = match v.active {
+                Some(a) => parse_active(&a)?,
+                None => (0, 1440),
+            };
+            limits.insert(k, LimitConfig {
+                daily_cap: v.daily_cap.unwrap_or(i64::MAX),
+                min_gap_ms: match v.min_gap { Some(g) => parse_duration_ms(&g)?, None => 0 },
+                jitter: v.jitter.unwrap_or(0.0),
+                active_start_min: astart,
+                active_end_min: aend,
+            });
+        }
+        Ok(Config { limits })
+    }
+
+    pub fn limit_for(&self, key: &str) -> LimitConfig {
+        self.limits.get(key).cloned().unwrap_or_else(LimitConfig::permissive)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_parse_full_config() {
+        let toml = r#"
+[limits."dummy.capped"]
+daily_cap = 3
+min_gap = "8m"
+jitter = 0.5
+active = "09:00-18:00"
+"#;
+        let c = Config::from_toml(toml).unwrap();
+        let l = c.limit_for("dummy.capped");
+        assert_eq!(l.daily_cap, 3);
+        assert_eq!(l.min_gap_ms, 8 * 60_000);
+        assert_eq!(l.jitter, 0.5);
+        assert_eq!(l.active_start_min, 540);
+        assert_eq!(l.active_end_min, 1080);
+    }
+    #[test]
+    fn test_unknown_key_is_permissive() {
+        let c = Config::default();
+        let l = c.limit_for("anything");
+        assert_eq!(l, LimitConfig::permissive());
+    }
+    #[test]
+    fn test_duration_units() {
+        assert_eq!(parse_duration_ms("20s").unwrap(), 20_000);
+        assert_eq!(parse_duration_ms("2h").unwrap(), 7_200_000);
+        assert_eq!(parse_duration_ms("500ms").unwrap(), 500);
+    }
+}

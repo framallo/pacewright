@@ -1,0 +1,15 @@
+# ~/.pacewright/config.toml — copy and edit.
+# Every (platform, action) that needs throttling gets a limit key.
+# Keys not listed here are unrestricted.
+
+[limits."dummy.capped"]
+daily_cap = 3
+min_gap   = "8m"
+jitter    = 0.5
+active    = "09:00-18:00"
+
+# Real keys arrive with their adapters (M3+):
+# [limits."linkedin.post"]           daily_cap = 3   min_gap = "45m"  jitter = 0.5  active = "09:00-18:00"
+# [limits."linkedin.comment"]        daily_cap = 15  min_gap = "8m"   jitter = 0.5  active = "09:00-18:00"
+# [limits."linkedin.profile_scrape"] daily_cap = 40  min_gap = "20s"  jitter = 0.3
+# [limits."youtube.upload"]          daily_cap = 5   min_gap = "30m"

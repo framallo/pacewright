@@ -1,0 +1,24 @@
+[package]
+name = "pacewright-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+croner.workspace = true
+tracing.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+pacewright-adapter-dummy = { path = "../adapter-dummy" }
+tokio = { workspace = true }
