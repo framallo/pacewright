@@ -4,6 +4,9 @@ use crate::limits::spend_limits;
 use crate::model::{AdapterError, Task, TaskEvent, TaskStatus};
 use crate::store::Store;
 use croner::Cron;
+use futures_util::FutureExt;
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 
 pub fn backoff_ms(attempts: i64) -> i64 {
     let base = 1000i64.saturating_mul(1i64 << attempts.min(20));
@@ -23,6 +26,27 @@ fn event(task: &Task, from: TaskStatus, to: TaskStatus, at: i64, detail: serde_j
     TaskEvent { task_id: task.id.clone(), at, from_status: Some(from), to_status: to, detail }
 }
 
+/// Best-effort extraction of a human-readable message from a caught panic payload
+/// (`std::panic::catch_unwind`'s `Err` value). Panics raised via `panic!("...")`,
+/// `.unwrap()`, or `.expect("...")` carry a `&str` or `String` payload; anything else
+/// falls back to a generic message rather than failing to report at all.
+///
+/// Deliberately takes the boxed payload by value instead of a `&dyn Any` reference.
+/// The boxed trait object type also satisfies `Any`'s own blanket impl, so coercing a
+/// reference to the box at a function-argument boundary can unsize the box itself into
+/// the trait object instead of dereferencing to the inner payload, and every
+/// `downcast_ref` on it then misses. Calling `.downcast_ref()` directly on the owned box
+/// uses ordinary method-call autoderef and reaches the real inner value.
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "adapter panicked with a non-string payload".to_string()
+    }
+}
+
 pub async fn run_task(
     store: &Store, adapter: &dyn Adapter, clock: &dyn Clock, mut task: Task,
 ) -> rusqlite::Result<()> {
@@ -34,7 +58,15 @@ pub async fn run_task(
     store.append_event(&event(&task, prev, TaskStatus::Running, now, serde_json::json!({})))?;
 
     let ctx = RunCtx { task_id: task.id.clone() };
-    let result = adapter.execute(&ctx, &task.action, task.params.clone()).await;
+    // Adapters are third-party-ish, unreviewed code from the engine's point of view
+    // (M2+ will add browser-driving adapters that shell out / scrape). A panic inside
+    // `execute()` must not take down the tick loop or the daemon: catch it here and
+    // fold it into the same Terminal path as any other unrecoverable adapter error, so
+    // it fails just that task with a normal audit trail instead of crashing the process.
+    let result = match AssertUnwindSafe(adapter.execute(&ctx, &task.action, task.params.clone())).catch_unwind().await {
+        Ok(r) => r,
+        Err(panic_payload) => Err(AdapterError::Terminal(format!("adapter panicked: {}", panic_message(panic_payload)))),
+    };
     let now = clock.now_ms();
 
     match result {
@@ -128,6 +160,7 @@ mod tests {
                     let n = { let mut g = self.flaky.lock().unwrap(); let e = g.entry(ctx.task_id.clone()).or_insert(0); *e += 1; *e };
                     if n <= 2 { Err(AdapterError::Retryable(format!("try {n}"))) } else { Ok(json!({"ok": n})) }
                 }
+                "panic" => panic!("stub adapter deliberately panicked"),
                 _ => Err(AdapterError::Terminal("unknown".into())),
             }
         }
@@ -165,6 +198,26 @@ mod tests {
         run_task(&store, &a, &clock, g1.clone()).await.unwrap();
         let g2 = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(g2.status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_panicking_adapter_becomes_terminal_failure_with_event() {
+        let store = Store::open_in_memory().unwrap();
+        let clock = TestClock::new(1_000);
+        let a = StubAdapter::default();
+        let t = Task::new_now("dummy", "panic", json!({}), 500);
+        store.insert_task(&t).unwrap();
+        // Must not propagate the panic out of run_task / poison anything.
+        run_task(&store, &a, &clock, t.clone()).await.unwrap();
+        let got = store.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Failed);
+        assert!(got.last_error.as_deref().unwrap_or("").contains("panicked"));
+        assert!(got.last_error.as_deref().unwrap_or("").contains("stub adapter deliberately panicked"));
+
+        let events = store.events_for(&t.id).unwrap();
+        let last = events.last().unwrap();
+        assert_eq!(last.to_status, TaskStatus::Failed);
+        assert_eq!(last.from_status, Some(TaskStatus::Running));
     }
 
     #[tokio::test]

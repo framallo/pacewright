@@ -26,6 +26,7 @@ impl Adapter for DummyAdapter {
             ActionSpec { name: "flaky".into(), limit_keys: vec![], params_schema: json!({"fail_times":"number"}), description: "fails then succeeds".into() },
             ActionSpec { name: "always_fail".into(), limit_keys: vec![], params_schema: Value::Null, description: "terminal error".into() },
             ActionSpec { name: "rate_heavy".into(), limit_keys: vec!["dummy.capped".into()], params_schema: Value::Null, description: "spends dummy.capped".into() },
+            ActionSpec { name: "panic".into(), limit_keys: vec![], params_schema: Value::Null, description: "deliberately panics, for exercising panic isolation".into() },
         ]
     }
 
@@ -38,6 +39,7 @@ impl Adapter for DummyAdapter {
                 Ok(json!({"slept_ms": ms}))
             }
             "always_fail" => Err(AdapterError::Terminal("always fails".into())),
+            "panic" => panic!("dummy adapter deliberately panicked (action=panic, task={})", ctx.task_id),
             "flaky" => {
                 let fail_times = params.get("fail_times").and_then(|v| v.as_u64()).unwrap_or(1);
                 let mut st = self.flaky_state.lock().unwrap();
@@ -80,5 +82,14 @@ mod tests {
     async fn test_rate_heavy_declares_limit_key() {
         let a = DummyAdapter::new();
         assert_eq!(a.limit_keys_for("rate_heavy"), vec!["dummy.capped".to_string()]);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "dummy adapter deliberately panicked")]
+    async fn test_panic_action_panics() {
+        let a = DummyAdapter::new();
+        // Exercises the raw adapter behavior in isolation (no catch_unwind here);
+        // the runner-level isolation is covered in pacewright-core's runner/engine tests.
+        let _ = a.execute(&ctx("t"), "panic", Value::Null).await;
     }
 }
