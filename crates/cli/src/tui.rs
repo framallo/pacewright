@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::TimeZone;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -10,6 +11,19 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::client::call;
+
+/// The effective time a task is scheduled to run, formatted in local time.
+/// A deferred task's `next_eligible_at` (when set) wins over `scheduled_for`,
+/// so the column shows when the task will actually next be eligible.
+fn fmt_run_at(t: &serde_json::Value) -> String {
+    let ms = t["next_eligible_at"]
+        .as_i64()
+        .or_else(|| t["scheduled_for"].as_i64());
+    match ms.and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single()) {
+        Some(dt) => dt.format("%m-%d %H:%M:%S").to_string(),
+        None => "-".to_string(),
+    }
+}
 
 pub async fn run(sock: &Path) -> Result<()> {
     enable_raw_mode()?;
@@ -64,6 +78,7 @@ async fn run_loop<B: Backend>(sock: &Path, terminal: &mut Terminal<B>) -> Result
                         Cell::from(t["action"].as_str().unwrap_or("").to_string()),
                         Cell::from(t["status"].as_str().unwrap_or("").to_string()),
                         Cell::from(t["attempts"].to_string()),
+                        Cell::from(fmt_run_at(t)),
                     ])
                 })
                 .collect();
@@ -73,9 +88,13 @@ async fn run_loop<B: Backend>(sock: &Path, terminal: &mut Terminal<B>) -> Result
                 Constraint::Length(16),
                 Constraint::Length(12),
                 Constraint::Length(6),
+                Constraint::Length(17),
             ];
             let table = Table::new(rows, widths)
-                .header(Row::new(vec!["id", "adapter", "action", "status", "try"]).style(Style::new().bold()))
+                .header(
+                    Row::new(vec!["id", "adapter", "action", "status", "try", "run at"])
+                        .style(Style::new().bold()),
+                )
                 .block(Block::default().borders(Borders::ALL).title(header));
             f.render_widget(table, area);
         })?;

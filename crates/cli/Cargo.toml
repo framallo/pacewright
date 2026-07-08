@@ -16,3 +16,4 @@ anyhow.workspace = true
 clap.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+chrono.workspace = true
