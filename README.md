@@ -4,7 +4,7 @@ A **wright** (craftsman) of **pace** — a Rust tool that **queues, schedules, a
 
 pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](https://postiz.com)) with one background service you drive from a CLI, a live TUI, an MCP server, or a desktop app. It is built to automate LinkedIn, Riverside, and YouTube through their UIs without tripping bot-detection — the safety comes from driving a real, logged-in browser over CDP and from a scheduler that enforces daily caps, minimum gaps, active-hours windows, and jitter.
 
-> **Status: Milestone 1 (core engine) complete.** The engine — queue, scheduler, pacing/limits, runner, durable tracking — is done, tested (42 tests, `clippy -D warnings` clean), and proven end-to-end against a browser-free **DummyAdapter**. Real platform adapters, the MCP server, and the Tauri GUI are later milestones.
+> **Status: Milestone 1 (core engine) complete.** The engine — queue, scheduler, pacing/limits, runner, durable tracking — is done, tested (47 tests, `clippy -D warnings` clean), and proven end-to-end against a browser-free **DummyAdapter**. Real platform adapters, the MCP server, and the Tauri GUI are later milestones.
 
 ---
 
@@ -39,7 +39,7 @@ The engine is **platform-agnostic**. Adapters implement one trait (`execute(acti
 | `pacewright-proto` | JSON-RPC request/response wire types shared by daemon + clients |
 | `pacewright-daemon` | `pacewrightd` — Unix-socket server + 1s tick loop |
 | `pacewright-cli` | `pacewright` (alias `pcw`) — client subcommands + live ratatui TUI |
-| `pacewright-adapter-dummy` | reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`) for testing the engine |
+| `pacewright-adapter-dummy` | reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`/`panic`) for testing the engine |
 
 ## Build
 
@@ -131,7 +131,6 @@ Intentionally deferred to later milestones, not oversights:
 - **`set_limit` RPC** — limits are set via `config.toml` + restart; no runtime RPC yet.
 - **`run_now --force`** — resets `scheduled_for`/clears `next_eligible_at` (re-queues now) but does not yet override an active limit defer.
 - **`subscribe` push** — the TUI polls `list` + `status` each second instead.
-- **Adapter-panic isolation** at the runner boundary lands in M2. The tick loop already survives a panic in `tick()` (so one bad tick can't freeze the scheduler), but a panicking adapter call within a tick is still a gap.
 - **Single-instance guard** is best-effort (`AddrInUse` refusal, no lock file); launchd enforces one instance in practice.
 
 ## Design docs

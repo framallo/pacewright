@@ -79,6 +79,35 @@ async fn test_pause_adapter_skips_only_that_adapter() {
 }
 
 #[tokio::test]
+async fn test_panic_in_adapter_is_isolated_and_tick_continues() {
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    // Order matters: the panicking task is scheduled first (lower scheduled_for), so if
+    // the panic ever escaped run_task and unwound the tick loop, the echo task below
+    // would never run.
+    let panic_id = e.add_task(Task::new_now("dummy", "panic", serde_json::json!({}), 100)).unwrap();
+    let echo_id = e.add_task(Task::new_now("dummy", "echo", serde_json::json!({"a": 1}), 200)).unwrap();
+
+    e.tick().await.unwrap();
+
+    let panicked = e.store.get_task(&panic_id).unwrap().unwrap();
+    assert_eq!(panicked.status, TaskStatus::Failed);
+    assert!(panicked.last_error.as_deref().unwrap_or("").contains("panicked"));
+    let events = e.store.events_for(&panic_id).unwrap();
+    let last = events.last().unwrap();
+    assert_eq!(last.to_status, TaskStatus::Failed);
+
+    // The tick loop survived the panic and kept processing the rest of the batch.
+    let echoed = e.store.get_task(&echo_id).unwrap().unwrap();
+    assert_eq!(echoed.status, TaskStatus::Succeeded);
+
+    // The engine itself is still usable for subsequent ticks.
+    let after_id = e.add_task(Task::new_now("dummy", "echo", serde_json::json!({"b": 2}), 300)).unwrap();
+    e.tick().await.unwrap();
+    assert_eq!(e.store.get_task(&after_id).unwrap().unwrap().status, TaskStatus::Succeeded);
+}
+
+#[tokio::test]
 async fn test_cap_defers_fourth_rate_heavy() {
     let clock = TestClock::new({
         // noon local on 2026-07-07 so active window 00:00-24:00 default is fine
