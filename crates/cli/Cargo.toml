@@ -17,3 +17,7 @@ clap.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 chrono.workspace = true
+kdl.workspace = true
+toml.workspace = true
+uuid.workspace = true
+serde = { workspace = true }
