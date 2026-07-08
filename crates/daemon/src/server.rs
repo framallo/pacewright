@@ -22,7 +22,7 @@ fn status_from_opt(s: &Option<String>) -> Option<TaskStatus> {
 }
 
 pub async fn handle_request(engine: &Arc<Mutex<Engine>>, req: Request) -> Response {
-    let e = engine.lock().await;
+    let mut e = engine.lock().await;
     let now = e.clock.now_ms();
     let res: Result<serde_json::Value, String> = (|| {
         match req {
@@ -87,17 +87,15 @@ pub async fn handle_request(engine: &Arc<Mutex<Engine>>, req: Request) -> Respon
             Request::Status => {
                 let pending = e.store.tasks_in_status(TaskStatus::Pending).map_err(|e| e.to_string())?.len();
                 let running = e.store.tasks_in_status(TaskStatus::Running).map_err(|e| e.to_string())?.len();
-                Ok(serde_json::json!({ "pending": pending, "running": running }))
+                Ok(serde_json::json!({ "pending": pending, "running": running, "paused": e.paused_scopes() }))
             }
-            // M1: pause/resume are accepted but no-op beyond acknowledging; full impl in a later task.
-            // NOTE: the brief's or-pattern `Request::Pause { scope } | Request::Resume { scope: _scope @ scope }`
-            // does not compile (binding-mode mismatch across or-pattern arms), so this is split into two
-            // arms that return the identical acknowledgment JSON.
             Request::Pause { scope } => {
-                Ok(serde_json::json!({ "scope": scope, "note": "acknowledged" }))
+                e.pause(scope.clone());
+                Ok(serde_json::json!({ "scope": scope, "paused": true }))
             }
             Request::Resume { scope } => {
-                Ok(serde_json::json!({ "scope": scope, "note": "acknowledged" }))
+                e.resume(&scope);
+                Ok(serde_json::json!({ "scope": scope, "paused": false }))
             }
             Request::Subscribe => Ok(serde_json::json!({ "note": "subscribe stream not enabled on this request path" })),
         }

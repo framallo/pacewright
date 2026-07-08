@@ -49,6 +49,36 @@ async fn test_dedup_returns_existing() {
 }
 
 #[tokio::test]
+async fn test_pause_all_blocks_tick() {
+    let clock = TestClock::new(1_000);
+    let mut e = engine(clock.clone(), Config::default());
+    let id = e.add_task(Task::new_now("dummy", "echo", serde_json::json!({"a":1}), 500)).unwrap();
+
+    e.pause("all".into());
+    e.tick().await.unwrap();
+    assert_eq!(e.store.get_task(&id).unwrap().unwrap().status, TaskStatus::Pending);
+
+    e.resume("all");
+    e.tick().await.unwrap();
+    assert_eq!(e.store.get_task(&id).unwrap().unwrap().status, TaskStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn test_pause_adapter_skips_only_that_adapter() {
+    let clock = TestClock::new(1_000);
+    let mut e = engine(clock.clone(), Config::default());
+
+    e.pause("dummy".into());
+    let id = e.add_task(Task::new_now("dummy", "echo", serde_json::json!({"a":1}), 500)).unwrap();
+    e.tick().await.unwrap();
+    assert_eq!(e.store.get_task(&id).unwrap().unwrap().status, TaskStatus::Pending);
+
+    e.resume("dummy");
+    e.tick().await.unwrap();
+    assert_eq!(e.store.get_task(&id).unwrap().unwrap().status, TaskStatus::Succeeded);
+}
+
+#[tokio::test]
 async fn test_cap_defers_fourth_rate_heavy() {
     let clock = TestClock::new({
         // noon local on 2026-07-07 so active window 00:00-24:00 default is fine
