@@ -7,6 +7,8 @@ use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
 use pacewright_adapter_dummy::DummyAdapter;
+use pacewright_adapter_linkedin::LinkedInAdapter;
+use pacewright_browser::CliBrowser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -35,9 +37,15 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::open(db_path.to_str().unwrap())?);
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
-    // M2+: register linkedin/riverside/youtube adapters here.
+    reg.register(Arc::new(LinkedInAdapter::new()));
+    // M5+: register riverside/youtube adapters here.
 
-    let engine = Engine::new(store, reg, cfg, Arc::new(SystemClock), Arc::new(SeededRng::new(rand_seed())));
+    // Lazy: no Chrome process is touched until a task actually drives the browser, so a
+    // daemon on a machine without `chrome-agent` still boots and runs browser-free
+    // adapters. Browser tasks then fail Terminal with a clear message.
+    let browser = Arc::new(CliBrowser::new());
+
+    let engine = Engine::new(store, reg, cfg, Arc::new(SystemClock), Arc::new(SeededRng::new(rand_seed()))).with_browser(browser);
     engine.recover_on_boot()?;
     let engine = Arc::new(Mutex::new(engine));
 

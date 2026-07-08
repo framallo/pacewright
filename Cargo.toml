@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/proto", "crates/daemon", "crates/cli", "crates/adapter-dummy"]
+members = ["crates/core", "crates/proto", "crates/daemon", "crates/cli", "crates/adapter-dummy", "crates/browser", "crates/adapter-linkedin"]
 
 [workspace.package]
 edition = "2021"
@@ -10,7 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process", "fs"] }
 async-trait = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }

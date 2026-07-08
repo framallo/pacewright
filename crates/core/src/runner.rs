@@ -1,4 +1,5 @@
 use crate::adapter::{Adapter, RunCtx};
+use crate::browser::BrowserHandle;
 use crate::clock::Clock;
 use crate::limits::spend_limits;
 use crate::model::{AdapterError, Task, TaskEvent, TaskStatus};
@@ -7,6 +8,7 @@ use croner::Cron;
 use futures_util::FutureExt;
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 pub fn backoff_ms(attempts: i64) -> i64 {
     let base = 1000i64.saturating_mul(1i64 << attempts.min(20));
@@ -48,7 +50,7 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 }
 
 pub async fn run_task(
-    store: &Store, adapter: &dyn Adapter, clock: &dyn Clock, mut task: Task,
+    store: &Store, adapter: &dyn Adapter, clock: &dyn Clock, browser: Arc<dyn BrowserHandle>, mut task: Task,
 ) -> rusqlite::Result<()> {
     let now = clock.now_ms();
     let prev = task.status;
@@ -57,7 +59,7 @@ pub async fn run_task(
     store.update_task(&task)?;
     store.append_event(&event(&task, prev, TaskStatus::Running, now, serde_json::json!({})))?;
 
-    let ctx = RunCtx { task_id: task.id.clone() };
+    let ctx = RunCtx { task_id: task.id.clone(), browser };
     // Adapters are third-party-ish, unreviewed code from the engine's point of view
     // (M2+ will add browser-driving adapters that shell out / scrape). A panic inside
     // `execute()` must not take down the tick loop or the daemon: catch it here and
@@ -166,6 +168,10 @@ mod tests {
         }
     }
 
+    fn fake() -> std::sync::Arc<dyn crate::browser::BrowserHandle> {
+        std::sync::Arc::new(crate::browser::NullBrowser)
+    }
+
     #[tokio::test]
     async fn test_success_sets_result_and_spends_limit() {
         let store = Store::open_in_memory().unwrap();
@@ -173,7 +179,7 @@ mod tests {
         let a = StubAdapter::default();
         let t = Task::new_now("dummy", "rate_heavy", json!({"n":1}), 500);
         store.insert_task(&t).unwrap();
-        run_task(&store, &a, &clock, t.clone()).await.unwrap();
+        run_task(&store, &a, &clock, fake(), t.clone()).await.unwrap();
         let got = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(got.status, TaskStatus::Succeeded);
         assert_eq!(got.result, Some(json!({"n":1})));
@@ -189,13 +195,13 @@ mod tests {
         let mut t = Task::new_now("dummy", "flaky", json!({}), 500);
         t.max_attempts = 2;
         store.insert_task(&t).unwrap();
-        run_task(&store, &a, &clock, t.clone()).await.unwrap();
+        run_task(&store, &a, &clock, fake(), t.clone()).await.unwrap();
         let g1 = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(g1.status, TaskStatus::Pending);
         assert_eq!(g1.attempts, 1);
         assert_eq!(g1.scheduled_for, 1_000 + backoff_ms(1));
         // second attempt hits max_attempts -> failed
-        run_task(&store, &a, &clock, g1.clone()).await.unwrap();
+        run_task(&store, &a, &clock, fake(), g1.clone()).await.unwrap();
         let g2 = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(g2.status, TaskStatus::Failed);
     }
@@ -208,7 +214,7 @@ mod tests {
         let t = Task::new_now("dummy", "panic", json!({}), 500);
         store.insert_task(&t).unwrap();
         // Must not propagate the panic out of run_task / poison anything.
-        run_task(&store, &a, &clock, t.clone()).await.unwrap();
+        run_task(&store, &a, &clock, fake(), t.clone()).await.unwrap();
         let got = store.get_task(&t.id).unwrap().unwrap();
         assert_eq!(got.status, TaskStatus::Failed);
         assert!(got.last_error.as_deref().unwrap_or("").contains("panicked"));
@@ -227,7 +233,7 @@ mod tests {
         let a = StubAdapter::default();
         let t = Task::new_now("dummy", "always_fail", json!({}), 500);
         store.insert_task(&t).unwrap();
-        run_task(&store, &a, &clock, t.clone()).await.unwrap();
+        run_task(&store, &a, &clock, fake(), t.clone()).await.unwrap();
         assert_eq!(store.get_task(&t.id).unwrap().unwrap().status, TaskStatus::Failed);
     }
 
@@ -239,7 +245,7 @@ mod tests {
         let mut t = Task::new_now("dummy", "echo", json!({}), 500);
         t.recurrence = Some("0 0 * * * *".into()); // top of every hour (croner 6-field)
         store.insert_task(&t).unwrap();
-        run_task(&store, &a, &clock, t.clone()).await.unwrap();
+        run_task(&store, &a, &clock, fake(), t.clone()).await.unwrap();
         // original succeeded + one new pending recurrence
         let pend = store.tasks_in_status(TaskStatus::Pending).unwrap();
         assert_eq!(pend.len(), 1);

@@ -1,4 +1,5 @@
 use crate::adapter::AdapterRegistry;
+use crate::browser::{BrowserHandle, NullBrowser};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::limits::{check_limits, LimitDecision};
@@ -16,12 +17,23 @@ pub struct Engine {
     pub cfg: Config,
     pub clock: Arc<dyn Clock>,
     pub rng: Arc<dyn Rng>,
+    /// Shared with every task the runner executes. Defaults to `NullBrowser`;
+    /// the daemon swaps in a real handle via `with_browser`.
+    pub browser: Arc<dyn BrowserHandle>,
     paused: HashSet<String>,
 }
 
 impl Engine {
     pub fn new(store: Arc<Store>, registry: AdapterRegistry, cfg: Config, clock: Arc<dyn Clock>, rng: Arc<dyn Rng>) -> Self {
-        Engine { store, registry, cfg, clock, rng, paused: HashSet::new() }
+        Engine { store, registry, cfg, clock, rng, browser: Arc::new(NullBrowser), paused: HashSet::new() }
+    }
+
+    /// Attach the browser every browser-driving adapter will receive in its `RunCtx`.
+    /// Kept out of `new` so browser-free callers (and the whole M1 test suite) stay
+    /// untouched, and so a daemon with no browser configured still boots.
+    pub fn with_browser(mut self, browser: Arc<dyn BrowserHandle>) -> Self {
+        self.browser = browser;
+        self
     }
 
     /// Pause the given scope: `"all"` (or the alias `"daemon"`) pauses the
@@ -106,7 +118,7 @@ impl Engine {
             let decision = check_limits(&self.store, &self.cfg, &*self.clock, &*self.rng, &keys)?;
             match decision {
                 LimitDecision::Allow => {
-                    run_task(&self.store, &*adapter, &*self.clock, task).await?;
+                    run_task(&self.store, &*adapter, &*self.clock, self.browser.clone(), task).await?;
                 }
                 LimitDecision::Defer { until_ms, reason } => {
                     let now = self.clock.now_ms();

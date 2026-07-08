@@ -649,6 +649,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pacewright-adapter-linkedin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pacewright-core",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "pacewright-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pacewright-core",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pacewright-cli"
 version = "0.1.0"
 dependencies = [
@@ -690,6 +712,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "pacewright-adapter-dummy",
+ "pacewright-adapter-linkedin",
+ "pacewright-browser",
  "pacewright-core",
  "pacewright-proto",
  "serde_json",

@@ -60,7 +60,9 @@ impl Adapter for DummyAdapter {
 mod tests {
     use super::*;
 
-    fn ctx(id: &str) -> RunCtx { RunCtx { task_id: id.into() } }
+    fn ctx(id: &str) -> RunCtx {
+        RunCtx { task_id: id.into(), browser: std::sync::Arc::new(pacewright_core::browser::NullBrowser) }
+    }
 
     #[tokio::test]
     async fn test_echo_and_always_fail() {

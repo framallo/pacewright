@@ -1,5 +1,6 @@
 //! pacewright-core: platform-agnostic task engine.
 pub mod adapter;
+pub mod browser;
 pub mod clock;
 pub mod config;
 pub mod engine;
