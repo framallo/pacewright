@@ -1,4 +1,5 @@
 mod client;
+mod recipe_install;
 mod tui;
 
 use anyhow::Result;
@@ -39,6 +40,17 @@ enum Cmd {
     Adapters,
     Status,
     Tui,
+    /// Manage recipes installed from GitHub repos.
+    #[command(subcommand)]
+    Recipe(RecipeCmd),
+}
+
+#[derive(Subcommand)]
+enum RecipeCmd {
+    /// Install recipes from a GitHub repo: owner/repo[@ref][#subdir].
+    Add { spec: String },
+    /// List installed recipes and their source provenance.
+    List,
 }
 
 #[tokio::main]
@@ -62,6 +74,13 @@ async fn main() -> Result<()> {
         Cmd::Adapters => Request::Adapters,
         Cmd::Status => Request::Status,
         Cmd::Tui => { return tui::run(&sock).await; }
+        // Recipe install is a local filesystem op — no daemon round-trip.
+        Cmd::Recipe(rc) => {
+            return match rc {
+                RecipeCmd::Add { spec } => recipe_install::add(&spec),
+                RecipeCmd::List => recipe_install::list(),
+            };
+        }
     };
     let resp = client::call(&sock, req).await?;
     println!("{}", serde_json::to_string_pretty(&resp)?);
