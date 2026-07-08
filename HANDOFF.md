@@ -1,6 +1,6 @@
 # pacewright — handoff
 
-Last updated: 2026-07-07 (M1-hardening pass). Written for the next agent picking up development.
+Last updated: 2026-07-08 (M2 browser seam + first real LinkedIn task). Written for the next agent.
 
 ## What this is
 
@@ -16,12 +16,15 @@ Full context: `README.md` (architecture, CLI, config, roadmap). Design spec:
 
 ## Repo layout
 
-5 crates under `crates/`:
-- `core` — engine, scheduler, runner, store (SQLite), limits, config, clock, rng, adapter trait. The heart.
+7 crates under `crates/`:
+- `core` — engine, scheduler, runner, store (SQLite), limits, config, clock, rng, adapter trait,
+  `BrowserHandle` trait + test doubles. The heart. Stays browser-free (trait only, no impl).
 - `proto` — JSON-RPC wire types shared by daemon + clients.
 - `daemon` — `pacewrightd`: Unix-socket JSON-RPC server + 1s tick loop.
 - `cli` — `pacewright`/`pcw`: client subcommands + ratatui TUI.
 - `adapter-dummy` — reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`/`panic`) for testing without a browser.
+- `browser` — `CliBrowser`: the real `BrowserHandle`, drives the `chrome-agent` CLI.
+- `adapter-linkedin` — `LinkedInAdapter`: `scrape_profile` (M3 first slice).
 
 ## Non-negotiable design invariants (do not break these)
 
@@ -47,7 +50,8 @@ Start every shell with: `source ~/.cargo/env` (Rust 1.96, pinned via `rust-toolc
 `rustfmt`/`clippy` are installed for the 1.96.1 toolchain.
 
 Gates that must stay green before any commit:
-- `cargo test --workspace` — currently **49 tests, all passing**.
+- `cargo test --workspace` — currently **72 tests, all passing** (+3 `#[ignore]`d live browser
+  tests: `cargo test -p pacewright-browser -- --ignored`, needs `chrome-agent` + Chrome).
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean, zero warnings.
 - `cargo fmt` before committing your own changes.
 
@@ -107,26 +111,75 @@ d650bfa Merge m1-runtime-control: real pause/resume + per-adapter scopes
 
 Progress ledger with full detail: `.superpowers/sdd/progress.md` (gitignored, local only).
 
+## Running a real LinkedIn task (works today)
+
+```bash
+cargo build --release
+./target/release/pacewrightd &                       # or restart the existing one
+./target/release/pacewright adapters                 # linkedin/scrape_profile should be listed
+./target/release/pacewright add linkedin scrape_profile \
+    --params '{"url":"https://www.linkedin.com/in/me/"}'
+./target/release/pacewright get <id>                 # result = scraped profile JSON
+./target/release/pacewright limits                   # linkedin.profile_scrape counter incremented
+```
+
+`/in/me/` resolves to your own profile — it proves the authenticated path **without**
+sending a profile-view notification to a third party. Viewing someone *else's* profile
+while logged in does notify them; keep that in mind before pointing this at leads.
+
+### chrome-agent gotchas (both cost real debugging time — do not relearn them)
+
+1. **`--copy-cookies` only fires when chrome-agent launches a *fresh* browser.**
+   `copy_chrome_cookies` is called inside `launch_browser`; if a session already exists,
+   chrome-agent reuses it and silently skips the copy, so you stay logged out and hit the
+   auth wall. Fix: `chrome-agent --browser pacewright close --purge`, then retry.
+2. **chrome-agent's browsers and pages are *named and global to the machine*.** At the
+   defaults every consumer shares one browser and one page called `default`. The
+   Riverside/podcast tooling on this box drives that page. Because `goto` and `eval` are
+   separate subprocesses, a concurrent consumer can navigate the page between them — we
+   observed an eval intended for a LinkedIn profile return `riverside.com`. `CliBrowser`
+   therefore pins `--browser pacewright --page pacewright` on **every** verb. Never let
+   pacewright touch the `default` page.
+
+Related: `goto` echoes the **requested** URL, not the post-redirect one. Always read the
+settled `location.href`/`document.title` back via `eval` before deciding anything (this is
+how `LinkedInAdapter` detects auth walls). And LinkedIn ships build-hashed class names
+(`e6590096 _3293afb7 …`) — class-based selectors rot instantly; anchor on the `<main>`
+heading and stable text patterns instead.
+
 ## Roadmap — what to build next
 
-M1 (core engine) is DONE. Next milestones from `README.md`:
+M1 (core engine) is DONE. **M2's in-repo browser seam is DONE**, and **M3's first slice
+(`linkedin/scrape_profile`) runs against real LinkedIn.**
 
-| M | Scope |
-|---|---|
-| **M2** | Extend chrome-agent (larger viewport, real CDP input, human mouse movement, `Runtime.enable` audit) + **browser handle in `RunCtx`** |
-| M3 | LinkedIn **profile** adapter (scrape + avatar) — port `linkedin_scraper` to Rust |
-| M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter |
-| M5 | Riverside adapter (extract raw, export magic clips → Spotify → YouTube unlisted) |
-| M6 | YouTube adapter + daily limits |
-| M7 | MCP server + Claude skill |
-| M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz |
+| M | Scope | State |
+|---|---|---|
+| M2a | **Browser handle in `RunCtx`** (`BrowserHandle` trait + `CliBrowser` + `FakeBrowser`) | ✅ done |
+| M2b | Fork chrome-agent → library API + viewport + human mouse movement | 📄 spec + plan written, **not built** |
+| M3 | LinkedIn **profile** adapter | ⏳ `scrape_profile` done; avatar capture not started |
+| M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter | not started |
+| M5 | Riverside adapter (extract raw, export magic clips → Spotify → YouTube unlisted) | not started |
+| M6 | YouTube adapter + daily limits | not started |
+| M7 | MCP server + Claude skill | not started |
+| M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz | not started |
 
-**M2 is the recommended next step.** The seam is already stubbed: `RunCtx` in
-`crates/core/src/adapter.rs` has a `// M2+: pub browser: BrowserHandle` placeholder.
-The whole point of M1's browser-free `DummyAdapter` was to let real browser adapters
-(M3+) drop in behind the same `Adapter` trait once `RunCtx` carries a browser handle.
-Start by defining that handle/type and threading it from the daemon through the runner
-into `execute()`, then a first thin real adapter can prove the seam.
+### The deliberate detour on M2
+
+Federico's approved design (`docs/specs/2026-07-07-chrome-agent-fork-lib.md` + the plan in
+`docs/plans/`) is to **fork `sderosiaux/chrome-agent` into a Rust library** — it is
+published to crates.io but is **binary-only** (`[[bin]]`, `autolib = false`, no `lib.rs`),
+so `cargo add chrome-agent` gives you nothing callable. That fork is still the intended
+substrate.
+
+To get a *working* LinkedIn task without blocking on the fork, `BrowserHandle`'s first impl
+(`CliBrowser`) shells out to the chrome-agent **CLI**. The trait's methods deliberately
+mirror the fork's planned `Page` API (`goto`/`eval`/`screenshot`), so a native
+`chrome_agent::Session`-backed impl drops in behind the same trait with **zero adapter
+changes**. Nothing about the fork plan is invalidated; it just isn't on the critical path.
+
+**Recommended next step:** either (a) build the fork per the existing plan and swap in a
+`NativeBrowser`, or (b) extend the LinkedIn adapter (avatar capture needs `screenshot` +
+the viewport fix, which is exactly what the fork's §5.1 delivers — so (a) unblocks it).
 
 ## Remaining M1 "known gaps" (deferred, not bugs — see README)
 
@@ -144,6 +197,20 @@ into `execute()`, then a first thin real adapter can prove the seam.
   sort it if you ever add a snapshot-style test. (The new `test_pause_resume_via_dispatch`
   in `crates/daemon/src/server.rs` avoids order-dependence with `contains`.)
 - `flaky_state` map in `DummyAdapter` is unbounded (test-only adapter, so harmless).
+- **The tick loop holds the engine lock for the whole task.** `serve()` does
+  `let e = engine.lock().await; e.tick().await`, and `handle_request` also locks the engine.
+  M1's tasks were microseconds; a browser task is seconds-to-90s, so a long
+  `linkedin/scrape_profile` will block every RPC (`status`, `list`, the TUI's 1s poll) until
+  it finishes. Worth fixing before browser tasks get common: run tasks outside the lock, or
+  hold the lock only for store/registry reads.
+- **`CliBrowser` has one page.** Concurrent browser tasks in the same tick would interleave
+  `goto`/`eval` on the same chrome-agent page and corrupt each other, the same way the
+  Riverside tooling corrupted us. Today the engine runs tasks sequentially, so this is
+  latent — but any move to parallel task execution must give each task its own `--page`.
+- `LinkedInAdapter`'s `headline`/`location` are positional guesses over `top_card`. The raw
+  `top_card` array is returned precisely so this can be remapped without a redeploy. Avatar
+  capture (M3's other half) needs `screenshot` + a real viewport (chrome-agent's default
+  caps around ~469px) — i.e. it needs the fork.
 
 **Resolved in the M1-hardening pass (2026-07-07), no longer open:**
 - ✅ Daemon-level RPC round-trip test for `Pause`/`Resume`/`Status` — added
@@ -161,7 +228,11 @@ into `execute()`, then a first thin real adapter can prove the seam.
 
 1. `source ~/.cargo/env && cd /Users/agente/work/pacewright`
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` —
-   confirm the 49-test / clippy-clean baseline before changing anything.
-3. Read `docs/specs/2026-07-07-core-engine-design.md` and the `Adapter`/`RunCtx` trait in
-   `crates/core/src/adapter.rs`.
-4. Pick up M2 (browser handle in `RunCtx`) — or ask Federico which milestone he wants next.
+   confirm the 72-test / clippy-clean baseline before changing anything.
+3. Read `docs/specs/2026-07-07-core-engine-design.md`, then `crates/core/src/browser.rs`
+   (the `BrowserHandle` seam) and `crates/adapter-linkedin/src/lib.rs`.
+4. Prove the stack still works end-to-end: run a real LinkedIn task (see the section above).
+   If it hits an auth wall, re-read the two chrome-agent gotchas — it is almost always the
+   fresh-launch cookie copy.
+5. Then pick up the chrome-agent fork (`docs/plans/2026-07-07-chrome-agent-fork-lib.md`)
+   — or ask Federico which milestone he wants next.
