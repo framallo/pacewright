@@ -1,0 +1,15 @@
+[package]
+name = "pacewright-browser"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+pacewright-core = { path = "../core" }
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
