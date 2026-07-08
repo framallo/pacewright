@@ -8,8 +8,23 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// Every variant, for exhaustive iteration. Adding a status here (the
+    /// compiler will not force it — keep it in sync with the enum) lets
+    /// `terminal_strs` derive the DB terminal-set from `is_terminal` alone,
+    /// so the SQL in `store.rs` can never drift from the Rust definition.
+    pub const ALL: [TaskStatus; 7] = [
+        TaskStatus::Pending, TaskStatus::Blocked, TaskStatus::Deferred, TaskStatus::Running,
+        TaskStatus::Succeeded, TaskStatus::Failed, TaskStatus::Canceled,
+    ];
+
     pub fn is_terminal(&self) -> bool {
         matches!(self, TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled)
+    }
+
+    /// The wire strings of the terminal statuses, derived from `is_terminal`.
+    /// Single source of truth for any query that must exclude finished tasks.
+    pub fn terminal_strs() -> Vec<&'static str> {
+        Self::ALL.iter().filter(|s| s.is_terminal()).map(|s| s.as_str()).collect()
     }
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -119,5 +134,28 @@ mod tests {
     fn test_terminal_flag() {
         assert!(TaskStatus::Succeeded.is_terminal());
         assert!(!TaskStatus::Pending.is_terminal());
+    }
+
+    #[test]
+    fn test_terminal_strs_matches_is_terminal_and_all_is_exhaustive() {
+        // `TaskStatus::ALL` has no compiler-enforced exhaustiveness, so this
+        // match is the guard: add a variant and this fails to compile until it
+        // is both classified here and (by review) appended to `ALL`.
+        for s in TaskStatus::ALL {
+            let expected_terminal = match s {
+                TaskStatus::Pending | TaskStatus::Blocked | TaskStatus::Deferred | TaskStatus::Running => false,
+                TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled => true,
+            };
+            assert_eq!(s.is_terminal(), expected_terminal, "{s:?}");
+        }
+        // Every ALL entry is distinct -> ALL is not missing/duplicating a variant.
+        let mut seen: Vec<&str> = TaskStatus::ALL.iter().map(|s| s.as_str()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), TaskStatus::ALL.len());
+
+        let mut terminal = TaskStatus::terminal_strs();
+        terminal.sort_unstable();
+        assert_eq!(terminal, vec!["canceled", "failed", "succeeded"]);
     }
 }

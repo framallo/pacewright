@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_dedup ON tasks(dedup_key) WHERE dedup_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS task_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,
@@ -145,10 +146,16 @@ impl Store {
 
     pub fn find_active_by_dedup(&self, key: &str) -> rusqlite::Result<Option<Task>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT * FROM tasks WHERE dedup_key=?1 AND status NOT IN ('succeeded','failed','canceled') LIMIT 1",
-            params![key], Self::row_to_task,
-        ).optional()
+        // Exclude terminal statuses derived from `TaskStatus::is_terminal` (single
+        // source of truth) rather than hardcoding the set in SQL — add a status and
+        // this stays correct. Bind `key` + each terminal string positionally.
+        let terminal = TaskStatus::terminal_strs();
+        let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT * FROM tasks WHERE dedup_key=? AND status NOT IN ({placeholders}) LIMIT 1");
+        let mut binds: Vec<&str> = Vec::with_capacity(1 + terminal.len());
+        binds.push(key);
+        binds.extend(terminal.iter().copied());
+        conn.query_row(&sql, rusqlite::params_from_iter(binds), Self::row_to_task).optional()
     }
 
     pub fn append_event(&self, e: &TaskEvent) -> rusqlite::Result<()> {
