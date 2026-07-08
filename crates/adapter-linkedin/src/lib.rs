@@ -14,18 +14,61 @@ use serde_json::{json, Value};
 
 pub const LIMIT_PROFILE_SCRAPE: &str = "linkedin.profile_scrape";
 
-/// Pull the fields we care about out of a rendered profile page. `h1` is the one
-/// durable anchor for the name; LinkedIn's utility classes churn, so every other
-/// selector is best-effort and yields `null` rather than failing the task.
-/// Returns a JSON *string* — chrome-agent's `eval` hands back whatever the
-/// expression evaluates to, and stringifying keeps nested objects intact.
+/// Extract a profile from the rendered page.
+///
+/// LinkedIn ships build-hashed class names (`e6590096 _3293afb7 …`), so class-based
+/// selectors rot immediately — the previous version of this script keyed off
+/// `.text-body-medium` and silently returned nulls. We anchor only on things that
+/// are structurally or lexically stable:
+///
+/// - `name` — the single heading in `<main>` (`h1` on other people's profiles, `h2`
+///   on your own self-view), falling back to the page title.
+/// - `followers`/`connections` — matched on their trailing word, not markup.
+/// - `top_card` — the ordered leaf texts, returned raw so downstream can remap
+///   without a redeploy when LinkedIn reshuffles the card.
+///
+/// `headline`/`location` are positional best-effort over `top_card`, and are
+/// explicitly allowed to be null rather than failing the task.
+///
+/// Also returns the *settled* `url`/`title`: `goto` reports the pre-redirect URL, so
+/// this is the only trustworthy view of where we actually ended up.
+///
+/// Returns a JSON *string* — chrome-agent's `eval` hands back the expression's value,
+/// and stringifying keeps the nested object intact.
 const PROFILE_JS: &str = r#"(() => {
-  const txt = (sel) => { const e = document.querySelector(sel); return e && e.innerText ? e.innerText.trim() : null; };
+  const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const main = document.querySelector("main") || document.body;
+
+  const heading = main.querySelector("h1") || main.querySelector("h2");
+  let name = heading ? clean(heading.innerText) : "";
+  if (!name) name = clean((document.title || "").split("|")[0]);
+
+  const lines = [];
+  const seen = new Set();
+  main.querySelectorAll("p, span, div").forEach((e) => {
+    if (e.children.length !== 0) return;
+    const t = clean(e.innerText);
+    if (!t || t.length > 100) return;
+    if (/^[·•|,\s-]*$/.test(t)) return;
+    if (seen.has(t)) return;
+    seen.add(t);
+    if (lines.length < 12) lines.push(t);
+  });
+
+  const followers = lines.find((l) => /followers?$/i.test(l)) || null;
+  const connections = lines.find((l) => /connections?$/i.test(l)) || null;
+  const skip = new Set([followers, connections, name].filter(Boolean));
+  const rest = lines.filter((l) => !skip.has(l) && !/^contact info$/i.test(l));
+
   return JSON.stringify({
-    name: txt('h1'),
-    headline: txt('.text-body-medium'),
-    location: txt('.text-body-small.inline.t-black--light.break-words'),
-    url: location.href
+    name: name || null,
+    headline: rest[0] || null,
+    location: rest[1] || null,
+    followers: followers,
+    connections: connections,
+    top_card: lines,
+    url: location.href,
+    title: document.title
   });
 })()"#;
 
@@ -77,6 +120,14 @@ pub fn unwrap_eval_json(v: Value) -> Result<Value, AdapterError> {
     }
 }
 
+fn auth_wall_error(landed: &str) -> AdapterError {
+    AdapterError::Terminal(format!(
+        "LinkedIn auth wall at {landed} — log Chrome into LinkedIn. Note chrome-agent only \
+         copies cookies when it launches a *fresh* browser, so an already-running session \
+         stays logged out: `chrome-agent --browser pacewright close --purge` then retry."
+    ))
+}
+
 #[derive(Default)]
 pub struct LinkedInAdapter;
 
@@ -118,20 +169,34 @@ impl Adapter for LinkedInAdapter {
                 // `?` converts BrowserError -> AdapterError: navigation/io are Retryable
                 // (the runner backs off), unavailable/eval are Terminal.
                 let nav = ctx.browser.goto(url).await?;
+                // Fast path: goto already reports an auth wall. Don't waste an eval.
                 if is_auth_wall(&nav) {
-                    return Err(AdapterError::Terminal(format!(
-                        "LinkedIn auth wall at {} — log Chrome into LinkedIn (chrome-agent --copy-cookies reads that profile)",
-                        nav.url
-                    )));
+                    return Err(auth_wall_error(&nav.url));
                 }
 
                 let raw = ctx.browser.eval(PROFILE_JS).await?;
                 let mut profile = unwrap_eval_json(raw)?;
 
-                // Record where we actually landed; LinkedIn rewrites /in/<slug> URLs.
+                // `goto` reports the URL it *requested*, before LinkedIn's redirect —
+                // /in/me/ stays /in/me/ even when the browser lands on /authwall.
+                // The settled `location.href`/`document.title` read back by PROFILE_JS
+                // is the only trustworthy view, so the auth-wall check must run against
+                // that. (Missing this let a logged-out scrape look like a success.)
+                let settled = NavInfo {
+                    url: profile.get("url").and_then(Value::as_str).unwrap_or(&nav.url).to_string(),
+                    title: profile.get("title").and_then(Value::as_str).unwrap_or(&nav.title).to_string(),
+                };
+                if is_auth_wall(&settled) {
+                    return Err(auth_wall_error(&settled.url));
+                }
+
                 if let Value::Object(ref mut m) = profile {
-                    m.insert("landed_url".into(), json!(nav.url));
-                    m.insert("page_title".into(), json!(nav.title));
+                    // Normalize the shape: what we asked for vs. where we ended up.
+                    let landed = m.remove("url").unwrap_or(json!(settled.url));
+                    let title = m.remove("title").unwrap_or(json!(settled.title));
+                    m.insert("requested_url".into(), json!(url));
+                    m.insert("landed_url".into(), landed);
+                    m.insert("page_title".into(), title);
                 }
                 tracing::info!(task = %ctx.task_id, "scraped linkedin profile {url}");
                 Ok(profile)
@@ -209,26 +274,55 @@ mod tests {
 
     #[tokio::test]
     async fn scrapes_a_profile_through_the_browser_handle() {
+        // The settled url differs from the requested one — LinkedIn rewrites /in/me/.
         let fake = FakeBrowser::new()
-            .with_nav("https://www.linkedin.com/in/foo/", "Foo Bar | LinkedIn")
-            .with_eval(PROFILE_JS, json!("{\"name\":\"Foo Bar\",\"headline\":\"CTO\",\"location\":\"MX\",\"url\":\"https://www.linkedin.com/in/foo/\"}"));
+            .with_nav("https://www.linkedin.com/in/me/", "Foo Bar | LinkedIn")
+            .with_eval(PROFILE_JS, json!("{\"name\":\"Foo Bar\",\"headline\":\"CTO\",\"location\":\"MX\",\"followers\":\"10 followers\",\"url\":\"https://www.linkedin.com/in/foo/?isSelfProfile=true\",\"title\":\"Foo Bar | LinkedIn\"}"));
         let b = Arc::new(fake);
         let out = LinkedInAdapter::new()
             .execute(
                 &ctx_with(b.clone()),
                 "scrape_profile",
-                json!({"url":"https://www.linkedin.com/in/foo/"}),
+                json!({"url":"https://www.linkedin.com/in/me/"}),
             )
             .await
             .unwrap();
         assert_eq!(out["name"], "Foo Bar");
         assert_eq!(out["headline"], "CTO");
-        assert_eq!(out["landed_url"], "https://www.linkedin.com/in/foo/");
+        assert_eq!(out["followers"], "10 followers");
+        assert_eq!(out["requested_url"], "https://www.linkedin.com/in/me/");
+        // landed_url comes from the settled location.href, not goto's echo
+        assert_eq!(out["landed_url"], "https://www.linkedin.com/in/foo/?isSelfProfile=true");
         assert_eq!(out["page_title"], "Foo Bar | LinkedIn");
+        // raw keys are normalized away
+        assert!(out.get("url").is_none() && out.get("title").is_none());
         // it really drove the browser: goto then eval
         assert_eq!(b.calls().len(), 2);
-        assert!(b.calls()[0].starts_with("goto:https://www.linkedin.com/in/foo/"));
+        assert!(b.calls()[0].starts_with("goto:https://www.linkedin.com/in/me/"));
         assert!(b.calls()[1].starts_with("eval:"));
+    }
+
+    /// Regression for a bug the first live run exposed: `goto` echoes the *requested*
+    /// URL, so a client-side redirect to /authwall was invisible to the pre-eval check.
+    /// A logged-out scrape must fail Terminal, never return a "successful" profile.
+    #[tokio::test]
+    async fn redirect_to_authwall_after_goto_is_caught_from_settled_state() {
+        let fake = Arc::new(
+            FakeBrowser::new()
+                // goto looks perfectly clean...
+                .with_nav("https://www.linkedin.com/in/me/", "")
+                // ...but the settled page is the auth wall.
+                .with_eval(PROFILE_JS, json!("{\"name\":\"Join LinkedIn\",\"url\":\"https://www.linkedin.com/authwall?trk=bf\",\"title\":\"Sign Up | LinkedIn\"}")),
+        );
+        let err = LinkedInAdapter::new()
+            .execute(
+                &ctx_with(fake),
+                "scrape_profile",
+                json!({"url":"https://www.linkedin.com/in/me/"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdapterError::Terminal(ref m) if m.contains("auth wall")), "got {err:?}");
     }
 
     #[tokio::test]

@@ -14,6 +14,15 @@ use async_trait::async_trait;
 use pacewright_core::browser::{BrowserError, BrowserHandle, NavInfo};
 use serde_json::Value;
 
+/// chrome-agent's browsers and pages are *named* and global to the machine. Left at
+/// the defaults, every consumer shares one browser and one page called `default` —
+/// so an unrelated tool (the Riverside/podcast tooling on this box does exactly
+/// this) can navigate the page between our `goto` and our `eval`, and we would
+/// silently scrape the wrong site and report success. pacewright therefore pins its
+/// own `--browser` and `--page` names and never touches `default`.
+pub const DEFAULT_BROWSER_NAME: &str = "pacewright";
+pub const DEFAULT_PAGE_NAME: &str = "pacewright";
+
 /// Session-establishing flags are passed on `goto`, which is what opens/reuses the
 /// page; later verbs (`eval`, `screenshot`) act on that already-stealthed session.
 pub struct CliBrowser {
@@ -21,6 +30,8 @@ pub struct CliBrowser {
     timeout_secs: u64,
     stealth: bool,
     copy_cookies: bool,
+    browser_name: String,
+    page_name: String,
 }
 
 impl Default for CliBrowser {
@@ -36,6 +47,8 @@ impl CliBrowser {
             timeout_secs: 90,
             stealth: true,
             copy_cookies: true,
+            browser_name: DEFAULT_BROWSER_NAME.to_string(),
+            page_name: DEFAULT_PAGE_NAME.to_string(),
         }
     }
     pub fn bin(mut self, bin: impl Into<String>) -> Self {
@@ -54,13 +67,29 @@ impl CliBrowser {
         self.copy_cookies = on;
         self
     }
+    /// Override the dedicated chrome-agent browser profile name.
+    pub fn browser_name(mut self, name: impl Into<String>) -> Self {
+        self.browser_name = name.into();
+        self
+    }
+    /// Override the dedicated chrome-agent page (tab) name.
+    pub fn page_name(mut self, name: impl Into<String>) -> Self {
+        self.page_name = name.into();
+        self
+    }
 
-    /// Global flags that must precede the subcommand.
+    /// Global flags that must precede the subcommand. `--browser`/`--page` go on
+    /// *every* verb, not just `goto`: they are what bind each short-lived
+    /// subprocess to the same isolated tab.
     fn global_args(&self, session_flags: bool) -> Vec<String> {
         let mut v = vec![
             "--json".to_string(),
             "--timeout".to_string(),
             self.timeout_secs.to_string(),
+            "--browser".to_string(),
+            self.browser_name.clone(),
+            "--page".to_string(),
+            self.page_name.clone(),
         ];
         if session_flags {
             if self.stealth {
@@ -214,6 +243,31 @@ mod tests {
         let v = serde_json::json!({"ok": false, "error": "boom"});
         let e = check_ok(&v).unwrap_err();
         assert!(e.to_string().contains("boom"));
+    }
+
+    /// Regression: every verb must be pinned to pacewright's own browser+page, or a
+    /// concurrent chrome-agent consumer can navigate the shared `default` page
+    /// between our goto and our eval, and we scrape the wrong site as "success".
+    #[test]
+    fn every_verb_is_pinned_to_a_named_browser_and_page() {
+        let b = CliBrowser::new();
+        for session_flags in [true, false] {
+            let g = b.global_args(session_flags);
+            let pos = |flag: &str| g.iter().position(|a| a == flag).expect("flag present");
+            assert_eq!(g[pos("--browser") + 1], DEFAULT_BROWSER_NAME);
+            assert_eq!(g[pos("--page") + 1], DEFAULT_PAGE_NAME);
+        }
+        // and never the global default page that other tools use
+        assert_ne!(DEFAULT_PAGE_NAME, "default");
+        assert_ne!(DEFAULT_BROWSER_NAME, "default");
+    }
+
+    #[test]
+    fn browser_and_page_names_are_overridable() {
+        let g = CliBrowser::new().browser_name("b1").page_name("p1").global_args(false);
+        let pos = |flag: &str| g.iter().position(|a| a == flag).unwrap();
+        assert_eq!(g[pos("--browser") + 1], "b1");
+        assert_eq!(g[pos("--page") + 1], "p1");
     }
 
     #[test]
