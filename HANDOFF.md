@@ -75,39 +75,38 @@ Commit-message trailer convention used in this repo:
 ## State of the tree (git log, newest first)
 
 ```
+7f8372a docs: refresh HANDOFF — browser seam, first real LinkedIn task, chrome-agent gotchas
+c4f26c7 Merge m2-browser-seam: BrowserHandle seam + CliBrowser + LinkedIn adapter
+cb6ad99 fix(browser,linkedin): isolate chrome-agent page; check settled state after goto
+382218a feat: CliBrowser + LinkedIn profile adapter, wired into the daemon
+3d0e143 feat(core): BrowserHandle seam — trait in RunCtx, threaded through the runner
+d3164f7 docs: add implementation plan for chrome-agent fork (M2 workstream 1)
+4a218ad docs: add chrome-agent fork spec (M2 workstream 1 — lib API + §9 extensions)
 e97abe4 Merge m1-hardening: single-source terminal set, dedup index, pause/resume RPC test
-4b962f7 harden(core): single-source terminal set, dedup index, pause/resume RPC test
-81e278a docs: add HANDOFF.md for the next agent
-953a39e Merge m1-adapter-panic-isolation: catch adapter panics at the runner boundary
-66ad34a feat(core): isolate adapter panics at the runner boundary
-d650bfa Merge m1-runtime-control: real pause/resume + per-adapter scopes
-1717a84 feat(core): real pause/resume for daemon + per-adapter scopes
 ```
 
-`main` is the integration branch. All old `m1-*` feature branches are fully merged into
-`main` and deleted — history is preserved by the `--no-ff` merge commits above.
+`main` is the integration branch. All old feature branches are fully merged into `main`
+and deleted — history is preserved by the `--no-ff` merge commits above.
 
 ## What just landed (this session)
 
-1. **Real pause/resume + per-adapter scopes** (was an M1 acknowledged no-op).
-   `Engine` holds a `paused: HashSet<String>`. `pause("all"|"daemon")` stops the whole
-   tick loop (`tick()` returns early before any store I/O); `pause("<adapter>")` skips
-   only that adapter's tasks (they stay `Pending`). RPC `Pause`/`Resume`/`Status` wired
-   through `crates/daemon/src/server.rs` (handler now locks the engine `mut`).
-   In-memory only — pause does NOT survive a daemon restart (matches M1 architecture;
-   see "open ideas" if you want durability).
+1. **`BrowserHandle` seam (M2a).** `crates/core/src/browser.rs` defines the trait
+   (`goto`/`eval`/`screenshot`) plus `NullBrowser` (fails `Terminal`, the default) and
+   `FakeBrowser` (scriptable, records calls). `RunCtx` finally carries
+   `browser: Arc<dyn BrowserHandle>`, filling the M1 placeholder; `run_task` threads it in;
+   `Engine::with_browser` attaches one without disturbing browser-free callers. Core owns
+   only the trait — no impl — so it stays deterministic and browser-free.
+   `BrowserError → AdapterError`: navigation/io are `Retryable`, unavailable/eval `Terminal`.
 
-2. **Adapter-panic isolation at the runner boundary.** `run_task`
-   (`crates/core/src/runner.rs`) wraps `adapter.execute()` in
-   `AssertUnwindSafe(...).catch_unwind()` (via `futures_util::FutureExt`) and converts a
-   caught panic into `AdapterError::Terminal("adapter panicked: ...")`, reusing the normal
-   Terminal path (task → `Failed`, `last_error` set, `task_events` audit entry). The tick
-   loop and daemon survive; subsequent tasks in the same tick still run. Added a `panic`
-   action to `DummyAdapter`.
-   - Footgun documented in-code: `panic_message()` takes the payload `Box<dyn Any + Send>`
-     BY VALUE and downcasts via method-call autoderef. Passing it as `&(dyn Any + Send)`
-     silently unsizes the Box itself into the trait object and every `downcast_ref` misses.
-     Don't "simplify" that back to a reference param.
+2. **`CliBrowser` + `LinkedInAdapter`.** `scrape_profile` runs against real LinkedIn today
+   (see "Running a real LinkedIn task"). The adapter declares `linkedin.profile_scrape`, so
+   pacing is enforced by the engine, not the adapter. URLs are validated to `linkedin.com`
+   over https so a queued task can't repoint the adapter at an arbitrary host.
+
+3. **Two bugs found only by actually running it** — both now regression-tested, and both
+   written up under "chrome-agent gotchas": the machine-global `default` page collision
+   (the Riverside tooling navigated our page mid-task), and `goto` echoing the requested
+   URL so auth-wall detection read a stale URL.
 
 Progress ledger with full detail: `.superpowers/sdd/progress.md` (gitignored, local only).
 
