@@ -54,11 +54,17 @@ hand-written adapter (§9).
    `recipe run --repair` assembles a repair context (failing step + page snapshot + the author's
    prompt) for Claude. This spec *defines the format + trigger + context*; the automated
    repair **loop** stays subsystem E (deferred).
-5. A committable **Hacker News example recipe** + a `file://` fixture test proving the whole
+5. **Output sinks — the engine writes files** (§5b): a recipe may declare `output "markdown"`
+   / `output "json"` blocks that render the result (a minimal, non-Turing template) and write it
+   to a templated path. Generic capability; the Obsidian vault path/template live in recipe+var
+   *data*, so the engine stays site-agnostic and upstream-palatable.
+6. A committable **Hacker News example recipe** + a `file://` fixture test proving the whole
    path deterministically.
-6. In pacewright: a thin `RecipeAdapter` that shells `recipe run`, mapping result→`Value` and
-   exit/error→`AdapterError`; **delete `crates/adapter-linkedin`**.
-7. Prepare the fork's `recipe` feature as an upstream **PR** (branch + PR body; push/open gated
+7. In pacewright: a **vault job-runner** (§7) that treats an Obsidian note's YAML frontmatter as
+   a recipe *job* — resolves the named recipe, binds frontmatter→vars, runs it **paced by the
+   daemon**, and lets the engine write the markdown/JSON note into the vault. Plus the thin
+   `RecipeAdapter` that maps result→`Value` and exit→`AdapterError`; **delete `crates/adapter-linkedin`**.
+8. Prepare the fork's `recipe` feature as an upstream **PR** (branch + PR body; push/open gated
    on explicit go-ahead).
 
 **Non-goals (unchanged from the format spec).** The awesome-recipes repo (C), the known-state
@@ -246,6 +252,57 @@ context bundle — is exactly what E consumes, so E adds no new format surface.
 
 ---
 
+## 5b. Output sinks — the engine writes files
+
+By default `recipe run` prints the result JSON to stdout. A recipe may **additionally** declare
+`output` blocks; when present, the engine renders and **writes files** after the steps complete.
+This is a generic "render the result to a file" capability — the engine never knows about
+Obsidian; the vault path and the note shape are recipe/var *data*.
+
+```kdl
+// After the extract steps:
+output "json" path="{{ out_dir }}/{{ slug }}.json"
+
+output "markdown" path="{{ vault }}/wiki/guests/{{ slug }}.md" {
+    template #"""
+    ---
+    type: guest
+    name: "{{ name }}"
+    company: "{{ company }}"
+    linkedin: "{{ url }}"
+    updated: {{ now }}
+    ---
+
+    # {{ name }}
+    {{ headline }} — {{ location }}
+
+    ## Recent posts
+    {{#posts}}- {{.}}
+    {{/posts}}
+    """#
+}
+```
+
+- **`output "<format>" path="<templated path>"`** — `format` ∈ `json | markdown`. `path` is
+  interpolated with vars **and** extracted result keys (`{{ slug }}`, `{{ name }}`), plus a
+  built-in `{{ now }}` (RFC-3339, from the engine's real-time edge — this is browser-side I/O,
+  outside pacewright's Clock invariant). 0+ blocks; e.g. write both a JSON record and a md note.
+- **`json`** writes `serde_json::to_string_pretty(result)` — no template.
+- **`markdown`** requires a `template` child (raw string). Rendering is a **minimal, non-Turing
+  templater** (hand-rolled, no dep): `{{ key }}` scalar substitution over vars+result, and
+  Mustache-style **sections** `{{#listkey}} … {{.}} … {{/listkey}}` to repeat a block over a
+  `many` list. No conditionals/expressions — same YAGNI line as the recipe language (§7 of the
+  format spec). Missing key ⇒ empty string (logged under `--log`).
+- **Path safety:** the rendered `path` is written as-is (the operator controls the recipe and
+  vars); parent dirs are created. Writing is the last phase, after a fully successful run — a
+  failed/tripped run writes nothing (so a stale note is never half-overwritten). Under
+  `--repair`, an *unexpected* run also skips writing.
+
+Both real flows use this: the HN recipe (§6) writes a digest note; the LinkedIn testbed recipe
+writes/updates a guest note in the vault.
+
+---
+
 ## 6. The Hacker News example (committable)
 
 `examples/recipes/hackernews.kdl` — public, no-auth, stable markup → the ideal committable
@@ -276,6 +333,23 @@ recipe "news/hackernews" {
         extract "stories" many=#true expect-min=1 {
             locator css=".athing .titleline > a"
         }
+    }
+
+    // Write a JSON record and a markdown digest note (into the vault when --var vault=… is set).
+    output "json" path="{{ out_dir }}/hn.json"
+    output "markdown" path="{{ out_dir }}/hn-digest.md" {
+        template #"""
+        ---
+        type: digest
+        source: hackernews
+        updated: {{ now }}
+        ---
+
+        # Hacker News — front page
+
+        {{#stories}}- {{.}}
+        {{/stories}}
+        """#
     }
 
     // Optional: how Claude should fix this recipe if the front page reshuffles.
@@ -324,6 +398,42 @@ in chrome-agent's existing `run_cli` + `fixture_url` style.
 
 Determinism is untouched: the child chrome-agent process is browser I/O at the edge, exactly
 like today's `CliBrowser` calls. pacewright core's `Clock`/`Rng` invariant is unaffected.
+
+### 7a. The vault job-runner (frontmatter jobs → files)
+
+The unit of work is a **job note**: an Obsidian note whose YAML frontmatter both *names a
+recipe* and *supplies its vars*. This is how an operator "creates a file with the parameters
+that call the recipe" — the note is the job.
+
+```markdown
+--- (wiki/guests/jane-doe.md)
+type: guest
+recipe: linkedin/scrape_profile      # which recipe to run
+linkedin: https://www.linkedin.com/in/jane/   # → bound to the recipe's `url` var (via a map)
+slug: jane-doe
+status: lead
+---
+```
+
+`pcw recipe job <note.md>` (and a daemon sweep over a configured jobs glob) does:
+
+1. **Parse frontmatter** (pacewright owns a small YAML/frontmatter reader — the engine stays
+   YAML-free). Require a `recipe:` key.
+2. **Resolve** the recipe by name via the `RecipeRegistry` (the `~/.pacewright/recipes/` dir).
+3. **Bind vars** from frontmatter. A recipe may declare a `var` with a `from` alias
+   (`var "url" from="linkedin"`) so a note's domain field maps to the recipe's var; unaliased
+   vars match by name. Inject `vault`/`out_dir`/`slug` context vars.
+4. **Enqueue a paced task** (`adapter="linkedin", action="scrape_profile"`, deduped on the note
+   path) so LinkedIn scrapes obey the daily cap — the whole reason pacewright, not a raw script,
+   runs this. The `RecipeAdapter` shells `chrome-agent recipe run <resolved.kdl> --vars-json '…'`.
+5. The **engine writes the output file(s)** per the recipe's `output` blocks (§5b) — e.g. the
+   guest note itself, or a JSON record — into the vault at the templated path.
+
+So: **job note (params) → paced recipe run → engine writes the markdown/JSON note.** The engine
+takes vars as `--vars-json` (no YAML dep); all Obsidian-specific knowledge (frontmatter, the
+`from` aliases, vault paths) lives in pacewright + recipe data, never in chrome-agent. The
+vault job-runner is a pacewright slice built **after** the engine + HN example prove the path
+end-to-end (§11); it gets its own plan.
 
 ---
 
@@ -384,17 +494,25 @@ stdout/exit → `Value`/`AdapterError` class); registry enumeration test over a 
 1. **Fork groundwork:** confirm `kdl` builds on the pinned toolchain (bump if needed); add
    `src/recipe/` skeleton + `RecipeBrowser` trait + `FakeBrowser`; empty `recipe check` wired so
    the binary builds and `cli_tests` stay green.
-2. **Model:** typed `Recipe`/`Step`/`Locator` parsed from `kdl::KdlDocument`, incl. the optional
-   `repair { prompt … }` node and `extract` `expect-count`/`expect-min`/`expect-max`; validation
-   (vars/`{{…}}`/`on-fail`/expectation values); `recipe check` real; unit tests.
+2. **Model:** typed `Recipe`/`Step`/`Locator`/`Output` parsed from `kdl::KdlDocument`, incl. the
+   optional `repair { prompt … }` node, `extract` `expect-count`/`expect-min`/`expect-max`,
+   `var … from="…"` aliases, and `output` blocks; validation (vars/`{{…}}`/`on-fail`/expectation/
+   output-format); `recipe check` real; unit tests.
 3. **Locator runtime:** `locators.js` v1 (role/text/level/nth/within/fallback/after/css) +
    `locator.rs` serialization + JS-level tests.
 4. **Engine (read path):** `goto`/`extract`/`expect`/`wait`/`screenshot` over `RecipeBrowser`;
    `--log`; expectation checking → the `unexpected` marker; unit tests over `FakeBrowser`.
-5. **CdpBrowser + `recipe run` dispatch:** wire real page client; `--repair` context assembly
-   (recipe AST + failure + `inspect` snapshot + prompt + system instruction); the HN example +
-   `file://` fixture end-to-end test.
-6. **Full fork gate;** commit on a `feat/recipe-engine` branch; write the upstream PR body
+5. **Output renderer:** the minimal templater (scalars + `{{#list}}…{{/list}}` sections) + `json`
+   serialization; `output` blocks write files after a successful run; `--vars-json`; unit tests
+   over template+result fixtures.
+6. **CdpBrowser + `recipe run` dispatch:** wire real page client; `--repair` context assembly
+   (recipe AST + failure + `inspect` snapshot + prompt + system instruction); the HN example
+   (with `output` blocks) + `file://` fixture end-to-end test asserting both JSON and the written
+   markdown digest.
+7. **Full fork gate;** commit on a `feat/recipe-engine` branch; write the upstream PR body
    (hold push/open per the chosen PR scope).
-7. **pacewright side:** `RecipeAdapter` + `RecipeRegistry`; daemon rewiring; delete
+8. **pacewright side (engine consumer):** `RecipeAdapter` + `RecipeRegistry`; daemon rewiring; delete
    `crates/adapter-linkedin`; validate the LinkedIn regression bar against the local testbed.
+9. **Vault job-runner (own plan, §7a):** frontmatter reader + `var … from` binding +
+   `pcw recipe job` + daemon jobs sweep, writing markdown/JSON notes into the podcast vault.
+   Built after 1–8 prove the engine path end-to-end.
