@@ -203,4 +203,53 @@ mod tests {
         let resp = handle_request(&engine, Request::Adapters).await;
         match resp { Response::Ok(v) => assert_eq!(v["adapters"][0]["name"], "dummy"), _ => panic!() };
     }
+
+    #[tokio::test]
+    async fn test_pause_resume_via_dispatch() {
+        let engine = test_engine().await;
+
+        // pause a specific adapter scope -> echoed back, and reflected in status
+        let resp = handle_request(&engine, Request::Pause { scope: "dummy".into() }).await;
+        match resp {
+            Response::Ok(v) => { assert_eq!(v["scope"], "dummy"); assert_eq!(v["paused"], true); }
+            _ => panic!("pause failed"),
+        }
+        let status = handle_request(&engine, Request::Status).await;
+        match status {
+            Response::Ok(v) => {
+                let scopes: Vec<String> = serde_json::from_value(v["paused"].clone()).unwrap();
+                assert!(scopes.contains(&"dummy".to_string()));
+                assert!(v["pending"].is_number());
+                assert!(v["running"].is_number());
+            }
+            _ => panic!("status failed"),
+        }
+
+        // "daemon" is the alias for the "all" scope; status should surface "all"
+        handle_request(&engine, Request::Pause { scope: "daemon".into() }).await;
+        let status = handle_request(&engine, Request::Status).await;
+        match status {
+            Response::Ok(v) => {
+                let scopes: Vec<String> = serde_json::from_value(v["paused"].clone()).unwrap();
+                assert!(scopes.contains(&"all".to_string()));
+            }
+            _ => panic!("status failed"),
+        }
+
+        // resume both -> paused set drains to empty
+        handle_request(&engine, Request::Resume { scope: "dummy".into() }).await;
+        let resp = handle_request(&engine, Request::Resume { scope: "daemon".into() }).await;
+        match resp {
+            Response::Ok(v) => { assert_eq!(v["scope"], "daemon"); assert_eq!(v["paused"], false); }
+            _ => panic!("resume failed"),
+        }
+        let status = handle_request(&engine, Request::Status).await;
+        match status {
+            Response::Ok(v) => {
+                let scopes: Vec<String> = serde_json::from_value(v["paused"].clone()).unwrap();
+                assert!(scopes.is_empty(), "expected no paused scopes, got {scopes:?}");
+            }
+            _ => panic!("status failed"),
+        }
+    }
 }
