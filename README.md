@@ -84,7 +84,7 @@ pacewright tui             # live dashboard (id · adapter · action · status �
 | `get <id>` | one task + its full event history |
 | `cancel <id>` | cancel a pending/deferred task |
 | `run-now <id> [--force]` | make a task eligible immediately |
-| `pause` / `resume <scope>` | acknowledged (full impl later) |
+| `pause` / `resume <scope>` | pause/resume the tick loop (`scope` = `all`/`daemon` for global, or an adapter name) |
 | `limits` | today's per-key counters |
 | `adapters` / `status` | discovery + daemon status |
 | `tui` | live dashboard |
@@ -131,7 +131,6 @@ Intentionally deferred to later milestones, not oversights:
 - **`set_limit` RPC** — limits are set via `config.toml` + restart; no runtime RPC yet.
 - **`run_now --force`** — resets `scheduled_for`/clears `next_eligible_at` (re-queues now) but does not yet override an active limit defer.
 - **`subscribe` push** — the TUI polls `list` + `status` each second instead.
-- **`pause` / `resume`** — acknowledged no-ops.
 - **Adapter-panic isolation** at the runner boundary lands in M2. The tick loop already survives a panic in `tick()` (so one bad tick can't freeze the scheduler), but a panicking adapter call within a tick is still a gap.
 - **Single-instance guard** is best-effort (`AddrInUse` refusal, no lock file); launchd enforces one instance in practice.
 

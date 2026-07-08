@@ -7,6 +7,7 @@ use crate::rng::Rng;
 use crate::runner::run_task;
 use crate::scheduler::{resolve_blocked, select_runnable};
 use crate::store::Store;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub struct Engine {
@@ -15,11 +16,38 @@ pub struct Engine {
     pub cfg: Config,
     pub clock: Arc<dyn Clock>,
     pub rng: Arc<dyn Rng>,
+    paused: HashSet<String>,
 }
 
 impl Engine {
     pub fn new(store: Arc<Store>, registry: AdapterRegistry, cfg: Config, clock: Arc<dyn Clock>, rng: Arc<dyn Rng>) -> Self {
-        Engine { store, registry, cfg, clock, rng }
+        Engine { store, registry, cfg, clock, rng, paused: HashSet::new() }
+    }
+
+    /// Pause the given scope: `"all"` (or the alias `"daemon"`) pauses the
+    /// whole engine; any other string is treated as an adapter name and
+    /// pauses only tasks routed to that adapter.
+    pub fn pause(&mut self, scope: String) {
+        let scope = if scope == "daemon" { "all".to_string() } else { scope };
+        self.paused.insert(scope);
+    }
+
+    /// Resume the given scope. Same scope semantics as `pause`.
+    pub fn resume(&mut self, scope: &str) {
+        let scope = if scope == "daemon" { "all" } else { scope };
+        self.paused.remove(scope);
+    }
+
+    pub fn is_paused_all(&self) -> bool {
+        self.paused.contains("all")
+    }
+
+    pub fn is_adapter_paused(&self, adapter: &str) -> bool {
+        self.paused.contains(adapter)
+    }
+
+    pub fn paused_scopes(&self) -> Vec<String> {
+        self.paused.iter().cloned().collect()
     }
 
     pub fn recover_on_boot(&self) -> rusqlite::Result<()> {
@@ -52,9 +80,15 @@ impl Engine {
     }
 
     pub async fn tick(&self) -> rusqlite::Result<()> {
+        if self.is_paused_all() {
+            return Ok(());
+        }
         resolve_blocked(&self.store, &*self.clock)?;
         let runnable = select_runnable(&self.store, &*self.clock)?;
         for task in runnable {
+            if self.is_adapter_paused(&task.adapter) {
+                continue;
+            }
             let Some(adapter) = self.registry.get(&task.adapter) else {
                 // unknown adapter -> fail fast
                 let now = self.clock.now_ms();
