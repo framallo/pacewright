@@ -2,3 +2,7 @@
 *.db
 *.db-wal
 *.db-shm
+
+# Recipes are distributed data (see subsystem C / awesome-recipes repo), not baked
+# into the engine repo. LinkedIn recipes here are a local testbed only.
+/recipes/

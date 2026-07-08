@@ -41,6 +41,28 @@ test harness (D) can only pin *a recipe's* behavior, and LLM repair (E) can only
   Locators are resolved by a **runtime that ships with the engine** (`locators.js`), so
   recipes stay pure declarative data and never carry executable JS.
 
+### Authentication is not a recipe concern (decided)
+
+A recipe never logs in. Authentication is a property of how the **session** is established, not
+a step in the flow. The daemon owns one long-lived session whose Chrome cookies are inherited
+from the operator's real, already-logged-in profile (the browser layer's copy-cookies — the
+fork's `Session { copy_cookies: true }`). Every recipe runs *inside* that authenticated context.
+
+Rejected alternatives, and why:
+- **Conditional login** ("if logged out, log in") needs conditionals we excluded (§7) *and*
+  means scripting LinkedIn's login form — exactly the fresh, unproven session LinkedIn's
+  anti-bot keys on. The core thesis (core-engine spec §9) is that the safe substrate is the
+  *already-trusted* profile, not a scripted login.
+- **A `linkedin/login` recipe dependency** has the same login-automation problem plus needs
+  recipe composition we don't have.
+- **Cookie inheritance** ✅ is what already works in this codebase (chrome-agent `--copy-cookies`
+  copies the Cookies DB + the `Local State` decryption key). It is a **session-lifecycle**
+  responsibility — including the "cookies only copy on a *fresh* launch" footgun found this
+  session — and lives entirely in the browser/fork layer, never in a recipe.
+
+A recipe's *only* interaction with auth is the `expect` tripwire that detects an auth wall and
+fails `Terminal` with a clear message. It detects; it never fixes.
+
 ---
 
 ## 2. Goal / non-goals
@@ -90,10 +112,13 @@ crates/recipe/
   (`role`/`name`/`text`/`label`/`css`/`level`/`nth`/`within`/`fallback`). It is engine code,
   reviewed and versioned with the engine — never supplied by a recipe.
 - **`RecipeAdapter`** implements the existing `pacewright_core::adapter::Adapter`. A
-  `RecipeRegistry` loads every `recipes/**/*.kdl` at daemon start; each recipe's `name`
-  ("linkedin/scrape_profile") maps to `(adapter="linkedin", action="scrape_profile")` so the
-  RPC and CLI surface is unchanged. `limit_keys_for` reads the recipe's `limit-key`, so pacing
-  stays declared in data.
+  `RecipeRegistry` loads every `*.kdl` under a **configured recipes directory** at daemon start
+  (default `~/.pacewright/recipes/`, overridable via config / `$PACEWRIGHT_RECIPES`). Recipes
+  are **distributed data, not repo source** — they are *not* committed into this engine repo;
+  they come from the operator's local dir or the awesome-recipes repo (subsystem C). Each
+  recipe's `name` ("linkedin/scrape_profile") maps to `(adapter="linkedin", action="scrape_profile")`
+  so the RPC/CLI surface is unchanged. `limit_keys_for` reads the recipe's `limit-key`, so
+  pacing stays declared in data.
 
 ---
 
@@ -154,10 +179,13 @@ recipe "linkedin/scrape_profile" {
   | `wait` | `wait { locator … timeout-ms=<n> }` | block until the locator is present (auto-wait is implicit on other verbs; this is an explicit barrier) |
   | `screenshot` | `screenshot "<key>"` | capture PNG bytes into the result under `<key>` (base64) |
 
-- **Locator** (`locator <props> { fallback <props> }`): `role`, `name`, `text` (string or
-  `/regex/` via raw string), `label`, `css`, `level` (heading level), `nth`, `within` (a nested
-  locator scoping the search). `fallback` is tried when the primary resolves nothing. Locators
-  are how *every* targeting verb (`click`/`fill`/`extract`/`wait`) names an element.
+- **Locator** (`locator <props> { <child locators> }`): the match fields are KDL **properties** —
+  `role`, `name`, `text` (string or `/regex/` via a raw string `#"…"#`), `label`, `css`, `level`
+  (heading level), `nth`. Two fields are **child nodes**, not properties, because KDL property
+  values are scalars and these are themselves locators: `fallback <props>` (tried when the primary
+  resolves nothing) and `within <props>` (scopes the search to a subtree). Validated against the
+  `kdl` crate — `within={…}` as a property is a parse error. Locators are how *every* targeting
+  verb (`click`/`fill`/`extract`/`wait`) names an element.
 
 - **`expect` is a tripwire, not an assertion.** It names a *bad state*; if that state holds, the
   step aborts the run with the `on-fail` error class. Conditions: `settled-url-matches "<regex>"`
@@ -260,17 +288,21 @@ loses the injected runtime between calls — see the sequencing note). Per the a
 
 ## 9. Migration — delete the hand-written adapter
 
-- `crates/adapter-linkedin` is **removed**. `linkedin/scrape_profile` becomes
-  `recipes/linkedin/scrape_profile.kdl` (the §4 example, completed).
-- The daemon registers one `RecipeAdapter` (backed by a `RecipeRegistry` over `recipes/`) in
-  place of `LinkedInAdapter`. `pcw adapters` still lists `linkedin/scrape_profile`; `pcw add
-  linkedin scrape_profile --params '{"url":…}'` runs the recipe.
-- The auth-wall handling, settled-URL check, and follower/heading extraction that are currently
-  Rust move verbatim into the recipe's `expect`/`extract` steps — proving the engine reproduces
-  the hand-written behavior with zero platform code in Rust.
-- Regression bar: the ported recipe, run against the same live profile, must return the same
-  `name`/`followers`/`location`/`landed_url` the Rust adapter produced (captured in this
-  session's successful run).
+- `crates/adapter-linkedin` is **removed**. Its behavior (auth-wall tripwire, settled-URL check,
+  heading/follower extraction) is reproduced by `linkedin/scrape_profile.kdl` — authored and
+  KDL-validated this session (`recipes/linkedin/`, **gitignored**; see below).
+- **LinkedIn recipes are a testbed, not a committed artifact.** Recipes are distributed data
+  (§3): the LinkedIn ones live in the operator's local recipes dir now and the awesome-recipes
+  repo (subsystem C) later — never in this engine repo. `recipes/` is gitignored precisely so it
+  can be a stable local testbed without becoming repo source. What this migration *commits* is the
+  engine and the deletion of the Rust adapter, not any LinkedIn `.kdl`.
+- The daemon registers one `RecipeAdapter` (backed by a `RecipeRegistry` over the configured
+  recipes dir) in place of `LinkedInAdapter`. With a LinkedIn recipe present, `pcw adapters` lists
+  `linkedin/scrape_profile` and `pcw add linkedin scrape_profile --params '{"url":…}'` runs it.
+- Regression bar (validated against the local testbed recipe, not committed): run against the same
+  live profile, the recipe must return the same `name`/`followers`/`landed_url` the Rust adapter
+  produced this session. (`headline`/`location` were positional even in Rust; the recipe returns
+  the raw `top_card` list for the caller to map — see the recipe's own note.)
 
 ---
 
@@ -289,8 +321,10 @@ what makes it unit-testable over `FakeBrowser`.
 - **Engine unit tests over `FakeBrowser`:** script `eval` to return canned `__pw.resolve`
   responses and assert step behavior — var interpolation, extract accumulation, guard→error-class
   mapping, auto-wait timeout→`Retryable`, fallback-locator use.
-- **Model tests:** parse representative KDL recipes into the typed model; assert load-time errors
-  for missing required vars / unknown `{{ … }}` / bad `on-fail` class.
+- **Model tests:** parse small example KDL recipes (committed as test fixtures under the crate,
+  *non-LinkedIn* — a synthetic `example/*` recipe) into the typed model; assert load-time errors
+  for missing required vars / unknown `{{ … }}` / bad `on-fail` class. Committed test recipes are
+  deliberately generic; LinkedIn recipes stay in the gitignored testbed.
 - The **real known-state fixture + golden-output harness is subsystem D** — deferred. This spec
   deliberately does not freeze a LinkedIn page; it proves the *engine*, not a *recipe*.
 
