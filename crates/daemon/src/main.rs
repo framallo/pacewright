@@ -7,7 +7,7 @@ use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
 use pacewright_adapter_dummy::DummyAdapter;
-use pacewright_adapter_linkedin::LinkedInAdapter;
+use pacewright_adapter_recipe::{CliRecipeRunner, RecipeAdapter, RecipeRegistry};
 use pacewright_browser::CliBrowser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +19,10 @@ fn pw_dir() -> PathBuf {
     let d = home_dir().join(".pacewright");
     std::fs::create_dir_all(&d).ok();
     d
+}
+
+fn recipes_dir() -> PathBuf {
+    pw_dir().join("recipes")
 }
 
 #[tokio::main]
@@ -37,8 +41,26 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::open(db_path.to_str().unwrap())?);
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
-    reg.register(Arc::new(LinkedInAdapter::new()));
-    // M5+: register riverside/youtube adapters here.
+
+    // Recipe-backed adapters: one `RecipeAdapter` per distinct `<adapter>` prefix among the
+    // installed `.kdl` recipes (populated by `pcw recipe add`). The site logic that used to
+    // live in `adapter-linkedin` is now a gitignored testbed recipe `linkedin/scrape_profile`.
+    let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
+    let recipe_runner = Arc::new(CliRecipeRunner::new());
+    for adapter_name in recipe_registry.adapters() {
+        tracing::info!("registering recipe-backed adapter `{adapter_name}`");
+        reg.register(Arc::new(RecipeAdapter::new(
+            adapter_name,
+            recipe_registry.clone(),
+            recipe_runner.clone(),
+        )));
+    }
+    if recipe_registry.is_empty() {
+        tracing::info!(
+            "no recipes installed in {} — only browser-free adapters are available (add with `pcw recipe add`)",
+            recipes_dir().display()
+        );
+    }
 
     // Lazy: no Chrome process is touched until a task actually drives the browser, so a
     // daemon on a machine without `chrome-agent` still boots and runs browser-free

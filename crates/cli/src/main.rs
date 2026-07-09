@@ -1,9 +1,11 @@
 mod client;
 mod recipe_install;
+mod recipe_job;
 mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use pacewright_adapter_recipe::registry::RecipeRegistry;
 use pacewright_proto::{AddTaskReq, Request};
 use std::path::PathBuf;
 
@@ -51,6 +53,8 @@ enum RecipeCmd {
     Add { spec: String },
     /// List installed recipes and their source provenance.
     List,
+    /// Enqueue a paced run of the recipe named in a job note's YAML frontmatter.
+    Job { note: PathBuf, #[arg(long)] vault: Option<PathBuf> },
 }
 
 #[tokio::main]
@@ -74,13 +78,18 @@ async fn main() -> Result<()> {
         Cmd::Adapters => Request::Adapters,
         Cmd::Status => Request::Status,
         Cmd::Tui => { return tui::run(&sock).await; }
-        // Recipe install is a local filesystem op — no daemon round-trip.
-        Cmd::Recipe(rc) => {
-            return match rc {
-                RecipeCmd::Add { spec } => recipe_install::add(&spec),
-                RecipeCmd::List => recipe_install::list(),
-            };
-        }
+        Cmd::Recipe(rc) => match rc {
+            // Install/list are local filesystem ops — no daemon round-trip.
+            RecipeCmd::Add { spec } => return recipe_install::add(&spec),
+            RecipeCmd::List => return recipe_install::list(),
+            // A job resolves the note -> recipe locally, then enqueues a *paced* task.
+            RecipeCmd::Job { note, vault } => {
+                let registry = RecipeRegistry::load_dir(&recipe_install::recipes_root()?);
+                let job = recipe_job::build_job(&note, &registry, vault.as_deref())?;
+                eprintln!("enqueuing recipe `{}` from {}", job.recipe_name, note.display());
+                job.into_add_request()
+            }
+        },
     };
     let resp = client::call(&sock, req).await?;
     println!("{}", serde_json::to_string_pretty(&resp)?);

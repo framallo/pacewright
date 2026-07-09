@@ -172,7 +172,7 @@ fn shallow_clone(src: &RepoSource, dest: &Path) -> Result<String> {
 
 // ---- commands -------------------------------------------------------------
 
-fn recipes_root() -> Result<PathBuf> {
+pub(crate) fn recipes_root() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME not set")?;
     Ok(PathBuf::from(home).join(".pacewright").join("recipes"))
 }

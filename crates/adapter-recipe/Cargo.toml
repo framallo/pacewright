@@ -1,5 +1,5 @@
 [package]
-name = "pacewright-adapter-linkedin"
+name = "pacewright-adapter-recipe"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -9,6 +9,8 @@ pacewright-core = { path = "../core" }
 serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+kdl.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
