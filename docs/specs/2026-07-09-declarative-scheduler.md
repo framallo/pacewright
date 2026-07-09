@@ -206,3 +206,25 @@ belongs to the web milestone).
   `schedules/` for live edits is a later nicety.
 - **Vault job notes** stay the ad-hoc per-entity path (`pcw recipe job <note>`), complementary to
   the recurring schedule files.
+
+## 11. The `auth` recipe flag — public recipes run without a signed-in Chrome
+
+Wiring the `news/hackernews` recipe into a schedule and running it live surfaced a real integration
+defect: `CliRecipeRunner` passed `--copy-cookies` on **every** run, so even a public, no-auth recipe
+required a logged-in Chrome cookie DB and failed (`Chrome cookies file not found`) when one wasn't
+present. Cookie-copying is now **per-recipe and declarative**:
+
+- A recipe that needs the operator's logged-in session declares `auth #true` in its `recipe { … }`
+  block (e.g. `linkedin/scrape_profile`). `RecipeRegistry` parses it into `RecipeMeta.auth`; the
+  `RecipeAdapter` passes it to `RecipeRunner::run(path, vars, auth)`, which adds `--copy-cookies`
+  only then. A public recipe (`news/hackernews`) omits it and navigates cold — chrome-agent ignores
+  the unknown node (forward-compatible), so no chrome-agent change was needed.
+- `CliRecipeRunner.copy_cookies` remains an optional **global force-on override** (default off) for
+  operators who want every recipe to inherit the session regardless.
+
+**Live proof (2026-07-09).** `schedules/daily.toml` → `news/hackernews` (on-apply) run through the
+daemon end-to-end: boot reconcile created the task, the tick loop drove `chrome-agent` against the
+**live** Hacker News front page, the recipe wrote `hn.json` + `hn-digest.md` into the vault, and the
+task reached `succeeded` (attempts 0). `schedule list` / `enable` / `disable` RPCs verified against
+the running daemon. (Chrome launch needs a real `$HOME` for its `~/Library` app-support state — a
+throwaway `HOME=/tmp/...` hangs Chrome launch, unrelated to pacewright.)

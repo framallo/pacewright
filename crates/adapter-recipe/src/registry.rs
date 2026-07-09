@@ -53,6 +53,10 @@ pub struct RecipeMeta {
     pub vars: Vec<RecipeVar>,
     /// The recipe's `description`, if any (for `actions()` / `pcw adapters`).
     pub description: Option<String>,
+    /// `auth #true` — the recipe needs the operator's logged-in Chrome session, so the runner
+    /// copies cookies before navigating. Absent/`#false` = a public recipe that runs without a
+    /// signed-in browser (the default). Keeps auth-vs-public an explicit, declarative property.
+    pub auth: bool,
 }
 
 /// Parse a recipe file's routing metadata. `Ok(None)` = valid KDL but not a recipe (or a
@@ -76,6 +80,7 @@ pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String>
     let mut limit_keys = Vec::new();
     let mut vars = Vec::new();
     let mut description = None;
+    let mut auth = false;
     for child in children(node) {
         match child.name().value() {
             "limit-key" => {
@@ -89,6 +94,8 @@ pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String>
                     vars.push(v);
                 }
             }
+            // `auth` or `auth #true` → needs the operator's session; `auth #false` → opt out.
+            "auth" => auth = first_bool(child).unwrap_or(true),
             _ => {}
         }
     }
@@ -101,6 +108,7 @@ pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String>
         limit_keys,
         vars,
         description,
+        auth,
     }))
 }
 
@@ -119,6 +127,14 @@ fn first_arg(node: &kdl::KdlNode) -> Option<&str> {
         .iter()
         .find(|e| e.name().is_none())
         .and_then(|e| e.value().as_string())
+}
+
+/// The node's first unnamed argument as a bool (e.g. the `#true` in `auth #true`).
+fn first_bool(node: &kdl::KdlNode) -> Option<bool> {
+    node.entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_bool())
 }
 
 fn prop_str<'a>(node: &'a kdl::KdlNode, key: &str) -> Option<&'a str> {
@@ -264,6 +280,27 @@ mod tests {
         // an unaliased var maps by its own name
         assert_eq!(m.vars[1].source_field(), "vault");
         assert!(m.vars[2].has_default && !m.vars[2].required);
+        // no `auth` node → a public recipe by default
+        assert!(!m.auth);
+    }
+
+    #[test]
+    fn auth_node_marks_a_recipe_as_needing_a_session() {
+        let authed = parse_meta(
+            r#"recipe "linkedin/dm" { auth #true }"#,
+            Path::new("/r/a.kdl"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(authed.auth);
+        // explicit opt-out stays public
+        let public = parse_meta(
+            r#"recipe "news/hn" { auth #false }"#,
+            Path::new("/r/p.kdl"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!public.auth);
     }
 
     #[test]
