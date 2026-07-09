@@ -1,9 +1,15 @@
 # Declarative scheduler — enable-able recurrent tasks
 
-Status: **approved direction** (2026-07-09), pending spec review. Builds on the recipe engine
+Status: **implemented** (2026-07-09). Builds on the recipe engine
 (`2026-07-08-recipe-engine-in-chrome-agent.md`). This milestone is **Rust-only: schedule config +
 reconciler + CLI + TUI**. The web dashboard (`2026-07-09` design discussion) is a documented
 follow-up that consumes the same RPCs.
+
+**Delivered:** the `schedule` module in `adapter-recipe` (not `core` — validation needs the
+`RecipeRegistry`, which depends on `core`; `core` owns the `schedule_state`/`limit_overrides`
+tables + the `dedup_key`-preservation fix); `Schedule{Apply,List,Enable,Disable}` + `SetLimit`
+RPCs; boot reconcile + override merge in the daemon; `pcw schedule check/list/apply/enable/disable`;
+and the TUI Feed / Schedule / Limits panes (`tab` to cycle, `space` to toggle, `a` to apply).
 
 ---
 

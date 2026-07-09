@@ -14,6 +14,16 @@ pub struct AddTaskReq {
     #[serde(default)] pub max_attempts: Option<i64>,
 }
 
+/// A human-friendly pacing spec for `set_limit`, mirroring the `config.toml` shape
+/// (`min_gap`/`active` as strings). The daemon parses it into the engine's limit config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LimitSpec {
+    #[serde(default)] pub daily_cap: Option<i64>,
+    #[serde(default)] pub min_gap: Option<String>,
+    #[serde(default)] pub jitter: Option<f64>,
+    #[serde(default)] pub active: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
@@ -28,6 +38,16 @@ pub enum Request {
     Adapters,
     Status,
     Subscribe,
+    /// Reconcile the schedule files into the queue.
+    ScheduleApply { #[serde(default)] prune: bool },
+    /// The declared schedule catalog + effective enabled state + next fire + live status.
+    ScheduleList,
+    /// Runtime-enable a schedule entry (override its file default) and reconcile.
+    ScheduleEnable { id: String },
+    /// Runtime-disable a schedule entry and reconcile (cancels its live task).
+    ScheduleDisable { id: String },
+    /// Set a runtime pacing override for a limit key (persists over `config.toml`).
+    SetLimit { key: String, config: LimitSpec },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

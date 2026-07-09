@@ -14,7 +14,9 @@
 pub mod adapter;
 pub mod registry;
 pub mod runner;
+pub mod schedule;
 
 pub use adapter::RecipeAdapter;
 pub use registry::{RecipeMeta, RecipeRegistry, RecipeVar};
 pub use runner::{CliRecipeRunner, RecipeRunner};
+pub use schedule::{partition, reconcile, validate, ReconcileReport, ScheduleEntry, Timing};

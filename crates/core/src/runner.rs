@@ -88,6 +88,10 @@ pub async fn run_task(
                     nxt.recurrence = Some(cron);
                     nxt.priority = task.priority;
                     nxt.max_attempts = task.max_attempts;
+                    // Carry the dedup key onto the next occurrence so the schedule reconciler
+                    // keeps recognizing a recurring schedule task across its firings (otherwise
+                    // each occurrence would look new and reconcile would duplicate it).
+                    nxt.dedup_key = task.dedup_key.clone();
                     store.insert_task(&nxt)?;
                     store.append_event(&TaskEvent { task_id: nxt.id.clone(), at: now, from_status: None, to_status: TaskStatus::Pending, detail: serde_json::json!({"recurred_from": task.id}) })?;
                 }
@@ -244,12 +248,15 @@ mod tests {
         let a = StubAdapter::default();
         let mut t = Task::new_now("dummy", "echo", json!({}), 500);
         t.recurrence = Some("0 0 * * * *".into()); // top of every hour (croner 6-field)
+        t.dedup_key = Some("schedule:hourly".into());
         store.insert_task(&t).unwrap();
         run_task(&store, &a, &clock, fake(), t.clone()).await.unwrap();
         // original succeeded + one new pending recurrence
         let pend = store.tasks_in_status(TaskStatus::Pending).unwrap();
         assert_eq!(pend.len(), 1);
         assert!(pend[0].recurrence.is_some());
+        // the next occurrence carries the dedup key so the schedule reconciler still owns it
+        assert_eq!(pend[0].dedup_key.as_deref(), Some("schedule:hourly"));
     }
 
     #[test]

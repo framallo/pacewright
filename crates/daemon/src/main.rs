@@ -7,7 +7,7 @@ use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
 use pacewright_adapter_dummy::DummyAdapter;
-use pacewright_adapter_recipe::{CliRecipeRunner, RecipeAdapter, RecipeRegistry};
+use pacewright_adapter_recipe::{schedule, CliRecipeRunner, RecipeAdapter, RecipeRegistry};
 use pacewright_browser::CliBrowser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +25,10 @@ fn recipes_dir() -> PathBuf {
     pw_dir().join("recipes")
 }
 
+fn schedules_dir() -> PathBuf {
+    pw_dir().join("schedules")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -33,12 +37,17 @@ async fn main() -> Result<()> {
     let sock_path = dir.join("pw.sock");
     let cfg_path = dir.join("config.toml");
 
-    let cfg = match std::fs::read_to_string(&cfg_path) {
+    let mut cfg = match std::fs::read_to_string(&cfg_path) {
         Ok(s) => Config::from_toml(&s).unwrap_or_default(),
         Err(_) => Config::default(),
     };
 
     let store = Arc::new(Store::open(db_path.to_str().unwrap())?);
+
+    // Layer runtime pacing overrides (from `set_limit`) over what config.toml declared.
+    for (key, limit) in store.limit_overrides_all()? {
+        cfg.set_limit(key, limit);
+    }
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
 
@@ -69,10 +78,33 @@ async fn main() -> Result<()> {
 
     let engine = Engine::new(store, reg, cfg, Arc::new(SystemClock), Arc::new(SeededRng::new(rand_seed()))).with_browser(browser);
     engine.recover_on_boot()?;
+
+    // Reconcile the declarative schedule files into the queue on boot, so recurring/scheduled
+    // tasks come back after a restart. Invalid entries are logged and skipped, not fatal.
+    {
+        let (entries, load_errs) = schedule::load_dir(&schedules_dir());
+        let (valid, validation_errs) = schedule::partition(&entries, &recipe_registry);
+        for e in load_errs.iter().chain(validation_errs.iter()) {
+            tracing::warn!("schedule: {e}");
+        }
+        match schedule::reconcile(&engine.store, &*engine.clock, &valid, false) {
+            Ok(r) => tracing::info!(
+                "schedule reconcile: {} created, {} updated, {} canceled ({} entries)",
+                r.created.len(), r.updated.len(), r.canceled.len(), valid.len()
+            ),
+            Err(e) => tracing::error!("schedule reconcile failed: {e}"),
+        }
+    }
+
     let engine = Arc::new(Mutex::new(engine));
+    let srv = Arc::new(server::Server {
+        engine,
+        registry: recipe_registry,
+        schedules_dir: schedules_dir(),
+    });
 
     tracing::info!("pacewrightd listening on {}", sock_path.display());
-    server::serve(engine, &sock_path).await
+    server::serve(srv, &sock_path).await
 }
 
 // A boot-time seed derived from the pid + start; randomness only affects pacing jitter.
