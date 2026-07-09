@@ -121,7 +121,8 @@ impl Adapter for RecipeAdapter {
             }
         };
 
-        let envelope = self.runner.run(&meta.path, &vars_json).await?;
+        // `auth` recipes get the operator's logged-in session; public recipes navigate cold.
+        let envelope = self.runner.run(&meta.path, &vars_json, meta.auth).await?;
 
         // An `unexpected` run (e.g. a cardinality miss) is not a failure — surface it in the
         // log but return the (possibly under-delivered) result, matching engine semantics.
@@ -158,6 +159,7 @@ mod tests {
     const LINKEDIN: &str = r#"recipe "linkedin/scrape_profile" {
         description "scrape a profile"
         limit-key "linkedin.profile_scrape"
+        auth #true
         var "url" from="linkedin" required=#true
     }"#;
 
@@ -221,6 +223,8 @@ mod tests {
             .unwrap();
         assert_eq!(out["name"], "Jane");
         assert_eq!(runner.call_count(), 1);
+        // the recipe declared `auth #true`, so the runner was asked for the logged-in session.
+        assert!(runner.calls.lock().unwrap()[0].2, "auth flag should propagate");
     }
 
     #[tokio::test]

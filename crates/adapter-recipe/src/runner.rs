@@ -16,18 +16,26 @@ use std::path::Path;
 /// Runs a recipe file and returns its run envelope, or the mapped failure class.
 #[async_trait]
 pub trait RecipeRunner: Send + Sync {
-    /// Run `recipe_path` binding `vars_json` (a JSON **object** string). On success returns
+    /// Run `recipe_path` binding `vars_json` (a JSON **object** string). `auth` requests the
+    /// operator's logged-in Chrome session (cookie copy) — set only for recipes that declare
+    /// `auth #true`; a public recipe must run without a signed-in browser. On success returns
     /// the recipe-run envelope `{"ok":true,"result":{…},"unexpected":[…]}`; on failure
     /// returns the `AdapterError` whose class is recovered from the child's error output.
-    async fn run(&self, recipe_path: &Path, vars_json: &str) -> Result<Value, AdapterError>;
+    async fn run(
+        &self,
+        recipe_path: &Path,
+        vars_json: &str,
+        auth: bool,
+    ) -> Result<Value, AdapterError>;
 }
 
 /// The real runner: `chrome-agent --browser pacewright --page pacewright recipe run <file>`.
 ///
 /// Pins the same dedicated browser/page as `CliBrowser` (so a concurrent chrome-agent
-/// consumer on the shared `default` page can't hijack the run), and carries the
-/// session-establishing `--stealth`/`--copy-cookies` so the recipe navigates with the
-/// operator's logged-in cookies.
+/// consumer on the shared `default` page can't hijack the run), and carries `--stealth`.
+/// Cookie copying is **per-recipe**: `--copy-cookies` is added only when the recipe declares
+/// `auth #true` (passed as the `auth` arg to `run`), so a public recipe never needs a
+/// signed-in Chrome. `copy_cookies` here is an optional global force-on override (default off).
 pub struct CliRecipeRunner {
     bin: String,
     timeout_secs: u64,
@@ -50,7 +58,9 @@ impl CliRecipeRunner {
             // A recipe drives many steps in one process; give it more room than a single verb.
             timeout_secs: 180,
             stealth: true,
-            copy_cookies: true,
+            // Off by default: the per-recipe `auth` flag (from `auth #true`) drives cookie
+            // copying. This override only force-copies for every recipe when set true.
+            copy_cookies: false,
             // Keep in lockstep with pacewright_browser::DEFAULT_{BROWSER,PAGE}_NAME.
             browser_name: "pacewright".to_string(),
             page_name: "pacewright".to_string(),
@@ -81,7 +91,7 @@ impl CliRecipeRunner {
         self
     }
 
-    fn args(&self, recipe_path: &Path, vars_json: &str) -> Vec<String> {
+    fn args(&self, recipe_path: &Path, vars_json: &str, auth: bool) -> Vec<String> {
         let mut v = vec![
             "--json".to_string(),
             "--timeout".to_string(),
@@ -94,7 +104,7 @@ impl CliRecipeRunner {
         if self.stealth {
             v.push("--stealth".into());
         }
-        if self.copy_cookies {
+        if auth || self.copy_cookies {
             v.push("--copy-cookies".into());
         }
         v.push("recipe".into());
@@ -108,8 +118,13 @@ impl CliRecipeRunner {
 
 #[async_trait]
 impl RecipeRunner for CliRecipeRunner {
-    async fn run(&self, recipe_path: &Path, vars_json: &str) -> Result<Value, AdapterError> {
-        let args = self.args(recipe_path, vars_json);
+    async fn run(
+        &self,
+        recipe_path: &Path,
+        vars_json: &str,
+        auth: bool,
+    ) -> Result<Value, AdapterError> {
+        let args = self.args(recipe_path, vars_json, auth);
         let out = tokio::process::Command::new(&self.bin)
             .args(&args)
             .output()
@@ -204,11 +219,11 @@ pub mod fake {
 
     type Responder = Box<dyn Fn(&Path, &str) -> Result<Value, AdapterError> + Send + Sync>;
 
-    /// A scriptable `RecipeRunner` for adapter tests. Records (path, vars_json) calls and
+    /// A scriptable `RecipeRunner` for adapter tests. Records (path, vars_json, auth) calls and
     /// returns whatever the injected closure produces.
     pub struct FakeRecipeRunner {
         responder: Responder,
-        pub calls: Mutex<Vec<(String, String)>>,
+        pub calls: Mutex<Vec<(String, String, bool)>>,
     }
 
     impl FakeRecipeRunner {
@@ -231,10 +246,16 @@ pub mod fake {
 
     #[async_trait]
     impl RecipeRunner for FakeRecipeRunner {
-        async fn run(&self, recipe_path: &Path, vars_json: &str) -> Result<Value, AdapterError> {
+        async fn run(
+            &self,
+            recipe_path: &Path,
+            vars_json: &str,
+            auth: bool,
+        ) -> Result<Value, AdapterError> {
             self.calls.lock().unwrap().push((
                 recipe_path.to_string_lossy().into_owned(),
                 vars_json.to_string(),
+                auth,
             ));
             (self.responder)(recipe_path, vars_json)
         }
@@ -289,23 +310,35 @@ mod tests {
     #[test]
     fn cli_runner_builds_the_pinned_invocation() {
         let r = CliRecipeRunner::new().timeout_secs(90);
-        let args = r.args(Path::new("/r/hn.kdl"), r#"{"url":"u"}"#);
-        // pinned browser+page, session flags, then the subcommand + vars-json
+        // auth=false: a public recipe → no cookie copy.
+        let args = r.args(Path::new("/r/hn.kdl"), r#"{"url":"u"}"#, false);
+        // pinned browser+page, stealth, then the subcommand + vars-json
         let find = |f: &str| args.iter().position(|a| a == f).expect("flag present");
         assert_eq!(args[find("--browser") + 1], "pacewright");
         assert_eq!(args[find("--page") + 1], "pacewright");
         assert!(args.contains(&"--stealth".to_string()));
-        assert!(args.contains(&"--copy-cookies".to_string()));
+        assert!(!args.contains(&"--copy-cookies".to_string()));
         assert!(args.contains(&"recipe".to_string()) && args.contains(&"run".to_string()));
         assert_eq!(args[find("--vars-json") + 1], r#"{"url":"u"}"#);
         // global flags precede the subcommand
         assert!(find("--browser") < find("recipe"));
     }
 
+    #[test]
+    fn cli_runner_copies_cookies_only_when_auth() {
+        let r = CliRecipeRunner::new();
+        // auth=true: an authed recipe pulls in the operator's session.
+        let authed = r.args(Path::new("/r/li.kdl"), "{}", true);
+        assert!(authed.contains(&"--copy-cookies".to_string()));
+        // the global override force-copies regardless of the per-recipe flag.
+        let forced = CliRecipeRunner::new().copy_cookies(true);
+        assert!(forced.args(Path::new("/r/x.kdl"), "{}", false).contains(&"--copy-cookies".to_string()));
+    }
+
     #[tokio::test]
     async fn missing_binary_is_terminal() {
         let r = CliRecipeRunner::new().bin("definitely-not-real-xyz");
-        let err = r.run(Path::new("/r/x.kdl"), "{}").await.unwrap_err();
+        let err = r.run(Path::new("/r/x.kdl"), "{}", false).await.unwrap_err();
         assert!(matches!(err, AdapterError::Terminal(_)), "got {err:?}");
     }
 
