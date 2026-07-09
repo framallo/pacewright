@@ -671,10 +671,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pacewright-adapter-linkedin"
+name = "pacewright-adapter-recipe"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "kdl",
  "pacewright-core",
  "serde_json",
  "tokio",
@@ -738,7 +739,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "pacewright-adapter-dummy",
- "pacewright-adapter-linkedin",
+ "pacewright-adapter-recipe",
  "pacewright-browser",
  "pacewright-core",
  "pacewright-proto",
