@@ -57,6 +57,12 @@ async fn main() -> Result<()> {
     let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
     let recipe_runner = Arc::new(CliRecipeRunner::new());
     for adapter_name in recipe_registry.adapters() {
+        // Don't let a recipe prefix hijack a built-in adapter (e.g. a `dummy/*` recipe
+        // shadowing the test DummyAdapter). Built-ins win; the recipe is skipped with a warning.
+        if reg.get(&adapter_name).is_some() {
+            tracing::warn!("recipe prefix `{adapter_name}` collides with a built-in adapter — skipping the recipe-backed one");
+            continue;
+        }
         tracing::info!("registering recipe-backed adapter `{adapter_name}`");
         reg.register(Arc::new(RecipeAdapter::new(
             adapter_name,
