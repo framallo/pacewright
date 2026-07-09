@@ -1,6 +1,11 @@
 # KDL recipe engine — built into the chrome-agent fork, PR'd upstream
 
-Status: **approved** (2026-07-08).
+Status: **approved** (2026-07-08). **Implemented** (2026-07-09): steps 1–9 landed — the
+chrome-agent `recipe` engine (+ write verbs & cookie-auth `request`, beyond the original
+read-only v1) on `feat/recipe-engine` (held), and the pacewright `adapter-recipe` crate
+(`RecipeAdapter`/`RecipeRegistry`/`CliRecipeRunner`) + `pcw recipe job` vault job-runner,
+with `adapter-linkedin` deleted. Deferred: the daemon jobs sweep (§7a — only one-shot
+`pcw recipe job` shipped) and the automated Claude repair loop (subsystem E).
 Supersedes placement decisions in `2026-07-08-recipe-format-engine.md` (§3: the engine no
 longer lives in a `pacewright-recipe` crate) and narrows `2026-07-07-chrome-agent-fork-lib.md`
 (the full `Session`/`Page` lib facade is **not** required for this path).

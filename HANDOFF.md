@@ -1,6 +1,40 @@
 # pacewright — handoff
 
-Last updated: 2026-07-08 (M2 browser seam + first real LinkedIn task). Written for the next agent.
+Last updated: 2026-07-09 (KDL recipe engine landed: chrome-agent fork + pacewright
+`adapter-recipe` + vault job-runner; `adapter-linkedin` retired). Written for the next agent.
+
+## Recipe engine — the big shift (2026-07-09)
+
+Browser automation is moving from **hand-written Rust adapters** to **declarative KDL
+recipes** executed by the forked `chrome-agent` (`~/work/chrome-agent`, branch
+`feat/recipe-engine`, held local — do NOT push / open the upstream PR without Federico's
+go-ahead). A recipe is inert data: `goto`/`extract`/`expect`/`wait`/`screenshot`, write
+verbs (`click`/`fill`/`select`/`upload`), and cookie-authenticated `request` (in-page
+`fetch` with `credentials:'include'`), with Playwright-style locators resolved by a
+shipped `locators.js`. Spec: `docs/specs/2026-07-08-recipe-engine-in-chrome-agent.md`.
+
+pacewright consumes it via `crates/adapter-recipe`:
+- **`RecipeRegistry`** enumerates `~/.pacewright/recipes/*.kdl` (populated by `pcw recipe
+  add`) and reads each recipe's routing/pacing metadata (name → `(adapter, action)`,
+  `limit-key`s, `var`s with `from` aliases) via a shallow KDL walk.
+- **`RecipeAdapter`** — one per `<adapter>` prefix — routes an `(adapter, action)` to its
+  recipe and runs it via **`CliRecipeRunner`** (`chrome-agent recipe run <file> --vars-json
+  …`, whole recipe in one process so `locators.js` persists; pinned to the `pacewright`
+  browser/page). The child's `[Terminal]/[Retryable]/[RateLimited]` tag is recovered into
+  the pacewright error class. Pacing is unchanged (recipe declares `limit-key`s).
+- **Vault job-runner** — `pcw recipe job <note.md>` reads a note's YAML frontmatter
+  (`recipe: linkedin/scrape_profile` + var fields), binds frontmatter→vars (honoring `from`
+  aliases + `vault`/`out_dir`/`slug`/`note` context), and enqueues a **paced** task deduped
+  on the note path. The recipe's `output` blocks write the md/JSON note back into the vault.
+
+To run the LinkedIn testbed end to end: `pcw recipe add <repo>` (or drop the testbed
+`.kdl` under `~/.pacewright/recipes/`), then `pcw add linkedin scrape_profile --params
+'{"url":"…"}'` or `pcw recipe job <note>`. Needs the `chrome-agent` binary from the fork on
+PATH (build it in `~/work/chrome-agent`).
+
+Deferred follow-ups: the **daemon jobs sweep** (a configured glob of job notes swept on the
+tick, vs. today's one-shot `pcw recipe job`) and the **automated Claude repair loop**
+(subsystem E — the `--repair` context bundle already ships; closing the loop does not).
 
 ## What this is
 
@@ -21,10 +55,13 @@ Full context: `README.md` (architecture, CLI, config, roadmap). Design spec:
   `BrowserHandle` trait + test doubles. The heart. Stays browser-free (trait only, no impl).
 - `proto` — JSON-RPC wire types shared by daemon + clients.
 - `daemon` — `pacewrightd`: Unix-socket JSON-RPC server + 1s tick loop.
-- `cli` — `pacewright`/`pcw`: client subcommands + ratatui TUI.
+- `cli` — `pacewright`/`pcw`: client subcommands (incl. `recipe add/list/job`) + ratatui TUI.
 - `adapter-dummy` — reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`/`panic`) for testing without a browser.
-- `browser` — `CliBrowser`: the real `BrowserHandle`, drives the `chrome-agent` CLI.
-- `adapter-linkedin` — `LinkedInAdapter`: `scrape_profile` (M3 first slice).
+- `browser` — `CliBrowser`: the real `BrowserHandle`, drives the `chrome-agent` CLI (per-verb).
+- `adapter-recipe` — `RecipeAdapter` + `RecipeRegistry` + `RecipeRunner`: runs declarative KDL
+  recipes as paced tasks by shelling `chrome-agent recipe run` (whole recipe in one process).
+  **Replaced the hand-written `adapter-linkedin`** — site logic is now a `.kdl` recipe (the
+  `linkedin/scrape_profile` testbed recipe lives gitignored under `/recipes/`, never committed).
 
 ## Non-negotiable design invariants (do not break these)
 
@@ -166,8 +203,9 @@ M1 (core engine) is DONE. **M2's in-repo browser seam is DONE**, and **M3's firs
 | M | Scope | State |
 |---|---|---|
 | M2a | **Browser handle in `RunCtx`** (`BrowserHandle` trait + `CliBrowser` + `FakeBrowser`) | ✅ done |
-| M2b | Fork chrome-agent → library API + viewport + human mouse movement | 📄 spec + plan written, **not built** |
-| M3 | LinkedIn **profile** adapter | ⏳ `scrape_profile` done; avatar capture not started |
+| M2b | Fork chrome-agent → **KDL recipe engine** (superseded the lib-facade plan) | ✅ engine + write/HTTP verbs done on `feat/recipe-engine` (held); upstream PR held |
+| M2c | pacewright `adapter-recipe` (RecipeAdapter/Registry/Runner) + vault job-runner | ✅ done (this session) |
+| M3 | LinkedIn **profile** adapter | ✅ now a `linkedin/scrape_profile` **recipe** (Rust `adapter-linkedin` deleted); avatar capture not started |
 | M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter | not started |
 | M5 | Riverside adapter (extract raw, export magic clips → Spotify → YouTube unlisted) | not started |
 | M6 | YouTube adapter + daily limits | not started |
