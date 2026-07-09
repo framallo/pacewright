@@ -1,0 +1,35 @@
+# Example schedule file — copy to ~/.pacewright/schedules/<name>.toml
+#
+# A schedule file is a list of recurrent tasks. Each task binds a *recipe* (the "how",
+# installed via `pcw recipe add`) to concrete *params* (a specific case) and a *when*.
+# The recipe is shared and reusable; the schedule + params are yours and live here, never
+# in the recipe file.
+#
+# Timing — set exactly one of:
+#   every = "<cron>"      recurring (croner 5- or 6-field; e.g. "0 9 * * *" = 09:00 daily)
+#   at    = "<datetime>"  one-shot (RFC3339 or YYYY-MM-DDTHH:MM:SS, local time)
+#   (neither)             run once when applied
+#
+# `enabled` is the *default* on/off — toggle at runtime with `pcw schedule enable/disable <id>`
+# or the TUI Schedule pane (space bar). Runtime toggles win over this default.
+#
+# Validate offline:  pcw schedule check
+# Reconcile into the queue:  pcw schedule apply   (the daemon also applies on boot)
+
+[[task]]
+id     = "hn-digest"                       # stable, globally-unique id
+recipe = "news/hackernews"                 # the "how"
+every  = "0 9 * * *"                       # 09:00 every day
+params = { url = "https://news.ycombinator.com/", out_dir = "~/vault/digests" }
+
+[[task]]
+id     = "scrape-jane"
+recipe = "linkedin/scrape_profile"
+at     = "2026-07-10T09:00:00"             # one-shot
+params = { url = "https://www.linkedin.com/in/jane/" }
+
+[[task]]
+id      = "spotify-covers"
+recipe  = "spotify/upload_cover"
+params  = { episode = "e42" }              # runs once when applied
+enabled = false                            # declared but off by default

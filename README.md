@@ -4,7 +4,7 @@ A **wright** (craftsman) of **pace** — a Rust tool that **queues, schedules, a
 
 pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](https://postiz.com)) with one background service you drive from a CLI, a live TUI, an MCP server, or a desktop app. It is built to automate LinkedIn, Riverside, and YouTube through their UIs without tripping bot-detection — the safety comes from driving a real, logged-in browser over CDP and from a scheduler that enforces daily caps, minimum gaps, active-hours windows, and jitter.
 
-> **Status: Milestone 1 (core engine) complete.** The engine — queue, scheduler, pacing/limits, runner, durable tracking — is done, tested (47 tests, `clippy -D warnings` clean), and proven end-to-end against a browser-free **DummyAdapter**. Real platform adapters, the MCP server, and the Tauri GUI are later milestones.
+> **Status: engine + recipe automation + declarative scheduler complete.** The core engine (queue, scheduler, pacing/limits, runner, durable tracking), the **KDL recipe engine** (declarative browser automation, run as paced tasks via `adapter-recipe`), and the **declarative scheduler** (enable-able recurrent tasks in `~/.pacewright/schedules/*.toml`, driven from the CLI + TUI) are done and tested (`clippy -D warnings` clean). A local web dashboard is the next milestone; real platform adapters ship as recipes.
 
 ---
 
@@ -87,7 +87,9 @@ pacewright tui             # live dashboard (id · adapter · action · status �
 | `pause` / `resume <scope>` | pause/resume the tick loop (`scope` = `all`/`daemon` for global, or an adapter name) |
 | `limits` | today's per-key counters |
 | `adapters` / `status` | discovery + daemon status |
-| `tui` | live dashboard |
+| `recipe add/list/job` | install recipes from GitHub, list them, run a vault job note |
+| `schedule check/list/apply/enable/disable` | manage the declarative schedule of recurrent tasks |
+| `tui` | live dashboard (Feed / Schedule / Limits panes — `tab` to cycle) |
 
 ## Configure limits & pacing
 
@@ -102,6 +104,30 @@ active    = "09:00-18:00" # only run inside this local window
 ```
 
 A task that's over cap, too soon, or outside its window is **deferred** (not dropped) to the next eligible slot — the `run at` column in the TUI shows when.
+
+## Schedule recurrent tasks
+
+Three separated concepts: a **recipe** is *how* to execute (shared, installed via `pcw recipe add`), a **task** is a *specific case* (its params), and a **schedule** is *when* + whether it's enabled. Schedules live in their own files — `~/.pacewright/schedules/*.toml` — so one recipe serves many cases on many cadences, and the schedule never gets baked into a shared recipe.
+
+```toml
+# ~/.pacewright/schedules/daily.toml   (see packaging/schedule.example.toml)
+[[task]]
+id     = "hn-digest"                       # stable id — the reconcile key
+recipe = "news/hackernews"                 # the "how"
+every  = "0 9 * * *"                       # cron: 09:00 daily  (or `at = "..."`, or neither)
+params = { url = "https://news.ycombinator.com/", out_dir = "~/vault/digests" }
+```
+
+```bash
+pcw schedule check                # validate the files offline (recipes, params, cron)
+pcw schedule apply                # reconcile into the queue (the daemon also does this on boot)
+pcw schedule list                 # the catalog: id · recipe · when · next-fire · on/off · status
+pcw schedule enable hn-digest     # turn a recurrent task on/off at runtime (wins over the file)
+pcw schedule disable hn-digest
+pcw schedule apply --prune        # also cancel live tasks whose entries were deleted
+```
+
+Enabling/disabling is a first-class runtime toggle (persisted, overriding the file's declared default) — the same thing the TUI's **Schedule** pane does with the space bar. The reconciler is desired-state: it queues only the effectively-enabled entries, updates changed ones in place, and (`--prune`) cancels removed ones.
 
 ## Install as a background service (macOS launchd)
 

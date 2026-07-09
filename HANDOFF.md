@@ -1,7 +1,32 @@
 # pacewright — handoff
 
-Last updated: 2026-07-09 (KDL recipe engine landed: chrome-agent fork + pacewright
-`adapter-recipe` + vault job-runner; `adapter-linkedin` retired). Written for the next agent.
+Last updated: 2026-07-09 (KDL recipe engine + **declarative scheduler** landed). Written for the next agent.
+
+## Declarative scheduler — enable-able recurrent tasks (2026-07-09)
+
+The seo-os-style model: a **catalog of recurrent tasks you toggle on/off**. Spec:
+`docs/specs/2026-07-09-declarative-scheduler.md`.
+
+- **recipe = how (shared) · task = which params (your case) · schedule = when (yours).** The
+  schedule is NOT in the recipe file — it's `~/.pacewright/schedules/*.toml`, a list of `[[task]]`
+  entries (`id`, `recipe`, `params`, `every`/`at`, `enabled`). See `packaging/schedule.example.toml`.
+- **`crates/adapter-recipe/src/schedule.rs`** — parse (`load_dir`/`parse_file`), `validate`/
+  `partition` (against the `RecipeRegistry`), and `reconcile` (desired-state: file → queue, keyed
+  on `dedup:schedule:<id>`, queues only effectively-enabled entries, `--prune` cancels removed).
+  Lives in `adapter-recipe` (not `core`) because validation needs the registry.
+- **Enable/disable is a runtime toggle**, persisted in `core`'s new `schedule_state` table (wins
+  over the file default) — same pattern as `set_limit` → `limit_overrides`. Both tables + a fix to
+  preserve `dedup_key` across recurrence firings are in `crates/core/src/store.rs`/`runner.rs`.
+- **RPCs** (`proto` + `daemon/server.rs`, now behind a `Server{engine,registry,schedules_dir}` ctx):
+  `ScheduleApply{prune}`, `ScheduleList`, `ScheduleEnable/Disable{id}`, `SetLimit{key,config}`.
+  The daemon reconciles on boot and merges `limit_overrides` over `config.toml`.
+- **CLI**: `pcw schedule check` (offline) / `list`/`apply [--prune]`/`enable`/`disable`.
+- **TUI**: three panes — **Feed / Schedule / Limits**, `tab` cycles, in Schedule `↑/↓` select,
+  `space` enable/disable, `a` apply.
+
+Deferred (documented): the **web dashboard** (localhost axum + WS control plane consuming these
+RPCs — the toggle becomes a browser switch), the **daemon jobs-sweep**/file-watch, and the
+automated Claude repair loop.
 
 ## Recipe engine — the big shift (2026-07-09)
 

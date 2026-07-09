@@ -15,6 +15,28 @@ impl LimitConfig {
     pub fn permissive() -> Self {
         LimitConfig { daily_cap: i64::MAX, min_gap_ms: 0, jitter: 0.0, active_start_min: 0, active_end_min: 1440 }
     }
+
+    /// Build a `LimitConfig` from the human-friendly parts a `set_limit` carries — the same
+    /// forms `config.toml` accepts (`min_gap="8m"`, `active="09:00-18:00"`). Omitted parts
+    /// take permissive defaults.
+    pub fn from_parts(
+        daily_cap: Option<i64>,
+        min_gap: Option<&str>,
+        jitter: Option<f64>,
+        active: Option<&str>,
+    ) -> Result<LimitConfig> {
+        let (astart, aend) = match active {
+            Some(a) => parse_active(a)?,
+            None => (0, 1440),
+        };
+        Ok(LimitConfig {
+            daily_cap: daily_cap.unwrap_or(i64::MAX),
+            min_gap_ms: match min_gap { Some(g) => parse_duration_ms(g)?, None => 0 },
+            jitter: jitter.unwrap_or(0.0),
+            active_start_min: astart,
+            active_end_min: aend,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,6 +102,12 @@ impl Config {
 
     pub fn limit_for(&self, key: &str) -> LimitConfig {
         self.limits.get(key).cloned().unwrap_or_else(LimitConfig::permissive)
+    }
+
+    /// Set (or replace) a limit at runtime — used by `set_limit` to layer a persisted
+    /// override over what `config.toml` declared. In-memory only; the daemon persists it.
+    pub fn set_limit(&mut self, key: impl Into<String>, cfg: LimitConfig) {
+        self.limits.insert(key.into(), cfg);
     }
 }
 

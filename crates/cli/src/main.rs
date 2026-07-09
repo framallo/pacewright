@@ -1,6 +1,7 @@
 mod client;
 mod recipe_install;
 mod recipe_job;
+mod schedule_cmd;
 mod tui;
 
 use anyhow::Result;
@@ -9,8 +10,11 @@ use pacewright_adapter_recipe::registry::RecipeRegistry;
 use pacewright_proto::{AddTaskReq, Request};
 use std::path::PathBuf;
 
+fn pw_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap()).join(".pacewright")
+}
 fn sock_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap()).join(".pacewright").join("pw.sock")
+    pw_dir().join("pw.sock")
 }
 
 #[derive(Parser)]
@@ -45,6 +49,27 @@ enum Cmd {
     /// Manage recipes installed from GitHub repos.
     #[command(subcommand)]
     Recipe(RecipeCmd),
+    /// Manage the declarative schedule (recurrent tasks you enable/disable).
+    #[command(subcommand)]
+    Schedule(ScheduleCmd),
+}
+
+#[derive(Subcommand)]
+enum ScheduleCmd {
+    /// Validate the schedule files offline (no daemon): ids, recipes, params, cron.
+    Check,
+    /// Show the schedule catalog: id · recipe · when · next-fire · on/off · live status.
+    List,
+    /// Reconcile the schedule files into the queue.
+    Apply {
+        /// Also cancel live tasks whose entries were removed from the files.
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Enable a recurrent task (overrides its file default) and reconcile.
+    Enable { id: String },
+    /// Disable a recurrent task and reconcile (cancels its live task).
+    Disable { id: String },
 }
 
 #[derive(Subcommand)]
@@ -89,6 +114,16 @@ async fn main() -> Result<()> {
                 eprintln!("enqueuing recipe `{}` from {}", job.recipe_name, note.display());
                 job.into_add_request()
             }
+        },
+        Cmd::Schedule(sc) => match sc {
+            // `check` is offline (parse + validate locally); the rest are daemon RPCs.
+            ScheduleCmd::Check => {
+                return schedule_cmd::check(&pw_dir().join("schedules"), &recipe_install::recipes_root()?);
+            }
+            ScheduleCmd::List => Request::ScheduleList,
+            ScheduleCmd::Apply { prune } => Request::ScheduleApply { prune },
+            ScheduleCmd::Enable { id } => Request::ScheduleEnable { id },
+            ScheduleCmd::Disable { id } => Request::ScheduleDisable { id },
         },
     };
     let resp = client::call(&sock, req).await?;

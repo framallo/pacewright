@@ -45,6 +45,23 @@ CREATE TABLE IF NOT EXISTS limit_counters (
     last_spent_at INTEGER,
     PRIMARY KEY (limit_key, window_date)
 );
+-- Runtime enable/disable overrides for schedule entries (id = the schedule entry id).
+-- The schedule file declares a default; a row here wins over it until changed.
+CREATE TABLE IF NOT EXISTS schedule_state (
+    entry_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+-- Runtime pacing overrides that win over config.toml until changed (set_limit).
+CREATE TABLE IF NOT EXISTS limit_overrides (
+    limit_key TEXT PRIMARY KEY,
+    daily_cap INTEGER NOT NULL,
+    min_gap_ms INTEGER NOT NULL,
+    jitter REAL NOT NULL,
+    active_start_min INTEGER NOT NULL,
+    active_end_min INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 "#;
 
 impl Store {
@@ -220,6 +237,85 @@ impl Store {
         for r in rows { out.push(r?); }
         Ok(out)
     }
+
+    // ---- schedule enable/disable overrides ----------------------------------
+
+    /// Upsert the runtime enabled override for a schedule entry.
+    pub fn schedule_state_set(&self, entry_id: &str, enabled: bool, at_ms: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO schedule_state (entry_id,enabled,updated_at) VALUES (?1,?2,?3)
+             ON CONFLICT(entry_id) DO UPDATE SET enabled=?2, updated_at=?3",
+            params![entry_id, i64::from(enabled), at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Every runtime enabled override, keyed by entry id.
+    pub fn schedule_state_all(&self) -> rusqlite::Result<std::collections::HashMap<String, bool>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT entry_id, enabled FROM schedule_state")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?;
+        let mut out = std::collections::HashMap::new();
+        for r in rows { let (k, v) = r?; out.insert(k, v); }
+        Ok(out)
+    }
+
+    // ---- runtime pacing overrides (set_limit) -------------------------------
+
+    /// Upsert a runtime pacing override for a limit key.
+    pub fn limit_override_set(&self, key: &str, cfg: &crate::config::LimitConfig, at_ms: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO limit_overrides (limit_key,daily_cap,min_gap_ms,jitter,active_start_min,active_end_min,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(limit_key) DO UPDATE SET daily_cap=?2,min_gap_ms=?3,jitter=?4,active_start_min=?5,active_end_min=?6,updated_at=?7",
+            params![key, cfg.daily_cap, cfg.min_gap_ms, cfg.jitter, cfg.active_start_min, cfg.active_end_min, at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Every runtime pacing override, as `(key, config)` pairs.
+    pub fn limit_overrides_all(&self) -> rusqlite::Result<Vec<(String, crate::config::LimitConfig)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT limit_key,daily_cap,min_gap_ms,jitter,active_start_min,active_end_min FROM limit_overrides ORDER BY limit_key",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                crate::config::LimitConfig {
+                    daily_cap: r.get(1)?,
+                    min_gap_ms: r.get(2)?,
+                    jitter: r.get(3)?,
+                    active_start_min: r.get(4)?,
+                    active_end_min: r.get(5)?,
+                },
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
+
+    /// Active (non-terminal) tasks whose `dedup_key` starts with `prefix` — the schedule
+    /// reconciler uses this (prefix `"schedule:"`) to find its live tasks for pruning.
+    pub fn list_active_by_dedup_prefix(&self, prefix: &str) -> rusqlite::Result<Vec<Task>> {
+        let conn = self.conn.lock().unwrap();
+        let terminal = TaskStatus::terminal_strs();
+        let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT * FROM tasks WHERE dedup_key LIKE ? || '%' AND status NOT IN ({placeholders}) ORDER BY dedup_key"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut binds: Vec<&str> = Vec::with_capacity(1 + terminal.len());
+        binds.push(prefix);
+        binds.extend(terminal.iter().copied());
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), Self::row_to_task)?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
 }
 
 fn status_from_str(s: &str) -> TaskStatus {
@@ -297,6 +393,58 @@ mod tests {
         assert_eq!(other_day, vec![("email.send".to_string(), 1, Some(50))]);
 
         assert!(s.list_counters("2026-01-01").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_schedule_state_override_roundtrip() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.schedule_state_all().unwrap().is_empty());
+        s.schedule_state_set("hn-digest", false, 100).unwrap();
+        s.schedule_state_set("scrape-jane", true, 100).unwrap();
+        s.schedule_state_set("hn-digest", true, 200).unwrap(); // upsert wins
+        let all = s.schedule_state_all().unwrap();
+        assert_eq!(all.get("hn-digest"), Some(&true));
+        assert_eq!(all.get("scrape-jane"), Some(&true));
+    }
+
+    #[test]
+    fn test_limit_override_roundtrip() {
+        use crate::config::LimitConfig;
+        let s = Store::open_in_memory().unwrap();
+        let cfg = LimitConfig { daily_cap: 5, min_gap_ms: 60_000, jitter: 0.25, active_start_min: 540, active_end_min: 1080 };
+        s.limit_override_set("linkedin.post", &cfg, 100).unwrap();
+        let all = s.limit_overrides_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "linkedin.post");
+        assert_eq!(all[0].1, cfg);
+        // upsert replaces
+        let cfg2 = LimitConfig { daily_cap: 10, ..cfg };
+        s.limit_override_set("linkedin.post", &cfg2, 200).unwrap();
+        assert_eq!(s.limit_overrides_all().unwrap()[0].1.daily_cap, 10);
+    }
+
+    #[test]
+    fn test_active_by_dedup_prefix() {
+        let s = Store::open_in_memory().unwrap();
+        let mut a = Task::new_now("dummy", "echo", serde_json::json!({}), 1000);
+        a.dedup_key = Some("schedule:one".into());
+        s.insert_task(&a).unwrap();
+        let mut b = Task::new_now("dummy", "echo", serde_json::json!({}), 1000);
+        b.dedup_key = Some("schedule:two".into());
+        s.insert_task(&b).unwrap();
+        let mut other = Task::new_now("dummy", "echo", serde_json::json!({}), 1000);
+        other.dedup_key = Some("job:x".into());
+        s.insert_task(&other).unwrap();
+
+        let mut found = s.list_active_by_dedup_prefix("schedule:").unwrap();
+        found.sort_by(|x, y| x.dedup_key.cmp(&y.dedup_key));
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].dedup_key.as_deref(), Some("schedule:one"));
+
+        // terminal tasks drop out of the active set
+        b.status = TaskStatus::Canceled;
+        s.update_task(&b).unwrap();
+        assert_eq!(s.list_active_by_dedup_prefix("schedule:").unwrap().len(), 1);
     }
 
     #[test]
