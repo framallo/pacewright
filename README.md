@@ -4,7 +4,7 @@ A **wright** (craftsman) of **pace** — a Rust tool that **queues, schedules, a
 
 pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](https://postiz.com)) with one background service you drive from a CLI, a live TUI, an MCP server, or a desktop app. It is built to automate LinkedIn, Riverside, and YouTube through their UIs without tripping bot-detection — the safety comes from driving a real, logged-in browser over CDP and from a scheduler that enforces daily caps, minimum gaps, active-hours windows, and jitter.
 
-> **Status: engine + recipe automation + declarative scheduler complete.** The core engine (queue, scheduler, pacing/limits, runner, durable tracking), the **KDL recipe engine** (declarative browser automation, run as paced tasks via `adapter-recipe`), and the **declarative scheduler** (enable-able recurrent tasks in `~/.pacewright/schedules/*.toml`, driven from the CLI + TUI) are done and tested (`clippy -D warnings` clean). A local web dashboard is the next milestone; real platform adapters ship as recipes.
+> **Status: engine + recipe automation + declarative scheduler + web dashboard complete.** The core engine (queue, scheduler, pacing/limits, runner, durable tracking), the **KDL recipe engine** (declarative browser automation, run as paced tasks via `adapter-recipe`), the **declarative scheduler** (enable-able recurrent tasks in `~/.pacewright/schedules/*.toml`), and a **local web dashboard** (Feed / Schedule / Limits, live over WebSocket) are done and tested (`clippy -D warnings` clean). Driven interchangeably from the CLI, the TUI, or the browser. Real platform adapters ship as recipes.
 
 ---
 
@@ -129,6 +129,21 @@ pcw schedule apply --prune        # also cancel live tasks whose entries were de
 
 Enabling/disabling is a first-class runtime toggle (persisted, overriding the file's declared default) — the same thing the TUI's **Schedule** pane does with the space bar. The reconciler is desired-state: it queues only the effectively-enabled entries, updates changed ones in place, and (`--prune`) cancels removed ones.
 
+## Web dashboard
+
+The daemon also serves a **local web dashboard** — the same control plane as the CLI/TUI, in a browser. It's bound to `127.0.0.1:7878` (localhost only; override with `PACEWRIGHT_WEB_ADDR`, set empty to disable) and runs alongside the socket + tick loop, so the browser, CLI, and TUI all act on the one engine.
+
+```bash
+pacewrightd                 # the daemon logs: "pacewright dashboard on http://127.0.0.1:7878"
+open http://127.0.0.1:7878  # Feed · Schedule · Limits
+```
+
+- **Feed** — the live task list (status pills, attempts, last error) with per-row **Run now** / **Cancel** and a global **Pause/Resume all**.
+- **Schedule** — the seo-os-style catalog: a **toggle switch** per recurrent task (the same enable/disable as the CLI), recipe, when (every/at/on-apply), next fire, live status, plus **Apply** (`--prune` optional).
+- **Limits** — per-key spend (`count` today, last-spent) and an inline editor that issues `set_limit` (daily cap · min gap · jitter · active window).
+
+It updates live over a WebSocket (a full snapshot pushed once a second — no polling) and adds no backend logic: every action is the same `proto::Request` the socket takes, funnelled through the one dispatch. A single self-contained HTML page (inlined CSS+JS, no build step), embedded in the binary.
+
 ## Install as a background service (macOS launchd)
 
 ```bash
@@ -141,7 +156,7 @@ launchctl load ~/Library/LaunchAgents/com.paperclip.pacewrightd.plist
 
 | Milestone | Scope |
 |---|---|
-| **M1 ✅** | Core engine + DummyAdapter + CLI + TUI + launchd |
+| **M1 ✅** | Core engine + DummyAdapter + CLI + TUI + launchd + recipe engine + declarative scheduler + **web dashboard** |
 | M2 | Extend chrome-agent (larger viewport, real CDP input, human mouse movement, `Runtime.enable` audit) + browser handle in `RunCtx` |
 | M3 | LinkedIn **profile** adapter (scrape + avatar) — port `linkedin_scraper` to Rust |
 | M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter |

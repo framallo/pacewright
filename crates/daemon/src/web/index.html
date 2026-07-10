@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pacewright</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --ink: #1c1d21; --muted: #6b6f76;
+    --line: #e4e5e9; --accent: #2f6feb; --accent-ink: #ffffff;
+    --ok: #1a7f45; --warn: #b26a00; --err: #c02b2b; --run: #2f6feb; --pill: #eef0f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121317; --panel: #1a1c21; --ink: #e9eaed; --muted: #9aa0a8;
+      --line: #2a2d34; --accent: #4f8cff; --accent-ink: #0b0c0f;
+      --ok: #4cc27b; --warn: #e0a53d; --err: #ff6b6b; --run: #4f8cff; --pill: #24272e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5;
+  }
+  .brand { font-weight: 700; letter-spacing: -0.02em; font-size: 16px; }
+  .brand .dot { color: var(--accent); }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600;
+    padding: 6px 12px; border-radius: 7px; cursor: pointer;
+  }
+  nav button.active { background: var(--pill); color: var(--ink); }
+  .spacer { flex: 1; }
+  .stat { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stat b { color: var(--ink); }
+  .conn { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  .conn.live { background: var(--ok); }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  .btn {
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit;
+    font-weight: 600; padding: 6px 12px; border-radius: 7px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .btn.small { padding: 3px 9px; font-size: 12.5px; }
+  .btn.danger:hover { border-color: var(--err); color: var(--err); }
+  .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  table { width: 100%; border-collapse: collapse; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .card > .card-head {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line);
+  }
+  .card-head h2 { font-size: 14px; margin: 0; }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; background: var(--pill); font-size: 12px; font-weight: 600; }
+  .pill.ok { color: var(--ok); } .pill.err { color: var(--err); } .pill.run { color: var(--run); } .pill.warn { color: var(--warn); }
+  .muted { color: var(--muted); }
+  .err-text { color: var(--err); }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  /* toggle switch */
+  .switch { position: relative; display: inline-block; width: 40px; height: 23px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; cursor: pointer; background: var(--line); border-radius: 999px; transition: .15s;
+  }
+  .slider::before {
+    content: ""; position: absolute; height: 17px; width: 17px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: .15s;
+  }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(17px); }
+  .sched-when { display: flex; flex-direction: column; }
+  .sched-when small { color: var(--muted); }
+  .apply-bar { display: flex; align-items: center; gap: 12px; }
+  .apply-bar label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .banner { background: var(--pill); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; }
+  .banner.err { border-color: var(--err); }
+  .lim-edit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .lim-edit input { width: 90px; }
+  input[type=text], input[type=number] {
+    font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--ink);
+  }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: var(--bg); padding: 9px 16px; border-radius: 8px; font-weight: 600;
+    opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">pace<span class="dot">·</span>wright</div>
+  <nav>
+    <button data-pane="feed" class="active">Feed</button>
+    <button data-pane="schedule">Schedule</button>
+    <button data-pane="limits">Limits</button>
+  </nav>
+  <div class="spacer"></div>
+  <span class="stat"><b id="s-pending">0</b> pending · <b id="s-running">0</b> running</span>
+  <button id="pauseBtn" class="btn small">Pause all</button>
+  <span class="conn" id="conn" title="disconnected"></span>
+</header>
+<main id="main"></main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+let state = { status: {}, tasks: [], schedules: [], schedule_errors: [], limits: {} };
+let pane = "feed";
+let paused = false;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+
+async function api(method, params) {
+  const body = params === undefined ? { method } : { method, params };
+  const r = await fetch("/api", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (j.type === "error") { toast("✕ " + j.message); throw new Error(j.message); }
+  return j.value;
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+// ---- time / status helpers ----
+function when(ms) {
+  if (ms == null) return "—";
+  const d = new Date(ms), now = Date.now(), diff = ms - now;
+  const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const day = d.toLocaleDateString([], { month: "short", day: "numeric" });
+  const sameDay = new Date().toDateString() === d.toDateString();
+  const rel = Math.abs(diff) < 60000 ? "now"
+    : diff > 0 ? "in " + human(diff) : human(-diff) + " ago";
+  return (sameDay ? t : day + " " + t) + " · " + rel;
+}
+function human(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return s + "s";
+  const m = Math.round(s / 60); if (m < 90) return m + "m";
+  const h = Math.round(m / 60); if (h < 48) return h + "h";
+  return Math.round(h / 24) + "d";
+}
+const STATUS_CLASS = { succeeded: "ok", failed: "err", canceled: "err", running: "run", pending: "", deferred: "warn", blocked: "warn" };
+function statusPill(s) { return `<span class="pill ${STATUS_CLASS[s] ?? ""}">${esc(s ?? "—")}</span>`; }
+
+// ---- render ----
+function render() {
+  $("s-pending").textContent = state.status.pending ?? 0;
+  $("s-running").textContent = state.status.running ?? 0;
+  const scopes = state.status.paused ?? [];
+  paused = scopes.includes("all");
+  $("pauseBtn").textContent = paused ? "Resume all" : "Pause all";
+  $("pauseBtn").classList.toggle("primary", paused);
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.pane === pane));
+  const m = $("main");
+  if (pane === "feed") m.innerHTML = renderFeed();
+  else if (pane === "schedule") m.innerHTML = renderSchedule();
+  else m.innerHTML = renderLimits();
+}
+
+function renderFeed() {
+  const ts = state.tasks;
+  if (!ts.length) return `<div class="card"><div class="empty">No tasks yet. Schedules and <code>pcw add</code> land here.</div></div>`;
+  const rows = ts.map(t => `
+    <tr>
+      <td class="mono">${esc((t.id || "").slice(0, 8))}</td>
+      <td>${esc(t.adapter)}<span class="muted">/</span>${esc(t.action)}</td>
+      <td>${statusPill(t.status)}</td>
+      <td class="num">${t.attempts ?? 0}${t.max_attempts ? "<span class=muted>/" + t.max_attempts + "</span>" : ""}</td>
+      <td>${when(t.scheduled_for)}</td>
+      <td class="err-text">${esc(t.last_error || "")}</td>
+      <td><div class="row-actions">
+        ${isTerminal(t.status) ? "" : `<button class="btn small" data-act="run_now" data-id="${esc(t.id)}">Run now</button>
+        <button class="btn small danger" data-act="cancel" data-id="${esc(t.id)}">Cancel</button>`}
+      </div></td>
+    </tr>`).join("");
+  return `<div class="card">
+    <div class="card-head"><h2>Feed</h2><span class="muted">${ts.length} task${ts.length === 1 ? "" : "s"}</span></div>
+    <table><thead><tr><th>ID</th><th>Action</th><th>Status</th><th>Try</th><th>Scheduled</th><th>Last error</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+const isTerminal = (s) => ["succeeded", "failed", "canceled"].includes(s);
+
+function renderSchedule() {
+  const es = state.schedules;
+  const errs = state.schedule_errors ?? [];
+  const banner = errs.length ? `<div class="banner err"><b>${errs.length} schedule issue${errs.length === 1 ? "" : "s"}:</b> ${errs.map(esc).join(" · ")}</div>` : "";
+  const applyBar = `<div class="apply-bar">
+      <button class="btn primary small" data-act="apply">Apply schedules</button>
+      <label><input type="checkbox" id="pruneChk"> prune removed</label>
+    </div>`;
+  if (!es.length) return banner + `<div class="card"><div class="card-head"><h2>Schedule</h2><div class="spacer"></div>${applyBar}</div><div class="empty">No schedule entries. Add tasks to <code>~/.pacewright/schedules/*.toml</code>.</div></div>`;
+  const rows = es.map(e => {
+    const w = e.every ? ["every", "<code>" + esc(e.every) + "</code>"]
+      : (e.at != null ? ["at", esc(new Date(e.at).toLocaleString())] : ["on apply", ""]);
+    const live = e.live_status ? statusPill(e.live_status) : `<span class="muted">—</span>`;
+    return `<tr>
+      <td><label class="switch"><input type="checkbox" data-act="toggle" data-id="${esc(e.id)}" ${e.enabled ? "checked" : ""}><span class="slider"></span></label></td>
+      <td><b>${esc(e.id)}</b>${e.enabled_default === false && e.enabled ? " <span class=muted>(overridden on)</span>" : ""}</td>
+      <td class="mono">${esc(e.recipe)}</td>
+      <td class="sched-when">${w[0]} ${w[1]}<small>next ${when(e.next_fire)}</small></td>
+      <td>${live}</td>
+      <td class="err-text">${esc(e.last_error || "")}</td>
+    </tr>`;
+  }).join("");
+  return banner + `<div class="card">
+    <div class="card-head"><h2>Schedule</h2><span class="muted">${es.length} entr${es.length === 1 ? "y" : "ies"}</span><div class="spacer"></div>${applyBar}</div>
+    <table><thead><tr><th>On</th><th>ID</th><th>Recipe</th><th>When</th><th>Live</th><th>Last error</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function renderLimits() {
+  const counters = (state.limits && state.limits.counters) || [];
+  const date = state.limits && state.limits.date;
+  const rows = counters.length ? counters.map(c => `
+    <tr>
+      <td class="mono">${esc(c.key)}</td>
+      <td class="num">${c.count}</td>
+      <td>${c.last_spent_at ? when(c.last_spent_at) : "<span class=muted>—</span>"}</td>
+    </tr>`).join("") : `<tr><td colspan="3" class="empty">No spend recorded today.</td></tr>`;
+  return `<div class="card">
+    <div class="card-head"><h2>Limits</h2><span class="muted">${esc(date || "")}</span></div>
+    <table><thead><tr><th>Key</th><th>Count today</th><th>Last spent</th></tr></thead><tbody>${rows}</tbody></table>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-head"><h2>Set a pacing limit</h2></div>
+    <div style="padding:16px">
+      <div class="lim-edit">
+        <input type="text" id="lim-key" placeholder="key e.g. linkedin.connect" style="width:220px">
+        <input type="number" id="lim-cap" placeholder="daily cap" min="0">
+        <input type="text" id="lim-gap" placeholder="min gap 8m">
+        <input type="number" id="lim-jit" placeholder="jitter 0.3" step="0.05" min="0" max="1">
+        <input type="text" id="lim-act" placeholder="active 09:00-17:00" style="width:150px">
+        <button class="btn primary" data-act="setlimit">Set limit</button>
+      </div>
+      <div class="muted" style="margin-top:8px">Persists over <code>config.toml</code> and applies immediately. Leave a field blank to keep its default.</div>
+    </div>
+  </div>`;
+}
+
+// ---- actions (event delegation) ----
+document.addEventListener("click", async (ev) => {
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act, id = el.dataset.id;
+  try {
+    if (act === "run_now") { await api("run_now", { id, force: false }); toast("▶ queued " + id.slice(0, 8)); }
+    else if (act === "cancel") { await api("cancel", { id }); toast("✕ canceled " + id.slice(0, 8)); }
+    else if (act === "toggle") { const on = el.checked; await api(on ? "schedule_enable" : "schedule_disable", { id }); toast((on ? "✓ enabled " : "○ disabled ") + id); }
+    else if (act === "apply") { const prune = $("pruneChk") && $("pruneChk").checked; const r = await api("schedule_apply", { prune: !!prune }); toast(`applied · +${(r.created||[]).length} ~${(r.updated||[]).length} −${(r.canceled||[]).length}`); }
+    else if (act === "setlimit") await setLimit();
+  } catch (e) { /* toast already shown */ }
+});
+
+document.querySelector("nav").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-pane]"); if (!b) return;
+  pane = b.dataset.pane; render();
+});
+$("pauseBtn").addEventListener("click", async () => {
+  await api(paused ? "resume" : "pause", { scope: "daemon" });
+  toast(paused ? "▶ resumed" : "⏸ paused all");
+});
+
+async function setLimit() {
+  const key = $("lim-key").value.trim();
+  if (!key) { toast("key required"); return; }
+  const config = {};
+  const cap = $("lim-cap").value.trim(); if (cap !== "") config.daily_cap = parseInt(cap, 10);
+  const gap = $("lim-gap").value.trim(); if (gap !== "") config.min_gap = gap;
+  const jit = $("lim-jit").value.trim(); if (jit !== "") config.jitter = parseFloat(jit);
+  const act = $("lim-act").value.trim(); if (act !== "") config.active = act;
+  await api("set_limit", { key, config });
+  toast("✓ limit set for " + key);
+}
+
+// ---- websocket live feed ----
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => $("conn").classList.add("live");
+  ws.onmessage = (ev) => { try { state = JSON.parse(ev.data); render(); } catch (e) {} };
+  ws.onclose = () => { $("conn").classList.remove("live"); setTimeout(connect, 1500); };
+  ws.onerror = () => ws.close();
+}
+render();
+connect();
+</script>
+</body>
+</html>

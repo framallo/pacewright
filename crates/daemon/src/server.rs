@@ -240,8 +240,9 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
     }
 }
 
+/// Shared fixtures for the dispatch tests here and the web-layer tests in `web.rs` (same crate).
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use pacewright_core::adapter::AdapterRegistry;
     use pacewright_core::clock::SystemClock;
@@ -249,9 +250,8 @@ mod tests {
     use pacewright_core::rng::SeededRng;
     use pacewright_core::store::Store;
     use pacewright_adapter_dummy::DummyAdapter;
-    use pacewright_proto::AddTaskReq;
 
-    fn scratch(prefix: &str) -> std::path::PathBuf {
+    pub fn scratch(prefix: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "{prefix}-{}-{}",
             std::process::id(),
@@ -261,7 +261,7 @@ mod tests {
         p
     }
 
-    async fn test_server() -> Server {
+    pub async fn test_server() -> Server {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let mut reg = AdapterRegistry::new();
         reg.register(Arc::new(DummyAdapter::new()));
@@ -275,7 +275,7 @@ mod tests {
 
     /// A server whose recipe registry has one `dummy/echo` recipe and whose schedules dir holds
     /// the given TOML — enough to exercise the declarative-scheduler RPCs end to end.
-    async fn test_server_with_schedule(schedule_toml: &str) -> Server {
+    pub async fn test_server_with_schedule(schedule_toml: &str) -> Server {
         let mut srv = test_server().await;
         let recipes = scratch("pcw-srv-recipes");
         std::fs::write(recipes.join("echo.kdl"), "recipe \"dummy/echo\" {}\n").unwrap();
@@ -285,6 +285,13 @@ mod tests {
         srv.schedules_dir = sched;
         srv
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_support::{test_server, test_server_with_schedule};
+    use pacewright_proto::AddTaskReq;
 
     #[tokio::test]
     async fn test_add_then_get_via_dispatch() {
