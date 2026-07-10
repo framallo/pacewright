@@ -57,6 +57,30 @@ pub struct RecipeMeta {
     /// copies cookies before navigating. Absent/`#false` = a public recipe that runs without a
     /// signed-in browser (the default). Keeps auth-vs-public an explicit, declarative property.
     pub auth: bool,
+    /// `auth account="<name>"` — the recipe runs in the persistent per-account browser profile
+    /// `<name>` (established via `pcw auth login`), instead of copying the everyday Chrome cookies.
+    /// `None` with `auth=true` = the legacy `auth #true` (shared `pacewright` profile + copy).
+    pub account: Option<String>,
+    /// `login-url "…"` — only on **account recipes** (name prefix `accounts/`): where the human
+    /// signs in. The recipe's own steps are the signed-in *check*. `None` on normal recipes.
+    pub login_url: Option<String>,
+}
+
+impl RecipeMeta {
+    /// An account (login) recipe — its steps are a signed-in check and it carries a `login-url`.
+    /// Routed to the auth subsystem, never registered as a runnable task adapter.
+    pub fn is_account(&self) -> bool {
+        self.adapter == "accounts"
+    }
+    /// The account name this recipe is bound to (for a normal recipe: its `auth account`; for an
+    /// account recipe: its own `action`, i.e. `accounts/<name>` → `<name>`).
+    pub fn account_name(&self) -> Option<String> {
+        if self.is_account() {
+            Some(self.action.clone())
+        } else {
+            self.account.clone()
+        }
+    }
 }
 
 /// Parse a recipe file's routing metadata. `Ok(None)` = valid KDL but not a recipe (or a
@@ -81,6 +105,8 @@ pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String>
     let mut vars = Vec::new();
     let mut description = None;
     let mut auth = false;
+    let mut account = None;
+    let mut login_url = None;
     for child in children(node) {
         match child.name().value() {
             "limit-key" => {
@@ -94,8 +120,14 @@ pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String>
                     vars.push(v);
                 }
             }
-            // `auth` or `auth #true` → needs the operator's session; `auth #false` → opt out.
-            "auth" => auth = first_bool(child).unwrap_or(true),
+            // `auth` / `auth #true` → needs a session; `auth #false` → opt out;
+            // `auth account="X"` → needs the session of the `X` account profile.
+            "auth" => {
+                account = prop_str(child, "account").map(str::to_string);
+                auth = account.is_some() || first_bool(child).unwrap_or(true);
+            }
+            // `login-url "…"` — only meaningful on account recipes.
+            "login-url" => login_url = first_arg(child).map(str::to_string),
             _ => {}
         }
     }
@@ -109,6 +141,8 @@ pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String>
         vars,
         description,
         auth,
+        account,
+        login_url,
     }))
 }
 
@@ -207,11 +241,38 @@ impl RecipeRegistry {
     }
 
     /// Distinct adapter prefixes present, sorted — one `RecipeAdapter` is registered per.
+    /// Excludes the `accounts` prefix: account (login) recipes are routed to the auth subsystem,
+    /// never registered as runnable task adapters.
     pub fn adapters(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.by_name.values().map(|m| m.adapter.clone()).collect();
+        let mut v: Vec<String> = self
+            .by_name
+            .values()
+            .filter(|m| !m.is_account())
+            .map(|m| m.adapter.clone())
+            .collect();
         v.sort_unstable();
         v.dedup();
         v
+    }
+
+    /// Every account (login) recipe, in name order.
+    pub fn accounts(&self) -> Vec<&RecipeMeta> {
+        self.by_name.values().filter(|m| m.is_account()).collect()
+    }
+
+    /// The account (login) recipe for `<name>` (i.e. `accounts/<name>`), if installed.
+    pub fn account(&self, name: &str) -> Option<&RecipeMeta> {
+        self.by_name
+            .values()
+            .find(|m| m.is_account() && m.action == name)
+    }
+
+    /// The runnable recipes bound to account `<name>` via `auth account="<name>"`, in name order.
+    pub fn recipes_for_account(&self, name: &str) -> Vec<&RecipeMeta> {
+        self.by_name
+            .values()
+            .filter(|m| !m.is_account() && m.account.as_deref() == Some(name))
+            .collect()
     }
 
     /// Every recipe under one adapter prefix (its `action`s), in name order.
@@ -282,6 +343,44 @@ mod tests {
         assert!(m.vars[2].has_default && !m.vars[2].required);
         // no `auth` node → a public recipe by default
         assert!(!m.auth);
+    }
+
+    #[test]
+    fn account_recipes_route_to_auth_not_task_adapters() {
+        let dir = std::env::temp_dir().join(format!(
+            "pcw-acct-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("accounts")).unwrap();
+        // an account (login) recipe + a normal recipe bound to it
+        std::fs::write(
+            dir.join("accounts/prevetted-riverside.kdl"),
+            "recipe \"accounts/prevetted-riverside\" { login-url \"https://riverside.com/login\"\n step { goto \"https://riverside.com/dashboard\" } }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("rv.kdl"),
+            "recipe \"riverside/generate_magic_clips\" { auth account=\"prevetted-riverside\"\n var \"project_id\" required=#true }",
+        )
+        .unwrap();
+        let reg = RecipeRegistry::load_dir(&dir);
+
+        // the account recipe is NOT a task adapter
+        assert!(!reg.adapters().contains(&"accounts".to_string()));
+        assert!(reg.adapters().contains(&"riverside".to_string()));
+        // it IS discoverable as an account, with its login url
+        let accounts = reg.accounts();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].account_name().as_deref(), Some("prevetted-riverside"));
+        assert_eq!(accounts[0].login_url.as_deref(), Some("https://riverside.com/login"));
+        assert!(reg.account("prevetted-riverside").is_some());
+        // the normal recipe is bound to the account
+        let rv = reg.get("riverside", "generate_magic_clips").unwrap();
+        assert!(rv.auth && rv.account.as_deref() == Some("prevetted-riverside"));
+        let bound = reg.recipes_for_account("prevetted-riverside");
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].name, "riverside/generate_magic_clips");
     }
 
     #[test]

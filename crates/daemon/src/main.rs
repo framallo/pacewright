@@ -7,7 +7,7 @@ use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
 use pacewright_adapter_dummy::DummyAdapter;
-use pacewright_adapter_recipe::{schedule, CliRecipeRunner, RecipeAdapter, RecipeRegistry};
+use pacewright_adapter_recipe::{schedule, AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeAdapter, RecipeRegistry};
 use pacewright_browser::CliBrowser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,11 +102,22 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Auth: account recipes (`accounts/*`) establish + check the sessions authed recipes reuse.
+    // The check runs the account recipe headless in its profile (same `recipe_runner`); login opens
+    // a headed window via chrome-agent. Account recipes aren't task adapters, so they never entered
+    // the `RecipeAdapter` loop above.
+    let auth = Arc::new(AuthManager::new(
+        recipe_registry.clone(),
+        recipe_runner.clone(),
+        Arc::new(CliLoginLauncher::new()),
+    ));
+
     let engine = Arc::new(Mutex::new(engine));
     let srv = Arc::new(server::Server {
         engine,
         registry: recipe_registry,
         schedules_dir: schedules_dir(),
+        auth,
     });
 
     // Local web dashboard (localhost only). `PACEWRIGHT_WEB_ADDR` overrides the bind address;

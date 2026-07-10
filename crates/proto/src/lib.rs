@@ -48,6 +48,15 @@ pub enum Request {
     ScheduleDisable { id: String },
     /// Set a runtime pacing override for a limit key (persists over `config.toml`).
     SetLimit { key: String, config: LimitSpec },
+    /// The account catalog + cached signed-in status (read side; no checks run).
+    AuthList,
+    /// Re-run an account's signed-in check headless in its profile and update the cache.
+    /// `account` omitted → recheck every account.
+    AuthRecheck { #[serde(default)] account: Option<String> },
+    /// Open a headed login window for `account` and poll its check until it passes.
+    AuthLogin { account: String },
+    /// Open a login window, one at a time, for each account not known to be signed in.
+    AuthLoginAll,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,5 +88,14 @@ mod tests {
     fn test_response_ok() {
         let s = serde_json::to_string(&Response::Ok(serde_json::json!({"x":1}))).unwrap();
         assert!(s.contains("\"type\":\"ok\""));
+    }
+    #[test]
+    fn test_auth_requests_wire_shape() {
+        assert!(serde_json::to_string(&Request::AuthList).unwrap().contains("\"method\":\"auth_list\""));
+        let recheck = serde_json::to_string(&Request::AuthRecheck { account: Some("rv".into()) }).unwrap();
+        assert!(recheck.contains("\"method\":\"auth_recheck\"") && recheck.contains("\"account\":\"rv\""));
+        let login = Request::AuthLogin { account: "rv".into() };
+        assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&login).unwrap()).unwrap(), login);
+        assert!(serde_json::to_string(&Request::AuthLoginAll).unwrap().contains("\"method\":\"auth_login_all\""));
     }
 }

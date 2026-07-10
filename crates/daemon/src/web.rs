@@ -37,12 +37,16 @@ pub async fn snapshot(srv: &Server) -> Value {
     .await;
     let schedules = rpc_value(srv, Request::ScheduleList).await;
     let limits = rpc_value(srv, Request::Limits).await;
+    // Cached auth status — `AuthList` reads the cache (no per-account check), so it's cheap enough
+    // to carry in the 1 s snapshot and lets the Accounts pane flip live during a login.
+    let accounts = rpc_value(srv, Request::AuthList).await;
     json!({
         "status": status,
         "tasks": tasks.get("tasks").cloned().unwrap_or(json!([])),
         "schedules": schedules.get("schedules").cloned().unwrap_or(json!([])),
         "schedule_errors": schedules.get("errors").cloned().unwrap_or(json!([])),
         "limits": limits,
+        "accounts": accounts.get("accounts").cloned().unwrap_or(json!([])),
     })
 }
 
@@ -97,7 +101,7 @@ mod tests {
     use pacewright_proto::AddTaskReq;
 
     #[tokio::test]
-    async fn snapshot_bundles_the_three_panes() {
+    async fn snapshot_bundles_the_four_panes() {
         let srv = test_server().await;
         let snap = snapshot(&srv).await;
         // every pane the UI needs is present, even on a fresh engine
@@ -105,6 +109,7 @@ mod tests {
         assert!(snap["tasks"].is_array());
         assert!(snap["schedules"].is_array());
         assert!(snap["limits"]["counters"].is_array());
+        assert!(snap["accounts"].is_array());
     }
 
     #[tokio::test]

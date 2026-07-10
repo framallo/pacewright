@@ -1,3 +1,4 @@
+mod auth_cmd;
 mod client;
 mod recipe_install;
 mod recipe_job;
@@ -52,6 +53,27 @@ enum Cmd {
     /// Manage the declarative schedule (recurrent tasks you enable/disable).
     #[command(subcommand)]
     Schedule(ScheduleCmd),
+    /// Establish & inspect the logged-in sessions account recipes need.
+    Auth {
+        #[command(subcommand)]
+        cmd: Option<AuthCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// Show each account: signed-in/out/unknown · recipes using it · last checked.
+    Status,
+    /// Open a headed login window (the daemon pops Chrome; you sign in by hand).
+    Login {
+        /// The account to log into. Omit (or pass `--all`) to open every signed-out one.
+        account: Option<String>,
+        /// Open a login window for every account not already signed in.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Force a status refresh (runs each account's check headless). Omit `account` for all.
+    Recheck { account: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -125,6 +147,14 @@ async fn main() -> Result<()> {
             ScheduleCmd::Enable { id } => Request::ScheduleEnable { id },
             ScheduleCmd::Disable { id } => Request::ScheduleDisable { id },
         },
+        // Auth commands format their own (table / friendly message) rather than dumping JSON.
+        Cmd::Auth { cmd } => {
+            return match cmd.unwrap_or(AuthCmd::Status) {
+                AuthCmd::Status => auth_cmd::status(&sock).await,
+                AuthCmd::Login { account, all } => auth_cmd::login(&sock, account, all).await,
+                AuthCmd::Recheck { account } => auth_cmd::recheck(&sock, account).await,
+            };
+        }
     };
     let resp = client::call(&sock, req).await?;
     println!("{}", serde_json::to_string_pretty(&resp)?);

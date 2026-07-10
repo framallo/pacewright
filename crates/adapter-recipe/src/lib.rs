@@ -12,11 +12,13 @@
 //! - [`adapter`] — the `Adapter` impl gluing the two together.
 
 pub mod adapter;
+pub mod auth;
 pub mod registry;
 pub mod runner;
 pub mod schedule;
 
 pub use adapter::RecipeAdapter;
+pub use auth::{AccountInfo, AccountStatus, AuthManager, CliLoginLauncher, LoginLauncher};
 pub use registry::{RecipeMeta, RecipeRegistry, RecipeVar};
 pub use runner::{CliRecipeRunner, RecipeRunner};
 pub use schedule::{partition, reconcile, validate, ReconcileReport, ScheduleEntry, Timing};
