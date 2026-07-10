@@ -1,21 +1,95 @@
 use anyhow::Result;
-use pacewright_adapter_recipe::{schedule, RecipeRegistry};
+use pacewright_adapter_recipe::{schedule, AuthManager, RecipeRegistry};
 use pacewright_core::config::LimitConfig;
 use pacewright_core::engine::Engine;
 use pacewright_core::model::{Task, TaskStatus};
 use pacewright_proto::{Request, Response};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 /// Everything a request handler needs: the engine, plus the recipe registry and schedules
-/// directory the declarative-scheduler RPCs read.
+/// directory the declarative-scheduler RPCs read, and the auth manager the `Auth*` RPCs drive.
 pub struct Server {
     pub engine: Arc<Mutex<Engine>>,
     pub registry: Arc<RecipeRegistry>,
     pub schedules_dir: PathBuf,
+    pub auth: Arc<AuthManager>,
+}
+
+/// A login's bounded post-open poll: recheck every 4 s, up to 5 minutes, then give up and clear
+/// `logging_in`. Matches the spec's "poll `login.check` every few seconds (bounded, e.g. 5 min)".
+const LOGIN_POLL_EVERY: Duration = Duration::from_secs(4);
+const LOGIN_POLL_MAX_RECHECKS: u32 = 75;
+
+/// Serialize one `AccountInfo` to the `AuthList` row shape (`signed_in` is `true|false|null`).
+fn account_json(a: &pacewright_adapter_recipe::AccountInfo) -> serde_json::Value {
+    serde_json::json!({
+        "account": a.account,
+        "login_url": a.login_url,
+        "recipes": a.recipes,
+        "signed_in": a.status.signed_in,
+        "last_checked": a.status.last_checked_ms,
+        "logging_in": a.status.logging_in,
+    })
+}
+
+/// Spawn the detached bounded poll that flips an account green once its check passes after a login.
+/// Captures the engine clock so `last_checked` stamps stay on the daemon's clock.
+fn spawn_login_poll(srv: &Server, account: String, clock: Arc<dyn pacewright_core::clock::Clock>) {
+    let auth = srv.auth.clone();
+    let now = Arc::new(move || clock.now_ms());
+    tokio::spawn(auth.poll_until_signed_in(account, LOGIN_POLL_EVERY, LOGIN_POLL_MAX_RECHECKS, now));
+}
+
+/// The `Auth*` RPCs, handled outside the engine-locked synchronous dispatch because they spawn
+/// subprocesses and detached polls. Returns `Some(response)` for an auth request, `None` otherwise.
+async fn handle_auth(srv: &Server, req: &Request) -> Option<Response> {
+    let clock = { srv.engine.lock().await.clock.clone() };
+    let now = clock.now_ms();
+    let res: Result<serde_json::Value, String> = match req {
+        Request::AuthList => {
+            let rows: Vec<_> = srv.auth.list().iter().map(account_json).collect();
+            Ok(serde_json::json!({ "accounts": rows }))
+        }
+        Request::AuthRecheck { account } => match account {
+            Some(a) => srv.auth.recheck(a, now).await.map(|_| {
+                serde_json::json!({ "accounts": srv.auth.list().iter().map(account_json).collect::<Vec<_>>() })
+            }),
+            None => {
+                for row in srv.auth.list() {
+                    let _ = srv.auth.recheck(&row.account, now).await;
+                }
+                Ok(serde_json::json!({ "accounts": srv.auth.list().iter().map(account_json).collect::<Vec<_>>() }))
+            }
+        },
+        Request::AuthLogin { account } => match srv.auth.login(account).await {
+            Ok(()) => {
+                spawn_login_poll(srv, account.clone(), clock.clone());
+                Ok(serde_json::json!({ "account": account, "logging_in": true }))
+            }
+            Err(e) => Err(e),
+        },
+        Request::AuthLoginAll => {
+            let mut opened = Vec::new();
+            // Open one window at a time for every account not already known to be signed in.
+            for row in srv.auth.list() {
+                if row.status.signed_in != Some(true) && srv.auth.login(&row.account).await.is_ok() {
+                    spawn_login_poll(srv, row.account.clone(), clock.clone());
+                    opened.push(row.account);
+                }
+            }
+            Ok(serde_json::json!({ "opened": opened }))
+        }
+        _ => return None,
+    };
+    Some(match res {
+        Ok(v) => Response::Ok(v),
+        Err(message) => Response::Error { message },
+    })
 }
 
 fn status_from_opt(s: &Option<String>) -> Option<TaskStatus> {
@@ -42,6 +116,9 @@ fn set_enabled(e: &Engine, srv: &Server, id: &str, enabled: bool, now: i64) -> R
 }
 
 pub async fn handle_request(srv: &Server, req: Request) -> Response {
+    if let Some(resp) = handle_auth(srv, &req).await {
+        return resp;
+    }
     let mut e = srv.engine.lock().await;
     let now = e.clock.now_ms();
     let res: Result<serde_json::Value, String> = (|| {
@@ -173,6 +250,11 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 e.cfg.set_limit(key.clone(), cfg);
                 Ok(serde_json::json!({ "key": key, "set": true }))
             }
+            // Auth RPCs are intercepted by `handle_auth` before this synchronous dispatch.
+            Request::AuthList
+            | Request::AuthRecheck { .. }
+            | Request::AuthLogin { .. }
+            | Request::AuthLoginAll => unreachable!("auth requests are handled by handle_auth"),
         }
     })();
     match res {
@@ -266,11 +348,24 @@ pub(crate) mod test_support {
         let mut reg = AdapterRegistry::new();
         reg.register(Arc::new(DummyAdapter::new()));
         let e = Engine::new(store, reg, Config::default(), Arc::new(SystemClock), Arc::new(SeededRng::new(1)));
+        let registry = Arc::new(RecipeRegistry::new());
         Server {
             engine: Arc::new(Mutex::new(e)),
-            registry: Arc::new(RecipeRegistry::new()),
+            auth: auth_for(registry.clone()),
+            registry,
             schedules_dir: std::env::temp_dir().join("pcw-no-such-schedules-dir"),
         }
+    }
+
+    /// An `AuthManager` over the given registry for tests. Uses real Cli backends, but `AuthList`
+    /// (the only auth RPC exercised in dispatch tests) never spawns them; login/recheck are covered
+    /// by the `adapter-recipe` unit tests against a faked runner/launcher.
+    pub fn auth_for(registry: Arc<RecipeRegistry>) -> Arc<AuthManager> {
+        Arc::new(AuthManager::new(
+            registry,
+            Arc::new(pacewright_adapter_recipe::CliRecipeRunner::new()),
+            Arc::new(pacewright_adapter_recipe::CliLoginLauncher::new()),
+        ))
     }
 
     /// A server whose recipe registry has one `dummy/echo` recipe and whose schedules dir holds
@@ -280,6 +375,7 @@ pub(crate) mod test_support {
         let recipes = scratch("pcw-srv-recipes");
         std::fs::write(recipes.join("echo.kdl"), "recipe \"dummy/echo\" {}\n").unwrap();
         srv.registry = Arc::new(RecipeRegistry::load_dir(&recipes));
+        srv.auth = auth_for(srv.registry.clone());
         let sched = scratch("pcw-srv-schedules");
         std::fs::write(sched.join("s.toml"), schedule_toml).unwrap();
         srv.schedules_dir = sched;
@@ -290,8 +386,48 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::test_support::{test_server, test_server_with_schedule};
+    use super::test_support::{auth_for, scratch, test_server, test_server_with_schedule};
     use pacewright_proto::AddTaskReq;
+
+    #[tokio::test]
+    async fn test_auth_list_reports_accounts_with_recipes_and_unknown_status() {
+        let mut srv = test_server().await;
+        let recipes = scratch("pcw-srv-auth");
+        std::fs::create_dir_all(recipes.join("accounts")).unwrap();
+        std::fs::write(
+            recipes.join("accounts/prevetted-riverside.kdl"),
+            "recipe \"accounts/prevetted-riverside\" { login-url \"https://riverside.com/login\"\n step { goto \"https://riverside.com/dashboard\" } }",
+        )
+        .unwrap();
+        std::fs::write(
+            recipes.join("rv.kdl"),
+            "recipe \"riverside/generate_magic_clips\" { auth account=\"prevetted-riverside\" }",
+        )
+        .unwrap();
+        srv.registry = Arc::new(RecipeRegistry::load_dir(&recipes));
+        srv.auth = auth_for(srv.registry.clone());
+
+        let resp = handle_request(&srv, Request::AuthList).await;
+        match resp {
+            Response::Ok(v) => {
+                let accts = v["accounts"].as_array().unwrap();
+                assert_eq!(accts.len(), 1);
+                assert_eq!(accts[0]["account"], "prevetted-riverside");
+                assert_eq!(accts[0]["login_url"], "https://riverside.com/login");
+                assert_eq!(accts[0]["recipes"][0], "riverside/generate_magic_clips");
+                assert!(accts[0]["signed_in"].is_null(), "unknown before any check");
+                assert_eq!(accts[0]["logging_in"], false);
+            }
+            _ => panic!("auth_list failed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auth_login_unknown_account_errors() {
+        let srv = test_server().await;
+        let resp = handle_request(&srv, Request::AuthLogin { account: "nope".into() }).await;
+        assert!(matches!(resp, Response::Error { .. }), "got {resp:?}");
+    }
 
     #[tokio::test]
     async fn test_add_then_get_via_dispatch() {

@@ -1,6 +1,51 @@
 # pacewright — handoff
 
-Last updated: 2026-07-09 (recipe engine + declarative scheduler + **web dashboard** landed; HN digest proven live end-to-end). Written for the next agent.
+Last updated: 2026-07-10 (recipe **auth & login** landed — account recipes, persistent per-account sessions, `pcw auth` + Accounts panes). Written for the next agent.
+
+## Recipe auth & login — account recipes + persistent sessions (2026-07-10)
+
+Running `riverside/generate_magic_clips` through pacewright 403'd: `chrome-agent --copy-cookies`
+copies a **static snapshot** of the everyday Chrome profile, and Riverside's access token has a
+**~9.5-minute TTL** — the snapshot is stale by the time the recipe runs (Google/YouTube: signed out
+entirely). Fix: recipes reuse a **durable, self-refreshing per-account session**, and the operator
+can **establish + inspect** those sessions. Spec: `docs/specs/2026-07-10-recipe-auth-login.md`.
+
+**The model — a login IS a recipe.** Login procedures live under
+`~/.pacewright/recipes/accounts/<account>.kdl` (account name = file stem). An account recipe is a
+**normal recipe whose steps ARE the signed-in check**, plus a flat `login-url` node. A normal recipe
+references its account by evolving the `auth` flag: `auth account="prevetted-riverside"` (was `auth
+#true`). Recipes sharing an account share one session. chrome-agent needs **no changes** — `auth
+account=…` and `login-url` are unknown nodes it already ignores; account recipes run as ordinary
+recipes; `--headed` + persistent `--browser <name>` already exist.
+
+- **`crates/adapter-recipe/src/registry.rs`** — `RecipeMeta` gains `account: Option<String>` (from
+  `auth account="…"`) + `login_url` (account recipes). `is_account()` = name prefix `accounts/`;
+  `accounts()` / `account(name)` / `recipes_for_account(name)`. `adapters()` **excludes** accounts,
+  so an account recipe is never a runnable task adapter (routed to auth instead).
+- **`crates/adapter-recipe/src/runner.rs`** — `RecipeRunner::run(path, vars, auth, account)`. When
+  `account=Some(x)`, run in that **persistent profile** (`--browser x`, **no `--copy-cookies`**) — the
+  staleness fix. `auth #true` (no account) keeps the shared `pacewright` profile + copy.
+- **`crates/adapter-recipe/src/auth.rs`** (NEW) — `AuthManager` owns the per-account **status cache**
+  + login orchestration. `recheck` runs the account recipe headless in its profile (`Ok`→signed-in,
+  `Terminal`→signed-out, `Retryable`→unknown). `login` opens a **headed** window via the
+  `LoginLauncher` seam (`CliLoginLauncher` = `chrome-agent --browser <account> --headed goto
+  <login-url>`) and marks `logging_in`; `poll_until_signed_in` rechecks (4s × 75 ≈ 5 min) then clears.
+- **`proto` + `daemon/server.rs`** — four RPCs: `AuthList` (cached, cheap — rides the 1s web
+  snapshot), `AuthRecheck{account?}`, `AuthLogin{account}`, `AuthLoginAll`. Handled in an **async**
+  `handle_auth` BEFORE the engine-locked synchronous dispatch (they spawn subprocesses + detached
+  polls). `Server` gains `auth: Arc<AuthManager>`; `main.rs` builds it from the registry + runner +
+  `CliLoginLauncher`. `web.rs::snapshot()` includes `accounts`.
+- **Clients (thin):** `pcw auth status/login [--all]/recheck` (`cli/src/auth_cmd.rs`, friendly
+  table/messages); web **Accounts** pane (4th tab, Log in / Recheck / Log in all); TUI **Accounts**
+  pane (`tab` cycles Feed/Schedule/Limits/Accounts, `l`=login `r`=recheck on the selected row).
+
+**Verified live:** an `accounts/prevetted-riverside` recipe + a `riverside/generate_magic_clips`
+referencing it → daemon registered only the `riverside` task adapter (account excluded) → `pcw auth
+status` printed the account, `unknown`/never, with the recipe using it → `pcw auth login nope` errored
+cleanly. **Gotcha the smoke test caught:** regex in an `expect` locator must be a **KDL raw string**
+(`#"riverside\.com/dashboard"#`) — a plain `"…\.…"` is an invalid KDL escape and the whole recipe
+fails to load. Deferred (spec §6): password-manager fill (`login-field`) — interactive login only for
+now; credentials never pass through pacewright.
 
 ## Web dashboard — the control plane in a browser (2026-07-09)
 

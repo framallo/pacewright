@@ -16,25 +16,34 @@ Login procedures live as their own recipes under **`~/.pacewright/recipes/accoun
 Each is the login for exactly one **account** (the account name = the file stem, e.g.
 `accounts/prevetted-riverside.kdl` → account `prevetted-riverside`). An account recipe declares:
 
+An account recipe is a **normal recipe whose steps ARE the signed-in check**, plus flat
+pacewright-consumed nodes (`login-url`, optional `login-field`). chrome-agent runs it like any
+recipe and **ignores** the extra nodes (forward-compat, `_ => {}`), so **chrome-agent needs no
+changes** — the whole feature is pacewright-side.
+
 ```kdl
 recipe "accounts/prevetted-riverside" {
     description "Login for the prevetted.fm Riverside account."
-    login {
-        url "https://riverside.com/login"          // where the human signs in
-        // How we KNOW signed-in vs signed-out (run headless in the account profile): visiting the
-        // dashboard stays on /dashboard when signed in, but redirects to /login when signed out.
-        check {
-            goto "https://riverside.com/dashboard"
-            expect on-fail="terminal" message="signed out" {
-                settled-url-matches "riverside\.com/dashboard"
-            }
+    login-url "https://riverside.com/login"        // where the human signs in (pacewright-consumed)
+
+    // The recipe's steps ARE the signed-in check, run headless in the account profile: visiting the
+    // dashboard stays on /dashboard when signed in, but redirects to /login when signed out.
+    step { goto "https://riverside.com/dashboard" }
+    step {
+        expect on-fail="terminal" message="signed out" {
+            settled-url-matches #"riverside\.com/dashboard"#
         }
-        // Optional password-manager / credential-tool fill (values never pass through the agent):
-        // field "username" { locator role="textbox" name="Email" }
-        // field "password" secret=#true { locator role="textbox" name="Password" }
     }
+
+    // Optional password-manager / credential-tool fill (values never pass through the agent):
+    // login-field "username" { locator role="textbox" name="Email" }
+    // login-field "password" secret=#true { locator role="textbox" name="Password" }
 }
 ```
+
+The account name is the recipe name after the `accounts/` prefix (`accounts/prevetted-riverside` →
+account `prevetted-riverside`, profile `prevetted-riverside`). Account recipes are **not** registered
+as runnable task adapters — the registry routes them to the auth subsystem instead.
 
 A normal recipe **references** its account by evolving the existing `auth` flag:
 
@@ -109,8 +118,7 @@ updates live during a login without any new push channel.
 - **Recheck** per row; **Log in all** header action for the signed-out ones.
 
 **TUI** — an Accounts pane at parity (tab-cycle Feed/Schedule/Limits/Accounts; `l` = login on the
-selected row, `r` = recheck). Optional in the first cut if it lengthens the milestone; web + CLI are
-the required surfaces.
+selected row, `r` = recheck). Required in v1 alongside web + CLI.
 
 ## 5. Signed-in detection — the `login.check`
 
@@ -130,14 +138,14 @@ interactive path.
 
 ## 7. Changes
 
-**chrome-agent** (`~/work/chrome-agent`, branch `feat/recipe-engine`):
-- Recipe model: `auth` gains an optional `account="…"` property (keep bare `#true`). New `login {
-  url; check { … }; field … }` block; account recipes are recipes that carry it. `recipe check`
-  validates it. Headed + persistent profile already exist (`--headed`, `--browser`).
+**chrome-agent** (`~/work/chrome-agent`, branch `feat/recipe-engine`): **no changes.** `auth
+account="…"`, `login-url`, and `login-field` are unknown nodes it already ignores; the account
+recipe's steps run as an ordinary recipe; `--headed` and persistent `--browser <name>` already exist.
 
 **pacewright**:
-- `adapter-recipe`: `RecipeMeta` gains `account: Option<String>` (from `auth account`) and, for
-  account recipes, the parsed `login` (url + check + fields). Registry indexes `accounts/`. The
+- `adapter-recipe`: `RecipeMeta` gains `account: Option<String>` (from `auth account="…"`) and, for
+  account recipes (name prefix `accounts/`), the parsed `login_url` + `login_fields`. Registry
+  indexes `accounts/` separately and does **not** register an `accounts` task adapter. The
   runner/adapter runs an authed recipe with `--browser <account>` (no copy) instead of the shared
   profile.
 - `core`/`daemon`: an `auth` module owning the status cache + login orchestration; `proto` gains the
@@ -160,14 +168,12 @@ interactive path.
 
 ## 9. Sequencing
 
-1. **chrome-agent**: `auth account` + the `login` block + `recipe check`; run authed recipes in a
-   persistent profile. (Unblocks everything; validate `accounts/prevetted-riverside` by hand.)
-2. **pacewright core/adapter**: `RecipeMeta.account` + `login`, registry `accounts/`, run authed
-   recipes with `--browser <account>`. Prove `riverside/generate_magic_clips` goes green through the
-   daemon once `prevetted-riverside` is logged in.
+1. **pacewright adapter-recipe**: `RecipeMeta.account` (from `auth account="…"`) + `login_url`/
+   `login_fields`; registry indexes `accounts/` and skips the `accounts` task adapter; run authed
+   recipes with `--browser <account>` (no copy). (chrome-agent unchanged.)
 3. **daemon + proto**: the auth status cache + orchestration + the four RPCs + boot load.
 4. **CLI**: `pcw auth status/login/recheck`.
-5. **Web**: the Accounts pane + snapshot wiring. (Optional) TUI Accounts pane.
+5. **Web**: the Accounts pane + snapshot wiring. **TUI**: the Accounts pane (tab-cycle + `l`/`r`).
 6. Gate + docs (README auth section, HANDOFF), branch, merge `--no-ff`.
 
 ## 10. Non-goals / deferred

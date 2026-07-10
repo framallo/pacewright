@@ -5,7 +5,7 @@ use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
 use pacewright_adapter_dummy::DummyAdapter;
-use pacewright_adapter_recipe::RecipeRegistry;
+use pacewright_adapter_recipe::{AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeRegistry};
 use pacewright_proto::{AddTaskReq, Request, Response};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,10 +38,17 @@ async fn test_e2e_echo_runs_to_success() {
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
     let engine = Arc::new(Mutex::new(Engine::new(store, reg, Config::default(), Arc::new(SystemClock), Arc::new(SeededRng::new(1)))));
+    let registry = Arc::new(RecipeRegistry::new());
+    let auth = Arc::new(AuthManager::new(
+        registry.clone(),
+        Arc::new(CliRecipeRunner::new()),
+        Arc::new(CliLoginLauncher::new()),
+    ));
     let srv = Arc::new(Server {
         engine,
-        registry: Arc::new(RecipeRegistry::new()),
+        registry,
         schedules_dir: dir.join("schedules"),
+        auth,
     });
 
     let sock2 = sock.clone();

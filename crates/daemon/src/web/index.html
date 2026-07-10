@@ -104,6 +104,7 @@
     <button data-pane="feed" class="active">Feed</button>
     <button data-pane="schedule">Schedule</button>
     <button data-pane="limits">Limits</button>
+    <button data-pane="accounts">Accounts</button>
   </nav>
   <div class="spacer"></div>
   <span class="stat"><b id="s-pending">0</b> pending · <b id="s-running">0</b> running</span>
@@ -115,7 +116,7 @@
 
 <script>
 "use strict";
-let state = { status: {}, tasks: [], schedules: [], schedule_errors: [], limits: {} };
+let state = { status: {}, tasks: [], schedules: [], schedule_errors: [], limits: {}, accounts: [] };
 let pane = "feed";
 let paused = false;
 
@@ -169,6 +170,7 @@ function render() {
   const m = $("main");
   if (pane === "feed") m.innerHTML = renderFeed();
   else if (pane === "schedule") m.innerHTML = renderSchedule();
+  else if (pane === "accounts") m.innerHTML = renderAccounts();
   else m.innerHTML = renderLimits();
 }
 
@@ -252,6 +254,40 @@ function renderLimits() {
   </div>`;
 }
 
+// signed-in/out/unknown/logging-in → a colored pill (reuses the status pill palette).
+function sessionPill(a) {
+  if (a.logging_in) return `<span class="pill run">logging in…</span>`;
+  if (a.signed_in === true) return `<span class="pill ok">signed in</span>`;
+  if (a.signed_in === false) return `<span class="pill err">signed out</span>`;
+  return `<span class="pill warn">unknown</span>`;
+}
+
+function renderAccounts() {
+  const as = state.accounts || [];
+  const headBar = `<div class="apply-bar">
+      <button class="btn primary small" data-act="auth_login_all">Log in all</button>
+      <button class="btn small" data-act="auth_recheck_all">Recheck all</button>
+    </div>`;
+  if (!as.length) return `<div class="card"><div class="card-head"><h2>Accounts</h2><div class="spacer"></div>${headBar}</div><div class="empty">No account recipes. Add a login under <code>~/.pacewright/recipes/accounts/&lt;name&gt;.kdl</code>.</div></div>`;
+  const rows = as.map(a => {
+    const recipes = (a.recipes || []).map(r => `<code>${esc(r)}</code>`).join(" ") || `<span class="muted">—</span>`;
+    return `<tr>
+      <td>${sessionPill(a)}</td>
+      <td><b>${esc(a.account)}</b></td>
+      <td>${recipes}</td>
+      <td>${a.last_checked ? when(a.last_checked) : "<span class=muted>never</span>"}</td>
+      <td><div class="row-actions">
+        <button class="btn small primary" data-act="auth_login" data-id="${esc(a.account)}">Log in</button>
+        <button class="btn small" data-act="auth_recheck" data-id="${esc(a.account)}">Recheck</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+  return `<div class="card">
+    <div class="card-head"><h2>Accounts</h2><span class="muted">${as.length} account${as.length === 1 ? "" : "s"}</span><div class="spacer"></div>${headBar}</div>
+    <table><thead><tr><th>Session</th><th>Account</th><th>Recipes</th><th>Last checked</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
 // ---- actions (event delegation) ----
 document.addEventListener("click", async (ev) => {
   const el = ev.target.closest("[data-act]");
@@ -262,6 +298,10 @@ document.addEventListener("click", async (ev) => {
     else if (act === "cancel") { await api("cancel", { id }); toast("✕ canceled " + id.slice(0, 8)); }
     else if (act === "toggle") { const on = el.checked; await api(on ? "schedule_enable" : "schedule_disable", { id }); toast((on ? "✓ enabled " : "○ disabled ") + id); }
     else if (act === "apply") { const prune = $("pruneChk") && $("pruneChk").checked; const r = await api("schedule_apply", { prune: !!prune }); toast(`applied · +${(r.created||[]).length} ~${(r.updated||[]).length} −${(r.canceled||[]).length}`); }
+    else if (act === "auth_login") { await api("auth_login", { account: id }); toast("↗ opened login for " + id + " — sign in, it'll go green"); }
+    else if (act === "auth_recheck") { await api("auth_recheck", { account: id }); toast("↻ rechecking " + id); }
+    else if (act === "auth_login_all") { const r = await api("auth_login_all"); const n = (r.opened||[]).length; toast(n ? "↗ opened " + n + " login window" + (n===1?"":"s") : "all accounts already signed in"); }
+    else if (act === "auth_recheck_all") { await api("auth_recheck", { account: null }); toast("↻ rechecking all accounts"); }
     else if (act === "setlimit") await setLimit();
   } catch (e) { /* toast already shown */ }
 });
