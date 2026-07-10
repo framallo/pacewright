@@ -1,6 +1,42 @@
 # pacewright — handoff
 
-Last updated: 2026-07-09 (KDL recipe engine + **declarative scheduler** landed). Written for the next agent.
+Last updated: 2026-07-09 (recipe engine + declarative scheduler + **web dashboard** landed; HN digest proven live end-to-end). Written for the next agent.
+
+## Web dashboard — the control plane in a browser (2026-07-09)
+
+The scheduler's control plane, now also in a browser. Spec: `docs/specs/2026-07-09-web-dashboard.md`.
+
+- **`crates/daemon/src/web.rs`** — an axum server bound to `127.0.0.1:7878` (override
+  `PACEWRIGHT_WEB_ADDR`, empty disables), spawned by `main.rs` alongside the socket + tick loop,
+  sharing the one `Arc<Server>`. Adds **no** backend logic:
+  - `POST /api` — a `proto::Request` in, a `proto::Response` out, straight through the existing
+    `server::handle_request` (the exact socket dispatch). This is the whole control plane.
+  - `GET /ws` — pushes a full `snapshot()` (`status`+`tasks`+`schedules`+`limits`, each from the
+    read RPCs) once a second. The page is pure WS-consumer + `POST /api`; no polling, no change-hub.
+  - `GET /` — one self-contained `web/index.html` (inlined CSS+JS, no build), `include_str!`'d in.
+- **Panes** mirror the TUI: **Feed** (run-now/cancel/pause-all), **Schedule** (toggle switches =
+  enable/disable, apply+prune — the centerpiece), **Limits** (spend + inline `set_limit` editor).
+- Test helpers moved to `server::test_support` (shared by `server.rs` + `web.rs` tests). Verified
+  live: all three panes render over WS, and enable/disable/set_limit/pause round-trip through `/api`.
+- **Gotcha:** the page is compiled in via `include_str!` — edit `web/index.html` then **rebuild** the
+  daemon. (An early `nav`-as-implicit-global `ReferenceError` silently killed WS init; watch the
+  browser console when the conn dot stays red.)
+
+## Recipe cookie-auth is per-recipe now — the `auth` flag (2026-07-09)
+
+Proving the HN digest live surfaced a real defect: `CliRecipeRunner` passed `--copy-cookies` on
+**every** run, so a public no-auth recipe failed (`Chrome cookies file not found`). Now a recipe
+declares `auth #true` in its `recipe { … }` block when it needs the operator's logged-in session;
+`RecipeRegistry` parses it into `RecipeMeta.auth`, the adapter threads it to
+`RecipeRunner::run(path, vars, auth)`, and `--copy-cookies` is added only then. Public recipes
+(`news/hackernews`) omit it and navigate cold. chrome-agent ignores the unknown `auth` node
+(forward-compatible) — no chrome-agent change. `CliRecipeRunner.copy_cookies` stays as a global
+force-on override (default off).
+
+**Live proof:** `news/hackernews` on a schedule → daemon boot-reconcile → tick → chrome-agent →
+**live** Hacker News → `hn.json` + `hn-digest.md` in the vault → task `succeeded`. Note: Chrome
+launch needs a real `$HOME` (its `~/Library` app-support/crashpad state); a throwaway `HOME=/tmp/…`
+hangs Chrome launch — unrelated to pacewright. Run the daemon under the real `$HOME`.
 
 ## Declarative scheduler — enable-able recurrent tasks (2026-07-09)
 
@@ -24,9 +60,9 @@ The seo-os-style model: a **catalog of recurrent tasks you toggle on/off**. Spec
 - **TUI**: three panes — **Feed / Schedule / Limits**, `tab` cycles, in Schedule `↑/↓` select,
   `space` enable/disable, `a` apply.
 
-Deferred (documented): the **web dashboard** (localhost axum + WS control plane consuming these
-RPCs — the toggle becomes a browser switch), the **daemon jobs-sweep**/file-watch, and the
-automated Claude repair loop.
+The **web dashboard** consuming these RPCs is now built (see the top section). Still deferred
+(documented): the **daemon jobs-sweep**/`schedules/` file-watch (reconcile is boot + explicit
+`apply` + on-toggle), and the automated Claude repair loop.
 
 ## Recipe engine — the big shift (2026-07-09)
 

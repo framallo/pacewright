@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pacewright_daemon::server;
+use pacewright_daemon::{server, web};
 use pacewright_core::adapter::AdapterRegistry;
 use pacewright_core::clock::SystemClock;
 use pacewright_core::config::Config;
@@ -109,8 +109,38 @@ async fn main() -> Result<()> {
         schedules_dir: schedules_dir(),
     });
 
+    // Local web dashboard (localhost only). `PACEWRIGHT_WEB_ADDR` overrides the bind address;
+    // set it empty to disable the dashboard entirely. Runs alongside the socket + tick loop.
+    match web_addr() {
+        Some(addr) => {
+            let srv = srv.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::serve_web(srv, addr).await {
+                    tracing::error!("web dashboard failed: {e}");
+                }
+            });
+        }
+        None => tracing::info!("web dashboard disabled (PACEWRIGHT_WEB_ADDR is empty)"),
+    }
+
     tracing::info!("pacewrightd listening on {}", sock_path.display());
     server::serve(srv, &sock_path).await
+}
+
+/// The dashboard bind address: `PACEWRIGHT_WEB_ADDR` (default `127.0.0.1:7878`), or `None` when the
+/// var is set but empty (explicitly disabled) or unparseable (warned, then off).
+fn web_addr() -> Option<std::net::SocketAddr> {
+    let raw = std::env::var("PACEWRIGHT_WEB_ADDR").unwrap_or_else(|_| "127.0.0.1:7878".to_string());
+    if raw.trim().is_empty() {
+        return None;
+    }
+    match raw.parse() {
+        Ok(a) => Some(a),
+        Err(e) => {
+            tracing::warn!("PACEWRIGHT_WEB_ADDR `{raw}` is not a valid address ({e}) — dashboard off");
+            None
+        }
+    }
 }
 
 // A boot-time seed derived from the pid + start; randomness only affects pacing jitter.
