@@ -137,9 +137,11 @@ Recipes that touch a signed-in site (Riverside, YouTube Studio, LinkedIn…) reu
 ```kdl
 recipe "accounts/prevetted-riverside" {
     login-url "https://riverside.com/login"        // where you sign in (pacewright opens this headed)
-    // The steps ARE the signed-in check — run headless in the account's own profile:
+    // The steps ARE the signed-in check, run headless in the account profile. `expect` is a TRIPWIRE
+    // (fails when its condition is true), so it trips on the signed-OUT signal: /dashboard bounces to
+    // /login when signed out; signed in it stays on /dashboard, so the recipe succeeds.
     step { goto "https://riverside.com/dashboard" }
-    step { expect on-fail="terminal" message="signed out" { settled-url-matches #"riverside\.com/dashboard"# } }
+    step { expect on-fail="terminal" message="signed out" { settled-url-matches #"riverside\.com/login"# } }
 }
 ```
 

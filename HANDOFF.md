@@ -42,10 +42,20 @@ recipes; `--headed` + persistent `--browser <name>` already exist.
 **Verified live:** an `accounts/prevetted-riverside` recipe + a `riverside/generate_magic_clips`
 referencing it → daemon registered only the `riverside` task adapter (account excluded) → `pcw auth
 status` printed the account, `unknown`/never, with the recipe using it → `pcw auth login nope` errored
-cleanly. **Gotcha the smoke test caught:** regex in an `expect` locator must be a **KDL raw string**
-(`#"riverside\.com/dashboard"#`) — a plain `"…\.…"` is an invalid KDL escape and the whole recipe
-fails to load. Deferred (spec §6): password-manager fill (`login-field`) — interactive login only for
-now; credentials never pass through pacewright.
+cleanly, then a real interactive login on `prevetted-riverside` flipped it to **signed in** and the
+session persisted across a daemon restart.
+
+**Two gotchas the live run caught (do not relearn):**
+1. **`expect` is a TRIPWIRE** — it FAILS when its condition is TRUE (see `chrome-agent`
+   `src/recipe/engine.rs`: `if condition_holds → return Err(on_fail)`). A signed-in check must trip on
+   the signed-OUT signal (`settled-url-matches #"riverside\.com/login"#`), NOT assert the signed-in URL.
+   My first account recipe had it inverted (tripped on `/dashboard`), so signed-in read as signed-out.
+2. **Regex in a locator/URL match must be a KDL raw string** (`#"riverside\.com/login"#`) — a plain
+   `"…\.…"` is an invalid KDL escape and the whole recipe fails to load.
+
+Deferred (spec §6): password-manager fill (`login-field`) — the account profile is an isolated
+Chromium profile that does NOT inherit the everyday Chrome's saved passwords, so login is interactive
+once (then it persists); credentials never pass through pacewright.
 
 ## Web dashboard — the control plane in a browser (2026-07-09)
 

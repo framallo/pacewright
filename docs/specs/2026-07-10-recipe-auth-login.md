@@ -26,12 +26,14 @@ recipe "accounts/prevetted-riverside" {
     description "Login for the prevetted.fm Riverside account."
     login-url "https://riverside.com/login"        // where the human signs in (pacewright-consumed)
 
-    // The recipe's steps ARE the signed-in check, run headless in the account profile: visiting the
-    // dashboard stays on /dashboard when signed in, but redirects to /login when signed out.
+    // The recipe's steps ARE the signed-in check, run headless in the account profile. NOTE:
+    // chrome-agent `expect` is a TRIPWIRE — it FAILS (on-fail class) when its condition is TRUE.
+    // So the check trips on the SIGNED-OUT signal: visiting /dashboard while signed out redirects to
+    // /login; signed in it stays on /dashboard, /login never matches, expect passes → recipe succeeds.
     step { goto "https://riverside.com/dashboard" }
     step {
         expect on-fail="terminal" message="signed out" {
-            settled-url-matches #"riverside\.com/dashboard"#
+            settled-url-matches #"riverside\.com/login"#
         }
     }
 
@@ -122,11 +124,13 @@ selected row, `r` = recheck). Required in v1 alongside web + CLI.
 
 ## 5. Signed-in detection — the `login.check`
 
-"Which ones are signed out (if we know)" = the account recipe's `login.check`. The daemon runs it
-**headless in the account profile**: a `goto` + an `expect` (a `settled-url-matches` that you land on
-an app page rather than the login page, or a `visible` locator only present when signed in). Pass →
-`signed_in=true`; the classed failure → `false`. An account recipe with **no** `check` →
-`signed_in=unknown` (surfaced honestly; the operator can still `Log in`).
+"Which ones are signed out (if we know)" = the account recipe's steps. The daemon runs them
+**headless in the account profile**: a `goto` + an `expect`. Because chrome-agent's `expect` is a
+**tripwire** (it fails when its condition holds), the check trips on the *signed-out* signal — a
+`settled-url-matches` on the **login** URL (you got bounced to `/login`), or a `visible` locator that
+only appears on the login page. Recipe succeeds (no trip) → `signed_in=true`; the classed `expect`
+failure → `false`. An account recipe with **no** check → `signed_in=unknown` (surfaced honestly; the
+operator can still `Log in`).
 
 ## 6. Password-manager fill (optional follow-on)
 
