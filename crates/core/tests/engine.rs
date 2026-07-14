@@ -25,6 +25,29 @@ async fn test_tick_runs_echo_to_success() {
 }
 
 #[tokio::test]
+async fn test_claim_one_marks_running_and_does_not_double_claim() {
+    // The daemon claims a task under the engine lock, then runs it OUTSIDE the lock. So a claimed
+    // task must be marked Running immediately (it's off the pending set) and a second claim — the
+    // state the RPC handlers see while the first task's browser subprocess is still running — must
+    // NOT hand out the same task again.
+    use pacewright_core::runner::execute_and_record;
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let id = e.add_task(Task::new_now("dummy", "echo", serde_json::json!({"a":1}), 500)).unwrap();
+
+    let claimed = e.claim_one().unwrap().expect("a task should be claimable");
+    assert_eq!(claimed.task.id, id);
+    // Claimed == Running in the store, before any execution has happened.
+    assert_eq!(e.store.get_task(&id).unwrap().unwrap().status, TaskStatus::Running);
+    // While it's "running", nothing else is runnable — the same task is never re-claimed.
+    assert!(e.claim_one().unwrap().is_none());
+
+    // Recording the outcome (the off-lock half) still drives it to success.
+    execute_and_record(&e.store, &*claimed.adapter, &*e.clock, e.browser.clone(), claimed.task).await.unwrap();
+    assert_eq!(e.store.get_task(&id).unwrap().unwrap().status, TaskStatus::Succeeded);
+}
+
+#[tokio::test]
 async fn test_recover_running_on_boot() {
     let clock = TestClock::new(1_000);
     let e = engine(clock.clone(), Config::default());

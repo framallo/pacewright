@@ -5,7 +5,8 @@ use crate::config::Config;
 use crate::limits::{check_limits, LimitDecision};
 use crate::model::{Task, TaskEvent, TaskStatus};
 use crate::rng::Rng;
-use crate::runner::run_task;
+use crate::adapter::Adapter;
+use crate::runner::{execute_and_record, mark_running};
 use crate::scheduler::{resolve_blocked, select_runnable};
 use crate::store::Store;
 use std::collections::HashSet;
@@ -91,9 +92,17 @@ impl Engine {
         Ok(task.id)
     }
 
-    pub async fn tick(&self) -> rusqlite::Result<()> {
+    /// Claim the next runnable task: resolve blocked deps, pick a pending task that passes
+    /// adapter-pause + limit checks, mark it `Running`, and return it with its adapter. Fast — a few
+    /// store reads/writes, no adapter execution. Fail-fast (unknown adapter) and limit-`Defer` are
+    /// handled here as side effects; those tasks are skipped and the search continues.
+    ///
+    /// The daemon calls this under the engine lock, then releases the lock and runs
+    /// `execute_and_record` on the claim — so the slow browser subprocess never holds the lock.
+    /// Returns `None` when nothing is runnable this pass.
+    pub fn claim_one(&self) -> rusqlite::Result<Option<Claimed>> {
         if self.is_paused_all() {
-            return Ok(());
+            return Ok(None);
         }
         resolve_blocked(&self.store, &*self.clock)?;
         let runnable = select_runnable(&self.store, &*self.clock)?;
@@ -118,7 +127,8 @@ impl Engine {
             let decision = check_limits(&self.store, &self.cfg, &*self.clock, &*self.rng, &keys)?;
             match decision {
                 LimitDecision::Allow => {
-                    run_task(&self.store, &*adapter, &*self.clock, self.browser.clone(), task).await?;
+                    let task = mark_running(&self.store, &*self.clock, task)?;
+                    return Ok(Some(Claimed { task, adapter }));
                 }
                 LimitDecision::Defer { until_ms, reason } => {
                     let now = self.clock.now_ms();
@@ -132,8 +142,24 @@ impl Engine {
                 }
             }
         }
+        Ok(None)
+    }
+
+    /// Drain every runnable task, executing each to completion. Used by in-process callers and tests;
+    /// the daemon instead loops `claim_one` + `execute_and_record` so the execute runs off the lock.
+    pub async fn tick(&self) -> rusqlite::Result<()> {
+        while let Some(Claimed { task, adapter }) = self.claim_one()? {
+            execute_and_record(&self.store, &*adapter, &*self.clock, self.browser.clone(), task).await?;
+        }
         Ok(())
     }
+}
+
+/// A task claimed by [`Engine::claim_one`]: already marked `Running`, paired with its adapter, ready
+/// to hand to `execute_and_record` off the engine lock.
+pub struct Claimed {
+    pub task: Task,
+    pub adapter: Arc<dyn Adapter>,
 }
 
 // NOTE: the engine tests below use the real `pacewright-adapter-dummy` crate,

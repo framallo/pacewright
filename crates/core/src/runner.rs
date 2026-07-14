@@ -49,16 +49,35 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
     }
 }
 
-pub async fn run_task(
-    store: &Store, adapter: &dyn Adapter, clock: &dyn Clock, browser: Arc<dyn BrowserHandle>, mut task: Task,
-) -> rusqlite::Result<()> {
+/// Mark a task `Running` (a fast store write) and return the updated task. Split out of `run_task`
+/// so the daemon can *claim* a task under the engine lock, then release the lock and run the slow
+/// `execute_and_record` (the browser subprocess) unlocked — keeping RPCs responsive while a task runs.
+pub fn mark_running(store: &Store, clock: &dyn Clock, mut task: Task) -> rusqlite::Result<Task> {
     let now = clock.now_ms();
     let prev = task.status;
     task.status = TaskStatus::Running;
     task.updated_at = now;
     store.update_task(&task)?;
     store.append_event(&event(&task, prev, TaskStatus::Running, now, serde_json::json!({})))?;
+    Ok(task)
+}
 
+/// Mark `Running` then execute + record — the whole run, lock-held end to end. Kept for in-process
+/// callers (`Engine::tick`, tests); the daemon uses `mark_running` + `execute_and_record` to run the
+/// slow middle off the engine lock.
+pub async fn run_task(
+    store: &Store, adapter: &dyn Adapter, clock: &dyn Clock, browser: Arc<dyn BrowserHandle>, task: Task,
+) -> rusqlite::Result<()> {
+    let task = mark_running(store, clock, task)?;
+    execute_and_record(store, adapter, clock, browser, task).await
+}
+
+/// Run an already-`Running` task's adapter and record the outcome. This holds NO engine lock (only
+/// the store's own internal mutex, briefly, for the result writes), so the browser subprocess — the
+/// seconds-to-90s part — no longer blocks `add`/`status`/`list`/the TUI/web.
+pub async fn execute_and_record(
+    store: &Store, adapter: &dyn Adapter, clock: &dyn Clock, browser: Arc<dyn BrowserHandle>, mut task: Task,
+) -> rusqlite::Result<()> {
     let ctx = RunCtx { task_id: task.id.clone(), browser };
     // Adapters are third-party-ish, unreviewed code from the engine's point of view
     // (M2+ will add browser-driving adapters that shell out / scrape). A panic inside

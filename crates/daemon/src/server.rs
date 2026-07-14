@@ -2,6 +2,7 @@ use anyhow::Result;
 use pacewright_adapter_recipe::{schedule, AuthManager, RecipeRegistry};
 use pacewright_core::config::LimitConfig;
 use pacewright_core::engine::Engine;
+use pacewright_core::runner::execute_and_record;
 use pacewright_core::model::{Task, TaskStatus};
 use pacewright_proto::{Request, Response};
 use std::path::{Path, PathBuf};
@@ -295,21 +296,35 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                // Run each tick in its own task so a panic inside `tick()`
-                // can't take down the whole loop and silently freeze the
-                // scheduler forever (the socket would keep accepting).
-                let engine = engine.clone();
-                let handle = tokio::spawn(async move {
-                    let e = engine.lock().await;
-                    e.tick().await
-                });
-                match handle.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(tick_err)) => tracing::error!("tick error: {tick_err}"),
-                    Err(join_err) if join_err.is_panic() => {
-                        tracing::error!("tick task panicked: {join_err}");
+                // Drain every runnable task this tick, but hold the engine lock ONLY to *claim*
+                // each task (a few fast store ops) — then release it and run the slow browser
+                // subprocess unlocked, so `add`/`status`/`list`/the TUI/web stay responsive while a
+                // task runs. Each execute is isolated in its own task so an adapter/store panic
+                // can't take down the loop and silently freeze the scheduler.
+                loop {
+                    let claimed = {
+                        let e = engine.lock().await;
+                        match e.claim_one() {
+                            Ok(Some(c)) => Some((c, e.store.clone(), e.clock.clone(), e.browser.clone())),
+                            Ok(None) => None,
+                            Err(err) => {
+                                tracing::error!("claim error: {err}");
+                                None
+                            }
+                        }
+                    };
+                    let Some((claimed, store, clock, browser)) = claimed else { break };
+                    let handle = tokio::spawn(async move {
+                        execute_and_record(&store, &*claimed.adapter, &*clock, browser, claimed.task).await
+                    });
+                    match handle.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(run_err)) => tracing::error!("task run error: {run_err}"),
+                        Err(join_err) if join_err.is_panic() => {
+                            tracing::error!("task panicked: {join_err}");
+                        }
+                        Err(join_err) => tracing::error!("task failed: {join_err}"),
                     }
-                    Err(join_err) => tracing::error!("tick task failed: {join_err}"),
                 }
             }
         });
