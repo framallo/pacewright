@@ -25,8 +25,8 @@ Automating an authenticated LinkedIn/YouTube session safely is mostly about *not
              └──────────────┬──────────────┘   live browser session
                             │ JSON-RPC over ~/.pacewright/pw.sock
       ┌──────────┬──────────┼───────────┬──────────┐
-   pacewright  pcw tui   Tauri app   MCP server   (thin clients)
-     (CLI)    (dashboard)  (later)     (later)
+   pacewright  pcw tui   MCP server  Tauri app    (thin clients)
+     (CLI)    (dashboard)   (Claude)    (later)
 ```
 
 The engine is **platform-agnostic**. Adapters implement one trait (`execute(action, params) -> Result`) and *declare* which daily-limit keys each action spends; the engine enforces the limits, persists everything, and never needs to know what LinkedIn is. That boundary is what lets the whole engine be tested with a fake adapter and zero browser.
@@ -39,6 +39,7 @@ The engine is **platform-agnostic**. Adapters implement one trait (`execute(acti
 | `pacewright-proto` | JSON-RPC request/response wire types shared by daemon + clients |
 | `pacewright-daemon` | `pacewrightd` — Unix-socket server + 1s tick loop |
 | `pacewright-cli` | `pacewright` (alias `pcw`) — client subcommands + live ratatui TUI |
+| `pacewright-mcp` | `pacewright-mcp` — stdio MCP server bridging an MCP client (Claude) to the daemon socket |
 | `pacewright-adapter-dummy` | reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`/`panic`) for testing the engine |
 
 ## Build
@@ -87,10 +88,38 @@ pacewright tui             # live dashboard (id · adapter · action · status �
 | `pause` / `resume <scope>` | pause/resume the tick loop (`scope` = `all`/`daemon` for global, or an adapter name) |
 | `limits` | today's per-key counters |
 | `adapters` / `status` | discovery + daemon status |
-| `recipe add/list/job` | install recipes from GitHub, list them, run a vault job note |
+| `recipe add/list/reload/job` | install recipes from GitHub, list them, hot-reload the daemon, run a vault job note |
 | `schedule check/list/apply/enable/disable` | manage the declarative schedule of recurrent tasks |
 | `auth status/login/recheck` | establish & inspect the logged-in sessions account recipes need |
 | `tui` | live dashboard (Feed / Schedule / Limits / Accounts panes — `tab` to cycle) |
+
+## Drive it from Claude (MCP)
+
+`pacewright-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes the daemon's
+whole surface as 20 tools (`add_task`, `list_tasks`, `get_task`, `status`, `pause`/`resume`,
+`set_limit`, the `schedule_*` and `auth_*` RPCs, `recipe_reload`, …). It bridges each `tools/call`
+to `~/.pacewright/pw.sock` — so **the daemon must be running** for tool calls to return data
+(handshake and `tools/list` work without it).
+
+Register it with Claude Code:
+
+```bash
+claude mcp add pacewright -- /absolute/path/to/target/release/pacewright-mcp
+```
+
+or add it to a project/user `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pacewright": { "command": "/absolute/path/to/target/release/pacewright-mcp" }
+  }
+}
+```
+
+The socket path defaults to `~/.pacewright/pw.sock`; override it with the `PACEWRIGHT_SOCK` env var
+(useful for a non-default daemon). A call made while the daemon is down returns a tool error with an
+actionable message rather than failing the protocol.
 
 ## Configure limits & pacing
 
@@ -190,7 +219,7 @@ launchctl load ~/Library/LaunchAgents/com.paperclip.pacewrightd.plist
 | M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter |
 | M5 | Riverside adapter (extract raw, export magic clips, → Spotify, → YouTube unlisted) |
 | M6 | YouTube adapter + daily limits |
-| M7 | MCP server + Claude skill |
+| **M7 ⏳** | **MCP server ✅** (`pacewright-mcp`, 20 tools over stdio) — Claude skill still to come |
 | M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz |
 
 ## Known gaps (M1)
