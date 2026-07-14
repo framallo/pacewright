@@ -59,11 +59,19 @@ live in the gitignored `recipes/` dir at the repo root (and in the runtime `~/.p
 Recipes with `auth account="…"` need a signed-in browser session first:
 
 - `auth_list` — each account's signed-in / out / unknown status and which recipes use it.
-- `auth_login { account }` — pops a **headed** Chrome; a human signs in by hand (Google/Riverside block
-  headless login). `auth_login_all` opens one window per signed-out account.
+- `auth_login { account }` — pops a **headed** Chrome (chrome-agent-launched) and a human signs in by
+  hand. `auth_login_all` opens one window per signed-out account.
 - `auth_recheck { account? }` — re-run the headless signed-in check and refresh the cached status.
 
 Never enter the user's credentials yourself — `auth_login` is human-in-the-loop by design.
+
+**⚠ Google/YouTube accounts can't use `auth_login`.** `auth_login` launches a chrome-agent/CDP
+automation browser, and **Google blocks sign-in on it** ("this browser or app may not be secure").
+Riverside tolerates it; Google does not. So for a YouTube Studio / Google account (e.g.
+`prevetted-youtube`), do NOT run `auth_login` / `pcw auth login` — it just gets stuck at "logging in…".
+Instead use the CDP-**attach** workaround: launch a *normal* Chrome with a dedicated `--user-data-dir`
++ `--remote-debugging-port=9222`, have the user sign in by hand, then drive it with
+`chrome-agent --connect auto` (attach, not launch). This path is outside pacewright's `auth` system.
 
 ## Scheduling (recurrent tasks)
 
