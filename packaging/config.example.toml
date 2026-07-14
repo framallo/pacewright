@@ -2,6 +2,12 @@
 # Every (platform, action) that needs throttling gets a limit key.
 # Keys not listed here are unrestricted.
 
+# The daemon closes Chrome browsers left idle this long so instances don't pile up.
+# Default is "10m" if this section is omitted; set "0" to disable reaping entirely.
+# (Closing a browser loses nothing — cookies persist in its profile; the next task relaunches it.)
+[browser]
+idle_timeout = "10m"
+
 [limits."dummy.capped"]
 daily_cap = 3
 min_gap   = "8m"

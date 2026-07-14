@@ -57,6 +57,50 @@ pub fn build_adapter_registry(
     reg
 }
 
+/// The daemon's default browser idle-reap threshold when `config.toml` doesn't set one: 10 minutes.
+pub const DEFAULT_BROWSER_IDLE_TIMEOUT_MS: i64 = 600_000;
+/// How often the reaper runs `chrome-agent gc`. Independent of the idle threshold.
+const BROWSER_REAP_EVERY: Duration = Duration::from_secs(60);
+
+/// Spawn the background loop that periodically runs `chrome-agent gc --idle-secs N`, closing browsers
+/// idle longer than `idle_timeout_ms` so Chrome instances don't pile up. A non-positive timeout
+/// disables reaping. Uses the same `chrome-agent` binary the runner does (`CHROME_AGENT_BIN` or PATH).
+/// Reaping is safe: a closed browser's cookies persist in its profile dir, so the next task relaunches
+/// it still signed in; hand-driven `--connect` windows use a different profile path and are never touched.
+pub fn spawn_browser_reaper(idle_timeout_ms: i64) {
+    if idle_timeout_ms <= 0 {
+        tracing::info!("browser idle-reaper disabled (browser.idle_timeout = 0)");
+        return;
+    }
+    let idle_secs = (idle_timeout_ms / 1000).max(1).to_string();
+    let bin = std::env::var("CHROME_AGENT_BIN").unwrap_or_else(|_| "chrome-agent".to_string());
+    tracing::info!("browser idle-reaper on: closing browsers idle > {idle_timeout_ms}ms");
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(BROWSER_REAP_EVERY);
+        loop {
+            interval.tick().await;
+            match tokio::process::Command::new(&bin)
+                .args(["gc", "--idle-secs", &idle_secs, "--json"])
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    // Only log when it actually closed something, so the log isn't noisy every minute.
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        let n = v.get("reaped_count").and_then(|c| c.as_u64()).unwrap_or(0);
+                        if n > 0 {
+                            tracing::info!("browser gc: closed {n} idle/dead browser(s)");
+                        }
+                    }
+                }
+                Ok(out) => tracing::debug!("browser gc exited {}", out.status),
+                // chrome-agent absent is fine (browser-free box) — don't spam; debug only.
+                Err(e) => tracing::debug!("browser gc could not run `{bin}`: {e}"),
+            }
+        }
+    });
+}
+
 /// A login's bounded post-open poll: recheck every 4 s, up to 5 minutes, then give up and clear
 /// `logging_in`. Matches the spec's "poll `login.check` every few seconds (bounded, e.g. 5 min)".
 const LOGIN_POLL_EVERY: Duration = Duration::from_secs(4);

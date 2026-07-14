@@ -70,6 +70,11 @@ async fn main() -> Result<()> {
     // adapters. Browser tasks then fail Terminal with a clear message.
     let browser = Arc::new(CliBrowser::new());
 
+    // Read the browser idle-reap threshold before `cfg` moves into the engine (default 10 min).
+    let browser_idle_timeout_ms = cfg
+        .browser_idle_timeout_ms
+        .unwrap_or(server::DEFAULT_BROWSER_IDLE_TIMEOUT_MS);
+
     let engine = Engine::new(
         store,
         reg,
@@ -79,6 +84,9 @@ async fn main() -> Result<()> {
     )
     .with_browser(browser);
     engine.recover_on_boot()?;
+
+    // Periodically close idle Chrome browsers so instances don't accumulate.
+    server::spawn_browser_reaper(browser_idle_timeout_ms);
 
     // Reconcile the declarative schedule files into the queue on boot, so recurring/scheduled
     // tasks come back after a restart. Invalid entries are logged and skipped, not fatal.

@@ -42,12 +42,23 @@ impl LimitConfig {
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub limits: HashMap<String, LimitConfig>,
+    /// How long an idle browser may sit before the daemon reaps it (`chrome-agent gc`), in ms.
+    /// `None` = not configured (daemon applies its own default); `Some(0)` = reaping disabled.
+    pub browser_idle_timeout_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct RawConfig {
     #[serde(default)]
     limits: HashMap<String, RawLimit>,
+    #[serde(default)]
+    browser: Option<RawBrowser>,
+}
+#[derive(Deserialize)]
+struct RawBrowser {
+    /// e.g. `"10m"`, `"600s"`, or `"0"` to disable idle reaping.
+    #[serde(default)]
+    idle_timeout: Option<String>,
 }
 #[derive(Deserialize)]
 struct RawLimit {
@@ -97,7 +108,11 @@ impl Config {
                 active_end_min: aend,
             });
         }
-        Ok(Config { limits })
+        let browser_idle_timeout_ms = match raw.browser.and_then(|b| b.idle_timeout) {
+            Some(s) => Some(parse_duration_ms(&s)?),
+            None => None,
+        };
+        Ok(Config { limits, browser_idle_timeout_ms })
     }
 
     pub fn limit_for(&self, key: &str) -> LimitConfig {
@@ -131,6 +146,18 @@ active = "09:00-18:00"
         assert_eq!(l.active_start_min, 540);
         assert_eq!(l.active_end_min, 1080);
     }
+    #[test]
+    fn test_browser_idle_timeout_parses_and_defaults() {
+        // Absent → None (daemon applies its own default).
+        assert_eq!(Config::from_toml("").unwrap().browser_idle_timeout_ms, None);
+        // A duration string parses to ms.
+        let c = Config::from_toml("[browser]\nidle_timeout = \"10m\"\n").unwrap();
+        assert_eq!(c.browser_idle_timeout_ms, Some(10 * 60_000));
+        // "0" explicitly disables.
+        let c = Config::from_toml("[browser]\nidle_timeout = \"0\"\n").unwrap();
+        assert_eq!(c.browser_idle_timeout_ms, Some(0));
+    }
+
     #[test]
     fn test_unknown_key_is_permissive() {
         let c = Config::default();
