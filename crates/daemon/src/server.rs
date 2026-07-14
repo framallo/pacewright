@@ -1,12 +1,16 @@
 use anyhow::Result;
-use pacewright_adapter_recipe::{schedule, AuthManager, RecipeRegistry};
+use pacewright_adapter_dummy::DummyAdapter;
+use pacewright_adapter_recipe::{
+    schedule, AuthManager, RecipeAdapter, RecipeRegistry, RecipeRunner,
+};
+use pacewright_core::adapter::AdapterRegistry;
 use pacewright_core::config::LimitConfig;
 use pacewright_core::engine::Engine;
-use pacewright_core::runner::execute_and_record;
 use pacewright_core::model::{Task, TaskStatus};
+use pacewright_core::runner::execute_and_record;
 use pacewright_proto::{Request, Response};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -14,11 +18,43 @@ use tokio::sync::Mutex;
 
 /// Everything a request handler needs: the engine, plus the recipe registry and schedules
 /// directory the declarative-scheduler RPCs read, and the auth manager the `Auth*` RPCs drive.
+///
+/// `registry` is behind an `RwLock` so `RecipeReload` can swap in a freshly-loaded registry (and
+/// rebuild the engine's adapters) without a daemon restart. Reads clone the `Arc` and drop the lock
+/// immediately. Note the `AuthManager` keeps its own boot-time registry `Arc`, so *account* recipes
+/// (`accounts/*`) still require a restart to change — only task recipes hot-reload.
 pub struct Server {
     pub engine: Arc<Mutex<Engine>>,
-    pub registry: Arc<RecipeRegistry>,
+    pub registry: RwLock<Arc<RecipeRegistry>>,
+    pub recipes_dir: PathBuf,
+    pub recipe_runner: Arc<dyn RecipeRunner>,
     pub schedules_dir: PathBuf,
     pub auth: Arc<AuthManager>,
+}
+
+/// Build the engine's adapter set from the recipe registry: the built-in `DummyAdapter` plus one
+/// `RecipeAdapter` per distinct `<adapter>` prefix among the installed recipes. Built-ins win a name
+/// collision (a `dummy/*` recipe can't shadow the real `DummyAdapter`). Shared by daemon boot and
+/// `RecipeReload` so both produce an identical adapter set.
+pub fn build_adapter_registry(
+    recipe_registry: &Arc<RecipeRegistry>,
+    recipe_runner: &Arc<dyn RecipeRunner>,
+) -> AdapterRegistry {
+    let mut reg = AdapterRegistry::new();
+    reg.register(Arc::new(DummyAdapter::new()));
+    for adapter_name in recipe_registry.adapters() {
+        if reg.get(&adapter_name).is_some() {
+            tracing::warn!("recipe prefix `{adapter_name}` collides with a built-in adapter — skipping the recipe-backed one");
+            continue;
+        }
+        tracing::info!("registering recipe-backed adapter `{adapter_name}`");
+        reg.register(Arc::new(RecipeAdapter::new(
+            adapter_name,
+            recipe_registry.clone(),
+            recipe_runner.clone(),
+        )));
+    }
+    reg
 }
 
 /// A login's bounded post-open poll: recheck every 4 s, up to 5 minutes, then give up and clear
@@ -43,7 +79,12 @@ fn account_json(a: &pacewright_adapter_recipe::AccountInfo) -> serde_json::Value
 fn spawn_login_poll(srv: &Server, account: String, clock: Arc<dyn pacewright_core::clock::Clock>) {
     let auth = srv.auth.clone();
     let now = Arc::new(move || clock.now_ms());
-    tokio::spawn(auth.poll_until_signed_in(account, LOGIN_POLL_EVERY, LOGIN_POLL_MAX_RECHECKS, now));
+    tokio::spawn(auth.poll_until_signed_in(
+        account,
+        LOGIN_POLL_EVERY,
+        LOGIN_POLL_MAX_RECHECKS,
+        now,
+    ));
 }
 
 /// The `Auth*` RPCs, handled outside the engine-locked synchronous dispatch because they spawn
@@ -108,10 +149,19 @@ fn status_from_opt(s: &Option<String>) -> Option<TaskStatus> {
 
 /// Set a schedule entry's runtime enabled override, then reconcile so it takes effect
 /// immediately (enable → enqueue; disable → cancel its live task).
-fn set_enabled(e: &Engine, srv: &Server, id: &str, enabled: bool, now: i64) -> Result<serde_json::Value, String> {
-    e.store.schedule_state_set(id, enabled, now).map_err(|err| err.to_string())?;
+fn set_enabled(
+    e: &Engine,
+    srv: &Server,
+    id: &str,
+    enabled: bool,
+    now: i64,
+) -> Result<serde_json::Value, String> {
+    e.store
+        .schedule_state_set(id, enabled, now)
+        .map_err(|err| err.to_string())?;
+    let registry = srv.registry.read().unwrap().clone();
     let (entries, _) = schedule::load_dir(&srv.schedules_dir);
-    let (valid, _) = schedule::partition(&entries, &srv.registry);
+    let (valid, _) = schedule::partition(&entries, &registry);
     schedule::reconcile(&e.store, &*e.clock, &valid, false).map_err(|err| err.to_string())?;
     Ok(serde_json::json!({ "id": id, "enabled": enabled }))
 }
@@ -125,23 +175,44 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
     let res: Result<serde_json::Value, String> = (|| {
         match req {
             Request::Add(a) => {
-                let mut t = Task::new_now(a.adapter, a.action, a.params, a.scheduled_for.unwrap_or(now));
+                let mut t = Task::new_now(
+                    a.adapter,
+                    a.action,
+                    a.params,
+                    a.scheduled_for.unwrap_or(now),
+                );
                 t.recurrence = a.recurrence;
                 t.depends_on = a.depends_on;
                 t.dedup_key = a.dedup_key;
-                if let Some(p) = a.priority { t.priority = p; }
-                if let Some(m) = a.max_attempts { t.max_attempts = m; }
+                if let Some(p) = a.priority {
+                    t.priority = p;
+                }
+                if let Some(m) = a.max_attempts {
+                    t.max_attempts = m;
+                }
                 let id = e.add_task(t).map_err(|e| e.to_string())?;
                 Ok(serde_json::json!({ "id": id }))
             }
             Request::Get { id } => {
                 let t = e.store.get_task(&id).map_err(|e| e.to_string())?;
-                let events = match &t { Some(_) => e.store.events_for(&id).map_err(|e| e.to_string())?, None => vec![] };
+                let events = match &t {
+                    Some(_) => e.store.events_for(&id).map_err(|e| e.to_string())?,
+                    None => vec![],
+                };
                 Ok(serde_json::json!({ "task": t, "events": events }))
             }
-            Request::List { status, adapter, limit } => {
-                let mut tasks = e.store.list_tasks(status_from_opt(&status), limit.unwrap_or(100)).map_err(|e| e.to_string())?;
-                if let Some(ad) = adapter { tasks.retain(|t| t.adapter == ad); }
+            Request::List {
+                status,
+                adapter,
+                limit,
+            } => {
+                let mut tasks = e
+                    .store
+                    .list_tasks(status_from_opt(&status), limit.unwrap_or(100))
+                    .map_err(|e| e.to_string())?;
+                if let Some(ad) = adapter {
+                    tasks.retain(|t| t.adapter == ad);
+                }
                 Ok(serde_json::json!({ "tasks": tasks }))
             }
             Request::Cancel { id } => {
@@ -153,39 +224,62 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                         e.store.update_task(&t).map_err(|e| e.to_string())?;
                     }
                     Ok(serde_json::json!({ "canceled": true }))
-                } else { Err(format!("no task {id}")) }
+                } else {
+                    Err(format!("no task {id}"))
+                }
             }
             Request::RunNow { id, force: _ } => {
                 if let Some(mut t) = e.store.get_task(&id).map_err(|e| e.to_string())? {
                     t.scheduled_for = now;
                     t.next_eligible_at = None;
-                    if t.status == TaskStatus::Deferred { t.status = TaskStatus::Pending; }
+                    if t.status == TaskStatus::Deferred {
+                        t.status = TaskStatus::Pending;
+                    }
                     t.updated_at = now;
                     e.store.update_task(&t).map_err(|e| e.to_string())?;
                     Ok(serde_json::json!({ "ok": true }))
-                } else { Err(format!("no task {id}")) }
+                } else {
+                    Err(format!("no task {id}"))
+                }
             }
             Request::Limits => {
                 let date = pacewright_core::limits::local_date_str(e.clock.now_ms());
                 let counters = e.store.list_counters(&date).map_err(|e| e.to_string())?;
                 let counters: Vec<_> = counters
                     .into_iter()
-                    .map(|(key, count, last_spent_at)| serde_json::json!({
-                        "key": key,
-                        "count": count,
-                        "last_spent_at": last_spent_at,
-                    }))
+                    .map(|(key, count, last_spent_at)| {
+                        serde_json::json!({
+                            "key": key,
+                            "count": count,
+                            "last_spent_at": last_spent_at,
+                        })
+                    })
                     .collect();
                 Ok(serde_json::json!({ "date": date, "counters": counters }))
             }
             Request::Adapters => {
-                let list: Vec<_> = e.registry.all().iter().map(|a| serde_json::json!({ "name": a.name(), "actions": a.actions() })).collect();
+                let list: Vec<_> = e
+                    .registry
+                    .all()
+                    .iter()
+                    .map(|a| serde_json::json!({ "name": a.name(), "actions": a.actions() }))
+                    .collect();
                 Ok(serde_json::json!({ "adapters": list }))
             }
             Request::Status => {
-                let pending = e.store.tasks_in_status(TaskStatus::Pending).map_err(|e| e.to_string())?.len();
-                let running = e.store.tasks_in_status(TaskStatus::Running).map_err(|e| e.to_string())?.len();
-                Ok(serde_json::json!({ "pending": pending, "running": running, "paused": e.paused_scopes() }))
+                let pending = e
+                    .store
+                    .tasks_in_status(TaskStatus::Pending)
+                    .map_err(|e| e.to_string())?
+                    .len();
+                let running = e
+                    .store
+                    .tasks_in_status(TaskStatus::Running)
+                    .map_err(|e| e.to_string())?
+                    .len();
+                Ok(
+                    serde_json::json!({ "pending": pending, "running": running, "paused": e.paused_scopes() }),
+                )
             }
             Request::Pause { scope } => {
                 e.pause(scope.clone());
@@ -195,13 +289,17 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 e.resume(&scope);
                 Ok(serde_json::json!({ "scope": scope, "paused": false }))
             }
-            Request::Subscribe => Ok(serde_json::json!({ "note": "subscribe stream not enabled on this request path" })),
+            Request::Subscribe => Ok(
+                serde_json::json!({ "note": "subscribe stream not enabled on this request path" }),
+            ),
 
             Request::ScheduleApply { prune } => {
+                let registry = srv.registry.read().unwrap().clone();
                 let (entries, mut errors) = schedule::load_dir(&srv.schedules_dir);
-                let (valid, verrs) = schedule::partition(&entries, &srv.registry);
+                let (valid, verrs) = schedule::partition(&entries, &registry);
                 errors.extend(verrs);
-                let report = schedule::reconcile(&e.store, &*e.clock, &valid, prune).map_err(|e| e.to_string())?;
+                let report = schedule::reconcile(&e.store, &*e.clock, &valid, prune)
+                    .map_err(|e| e.to_string())?;
                 Ok(serde_json::json!({
                     "created": report.created,
                     "updated": report.updated,
@@ -247,9 +345,21 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                     config.active.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
-                e.store.limit_override_set(&key, &cfg, now).map_err(|e| e.to_string())?;
+                e.store
+                    .limit_override_set(&key, &cfg, now)
+                    .map_err(|e| e.to_string())?;
                 e.cfg.set_limit(key.clone(), cfg);
                 Ok(serde_json::json!({ "key": key, "set": true }))
+            }
+            Request::RecipeReload => {
+                // Re-read every `.kdl` from disk, rebuild the engine's adapter set from it, then
+                // publish the fresh registry. New/changed task recipes become runnable immediately;
+                // account recipes stay on the boot registry the AuthManager holds (needs a restart).
+                let fresh = Arc::new(RecipeRegistry::load_dir(&srv.recipes_dir));
+                let adapters = fresh.adapters();
+                e.registry = build_adapter_registry(&fresh, &srv.recipe_runner);
+                *srv.registry.write().unwrap() = fresh;
+                Ok(serde_json::json!({ "reloaded": true, "adapters": adapters }))
             }
             // Auth RPCs are intercepted by `handle_auth` before this synchronous dispatch.
             Request::AuthList
@@ -268,14 +378,20 @@ async fn handle_conn(srv: Arc<Server>, stream: UnixStream) {
     let (r, mut w) = stream.into_split();
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         let resp = match serde_json::from_str::<Request>(&line) {
             Ok(req) => handle_request(&srv, req).await,
-            Err(e) => Response::Error { message: format!("bad request: {e}") },
+            Err(e) => Response::Error {
+                message: format!("bad request: {e}"),
+            },
         };
         let mut out = serde_json::to_string(&resp).unwrap();
         out.push('\n');
-        if w.write_all(out.as_bytes()).await.is_err() { break; }
+        if w.write_all(out.as_bytes()).await.is_err() {
+            break;
+        }
     }
 }
 
@@ -284,7 +400,10 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
     let listener = match UnixListener::bind(socket_path) {
         Ok(l) => l,
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-            anyhow::bail!("another pacewrightd instance is already listening on {}", socket_path.display());
+            anyhow::bail!(
+                "another pacewrightd instance is already listening on {}",
+                socket_path.display()
+            );
         }
         Err(err) => return Err(err.into()),
     };
@@ -305,7 +424,9 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                     let claimed = {
                         let e = engine.lock().await;
                         match e.claim_one() {
-                            Ok(Some(c)) => Some((c, e.store.clone(), e.clock.clone(), e.browser.clone())),
+                            Ok(Some(c)) => {
+                                Some((c, e.store.clone(), e.clock.clone(), e.browser.clone()))
+                            }
                             Ok(None) => None,
                             Err(err) => {
                                 tracing::error!("claim error: {err}");
@@ -313,9 +434,18 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                             }
                         }
                     };
-                    let Some((claimed, store, clock, browser)) = claimed else { break };
+                    let Some((claimed, store, clock, browser)) = claimed else {
+                        break;
+                    };
                     let handle = tokio::spawn(async move {
-                        execute_and_record(&store, &*claimed.adapter, &*clock, browser, claimed.task).await
+                        execute_and_record(
+                            &store,
+                            &*claimed.adapter,
+                            &*clock,
+                            browser,
+                            claimed.task,
+                        )
+                        .await
                     });
                     match handle.await {
                         Ok(Ok(())) => {}
@@ -341,18 +471,21 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use pacewright_adapter_dummy::DummyAdapter;
     use pacewright_core::adapter::AdapterRegistry;
     use pacewright_core::clock::SystemClock;
     use pacewright_core::config::Config;
     use pacewright_core::rng::SeededRng;
     use pacewright_core::store::Store;
-    use pacewright_adapter_dummy::DummyAdapter;
 
     pub fn scratch(prefix: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "{prefix}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -362,12 +495,20 @@ pub(crate) mod test_support {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let mut reg = AdapterRegistry::new();
         reg.register(Arc::new(DummyAdapter::new()));
-        let e = Engine::new(store, reg, Config::default(), Arc::new(SystemClock), Arc::new(SeededRng::new(1)));
+        let e = Engine::new(
+            store,
+            reg,
+            Config::default(),
+            Arc::new(SystemClock),
+            Arc::new(SeededRng::new(1)),
+        );
         let registry = Arc::new(RecipeRegistry::new());
         Server {
             engine: Arc::new(Mutex::new(e)),
             auth: auth_for(registry.clone()),
-            registry,
+            registry: RwLock::new(registry),
+            recipes_dir: std::env::temp_dir().join("pcw-no-such-recipes-dir"),
+            recipe_runner: Arc::new(pacewright_adapter_recipe::CliRecipeRunner::new()),
             schedules_dir: std::env::temp_dir().join("pcw-no-such-schedules-dir"),
         }
     }
@@ -389,8 +530,10 @@ pub(crate) mod test_support {
         let mut srv = test_server().await;
         let recipes = scratch("pcw-srv-recipes");
         std::fs::write(recipes.join("echo.kdl"), "recipe \"dummy/echo\" {}\n").unwrap();
-        srv.registry = Arc::new(RecipeRegistry::load_dir(&recipes));
-        srv.auth = auth_for(srv.registry.clone());
+        let registry = Arc::new(RecipeRegistry::load_dir(&recipes));
+        srv.registry = RwLock::new(registry.clone());
+        srv.recipes_dir = recipes;
+        srv.auth = auth_for(registry);
         let sched = scratch("pcw-srv-schedules");
         std::fs::write(sched.join("s.toml"), schedule_toml).unwrap();
         srv.schedules_dir = sched;
@@ -400,8 +543,8 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_support::{auth_for, scratch, test_server, test_server_with_schedule};
+    use super::*;
     use pacewright_proto::AddTaskReq;
 
     #[tokio::test]
@@ -419,8 +562,10 @@ mod tests {
             "recipe \"riverside/generate_magic_clips\" { auth account=\"prevetted-riverside\" }",
         )
         .unwrap();
-        srv.registry = Arc::new(RecipeRegistry::load_dir(&recipes));
-        srv.auth = auth_for(srv.registry.clone());
+        let registry = Arc::new(RecipeRegistry::load_dir(&recipes));
+        srv.registry = RwLock::new(registry.clone());
+        srv.recipes_dir = recipes;
+        srv.auth = auth_for(registry);
 
         let resp = handle_request(&srv, Request::AuthList).await;
         match resp {
@@ -440,26 +585,108 @@ mod tests {
     #[tokio::test]
     async fn test_auth_login_unknown_account_errors() {
         let srv = test_server().await;
-        let resp = handle_request(&srv, Request::AuthLogin { account: "nope".into() }).await;
+        let resp = handle_request(
+            &srv,
+            Request::AuthLogin {
+                account: "nope".into(),
+            },
+        )
+        .await;
         assert!(matches!(resp, Response::Error { .. }), "got {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn test_recipe_reload_picks_up_a_new_adapter() {
+        // A recipe dropped into the recipes dir AFTER boot is invisible until reload: the engine's
+        // adapter set is built once. `RecipeReload` re-reads the dir and rebuilds it in place.
+        let mut srv = test_server().await;
+        let recipes = scratch("pcw-srv-reload");
+        srv.recipes_dir = recipes.clone();
+
+        // Nothing installed yet → only the built-in `dummy` adapter.
+        let before = handle_request(&srv, Request::Adapters).await;
+        let names_before: Vec<String> = match before {
+            Response::Ok(v) => v["adapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["name"].as_str().unwrap().to_string())
+                .collect(),
+            _ => panic!("adapters failed"),
+        };
+        assert!(
+            !names_before.iter().any(|n| n == "riverside"),
+            "riverside shouldn't exist pre-reload"
+        );
+
+        // Install a recipe, then reload.
+        std::fs::write(
+            recipes.join("rv.kdl"),
+            "recipe \"riverside/list_projects\" {}\n",
+        )
+        .unwrap();
+        let resp = handle_request(&srv, Request::RecipeReload).await;
+        match resp {
+            Response::Ok(v) => {
+                assert_eq!(v["reloaded"], true);
+                assert!(v["adapters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a == "riverside"));
+            }
+            _ => panic!("reload failed"),
+        }
+
+        // The engine now routes `riverside/*` to a recipe adapter, and the published registry sees it.
+        let after = handle_request(&srv, Request::Adapters).await;
+        match after {
+            Response::Ok(v) => assert!(v["adapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["name"] == "riverside")),
+            _ => panic!("adapters failed"),
+        }
+        assert!(srv
+            .registry
+            .read()
+            .unwrap()
+            .adapters()
+            .iter()
+            .any(|n| n == "riverside"));
     }
 
     #[tokio::test]
     async fn test_add_then_get_via_dispatch() {
         let srv = test_server().await;
         let add = Request::Add(AddTaskReq {
-            adapter: "dummy".into(), action: "echo".into(), params: serde_json::json!({"a":1}),
-            scheduled_for: None, recurrence: None, depends_on: None, priority: None, dedup_key: None, max_attempts: None,
+            adapter: "dummy".into(),
+            action: "echo".into(),
+            params: serde_json::json!({"a":1}),
+            scheduled_for: None,
+            recurrence: None,
+            depends_on: None,
+            priority: None,
+            dedup_key: None,
+            max_attempts: None,
         });
         let resp = handle_request(&srv, add).await;
-        let id = match resp { Response::Ok(v) => v["id"].as_str().unwrap().to_string(), _ => panic!("add failed") };
+        let id = match resp {
+            Response::Ok(v) => v["id"].as_str().unwrap().to_string(),
+            _ => panic!("add failed"),
+        };
         let get = handle_request(&srv, Request::Get { id: id.clone() }).await;
-        match get { Response::Ok(v) => assert_eq!(v["task"]["action"], "echo"), _ => panic!("get failed") };
+        match get {
+            Response::Ok(v) => assert_eq!(v["task"]["action"], "echo"),
+            _ => panic!("get failed"),
+        };
     }
 
     #[tokio::test]
     async fn test_schedule_apply_list_and_toggle() {
-        let srv = test_server_with_schedule("[[task]]\nid = \"t1\"\nrecipe = \"dummy/echo\"\n").await;
+        let srv =
+            test_server_with_schedule("[[task]]\nid = \"t1\"\nrecipe = \"dummy/echo\"\n").await;
 
         // apply → one task created for the entry
         let resp = handle_request(&srv, Request::ScheduleApply { prune: false }).await;
@@ -511,7 +738,11 @@ mod tests {
         match resp {
             Response::Ok(v) => {
                 assert_eq!(v["created"], serde_json::json!(["t1"]));
-                assert!(v["errors"].as_array().unwrap().iter().any(|e| e.as_str().unwrap().contains("no recipe")));
+                assert!(v["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.as_str().unwrap().contains("no recipe")));
             }
             _ => panic!("apply failed"),
         }
@@ -520,10 +751,19 @@ mod tests {
     #[tokio::test]
     async fn test_set_limit_persists_override() {
         let srv = test_server().await;
-        let resp = handle_request(&srv, Request::SetLimit {
-            key: "dummy.capped".into(),
-            config: pacewright_proto::LimitSpec { daily_cap: Some(3), min_gap: Some("8m".into()), jitter: Some(0.5), active: None },
-        }).await;
+        let resp = handle_request(
+            &srv,
+            Request::SetLimit {
+                key: "dummy.capped".into(),
+                config: pacewright_proto::LimitSpec {
+                    daily_cap: Some(3),
+                    min_gap: Some("8m".into()),
+                    jitter: Some(0.5),
+                    active: None,
+                },
+            },
+        )
+        .await;
         assert!(matches!(resp, Response::Ok(_)));
         let e = srv.engine.lock().await;
         // in-memory cfg updated
@@ -539,7 +779,10 @@ mod tests {
     async fn test_bad_adapter_lists_adapters() {
         let srv = test_server().await;
         let resp = handle_request(&srv, Request::Adapters).await;
-        match resp { Response::Ok(v) => assert_eq!(v["adapters"][0]["name"], "dummy"), _ => panic!() };
+        match resp {
+            Response::Ok(v) => assert_eq!(v["adapters"][0]["name"], "dummy"),
+            _ => panic!(),
+        };
     }
 
     #[tokio::test]
@@ -547,9 +790,18 @@ mod tests {
         let srv = test_server().await;
 
         // pause a specific adapter scope -> echoed back, and reflected in status
-        let resp = handle_request(&srv, Request::Pause { scope: "dummy".into() }).await;
+        let resp = handle_request(
+            &srv,
+            Request::Pause {
+                scope: "dummy".into(),
+            },
+        )
+        .await;
         match resp {
-            Response::Ok(v) => { assert_eq!(v["scope"], "dummy"); assert_eq!(v["paused"], true); }
+            Response::Ok(v) => {
+                assert_eq!(v["scope"], "dummy");
+                assert_eq!(v["paused"], true);
+            }
             _ => panic!("pause failed"),
         }
         let status = handle_request(&srv, Request::Status).await;
@@ -564,7 +816,13 @@ mod tests {
         }
 
         // "daemon" is the alias for the "all" scope; status should surface "all"
-        handle_request(&srv, Request::Pause { scope: "daemon".into() }).await;
+        handle_request(
+            &srv,
+            Request::Pause {
+                scope: "daemon".into(),
+            },
+        )
+        .await;
         let status = handle_request(&srv, Request::Status).await;
         match status {
             Response::Ok(v) => {
@@ -575,17 +833,35 @@ mod tests {
         }
 
         // resume both -> paused set drains to empty
-        handle_request(&srv, Request::Resume { scope: "dummy".into() }).await;
-        let resp = handle_request(&srv, Request::Resume { scope: "daemon".into() }).await;
+        handle_request(
+            &srv,
+            Request::Resume {
+                scope: "dummy".into(),
+            },
+        )
+        .await;
+        let resp = handle_request(
+            &srv,
+            Request::Resume {
+                scope: "daemon".into(),
+            },
+        )
+        .await;
         match resp {
-            Response::Ok(v) => { assert_eq!(v["scope"], "daemon"); assert_eq!(v["paused"], false); }
+            Response::Ok(v) => {
+                assert_eq!(v["scope"], "daemon");
+                assert_eq!(v["paused"], false);
+            }
             _ => panic!("resume failed"),
         }
         let status = handle_request(&srv, Request::Status).await;
         match status {
             Response::Ok(v) => {
                 let scopes: Vec<String> = serde_json::from_value(v["paused"].clone()).unwrap();
-                assert!(scopes.is_empty(), "expected no paused scopes, got {scopes:?}");
+                assert!(
+                    scopes.is_empty(),
+                    "expected no paused scopes, got {scopes:?}"
+                );
             }
             _ => panic!("status failed"),
         }

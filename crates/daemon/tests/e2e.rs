@@ -1,11 +1,11 @@
+use pacewright_adapter_dummy::DummyAdapter;
+use pacewright_adapter_recipe::{AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeRegistry};
 use pacewright_core::adapter::AdapterRegistry;
 use pacewright_core::clock::SystemClock;
 use pacewright_core::config::Config;
 use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
-use pacewright_adapter_dummy::DummyAdapter;
-use pacewright_adapter_recipe::{AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeRegistry};
 use pacewright_proto::{AddTaskReq, Request, Response};
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,37 +37,71 @@ async fn test_e2e_echo_runs_to_success() {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
-    let engine = Arc::new(Mutex::new(Engine::new(store, reg, Config::default(), Arc::new(SystemClock), Arc::new(SeededRng::new(1)))));
+    let engine = Arc::new(Mutex::new(Engine::new(
+        store,
+        reg,
+        Config::default(),
+        Arc::new(SystemClock),
+        Arc::new(SeededRng::new(1)),
+    )));
     let registry = Arc::new(RecipeRegistry::new());
+    let recipe_runner: Arc<dyn pacewright_adapter_recipe::RecipeRunner> =
+        Arc::new(CliRecipeRunner::new());
     let auth = Arc::new(AuthManager::new(
         registry.clone(),
-        Arc::new(CliRecipeRunner::new()),
+        recipe_runner.clone(),
         Arc::new(CliLoginLauncher::new()),
     ));
     let srv = Arc::new(Server {
         engine,
-        registry,
+        registry: std::sync::RwLock::new(registry),
+        recipes_dir: dir.join("recipes"),
+        recipe_runner,
         schedules_dir: dir.join("schedules"),
         auth,
     });
 
     let sock2 = sock.clone();
-    tokio::spawn(async move { serve(srv, &sock2).await.unwrap(); });
+    tokio::spawn(async move {
+        serve(srv, &sock2).await.unwrap();
+    });
     // wait for socket
-    for _ in 0..50 { if sock.exists() { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
-    let resp = client_call(&sock, Request::Add(AddTaskReq {
-        adapter: "dummy".into(), action: "echo".into(), params: serde_json::json!({"a":1}),
-        scheduled_for: None, recurrence: None, depends_on: None, priority: None, dedup_key: None, max_attempts: None,
-    })).await;
-    let id = match resp { Response::Ok(v) => v["id"].as_str().unwrap().to_string(), _ => panic!("add failed") };
+    let resp = client_call(
+        &sock,
+        Request::Add(AddTaskReq {
+            adapter: "dummy".into(),
+            action: "echo".into(),
+            params: serde_json::json!({"a":1}),
+            scheduled_for: None,
+            recurrence: None,
+            depends_on: None,
+            priority: None,
+            dedup_key: None,
+            max_attempts: None,
+        }),
+    )
+    .await;
+    let id = match resp {
+        Response::Ok(v) => v["id"].as_str().unwrap().to_string(),
+        _ => panic!("add failed"),
+    };
 
     // tick runs every 1s; wait up to 3s
     let mut ok = false;
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if let Response::Ok(v) = client_call(&sock, Request::Get { id: id.clone() }).await {
-            if v["task"]["status"] == "succeeded" { ok = true; break; }
+            if v["task"]["status"] == "succeeded" {
+                ok = true;
+                break;
+            }
         }
     }
     assert!(ok, "task did not reach succeeded");

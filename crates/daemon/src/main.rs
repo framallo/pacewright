@@ -1,19 +1,22 @@
 use anyhow::Result;
-use pacewright_daemon::{server, web};
-use pacewright_core::adapter::AdapterRegistry;
+use pacewright_adapter_recipe::{
+    schedule, AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeRegistry, RecipeRunner,
+};
+use pacewright_browser::CliBrowser;
 use pacewright_core::clock::SystemClock;
 use pacewright_core::config::Config;
 use pacewright_core::engine::Engine;
 use pacewright_core::rng::SeededRng;
 use pacewright_core::store::Store;
-use pacewright_adapter_dummy::DummyAdapter;
-use pacewright_adapter_recipe::{schedule, AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeAdapter, RecipeRegistry};
-use pacewright_browser::CliBrowser;
+use pacewright_daemon::server::{self, build_adapter_registry};
+use pacewright_daemon::web;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
-fn home_dir() -> PathBuf { PathBuf::from(std::env::var("HOME").unwrap()) }
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap())
+}
 
 fn pw_dir() -> PathBuf {
     let d = home_dir().join(".pacewright");
@@ -48,28 +51,13 @@ async fn main() -> Result<()> {
     for (key, limit) in store.limit_overrides_all()? {
         cfg.set_limit(key, limit);
     }
-    let mut reg = AdapterRegistry::new();
-    reg.register(Arc::new(DummyAdapter::new()));
-
     // Recipe-backed adapters: one `RecipeAdapter` per distinct `<adapter>` prefix among the
     // installed `.kdl` recipes (populated by `pcw recipe add`). The site logic that used to
     // live in `adapter-linkedin` is now a gitignored testbed recipe `linkedin/scrape_profile`.
+    // `build_adapter_registry` (shared with `RecipeReload`) also registers the built-in DummyAdapter.
     let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
-    let recipe_runner = Arc::new(CliRecipeRunner::new());
-    for adapter_name in recipe_registry.adapters() {
-        // Don't let a recipe prefix hijack a built-in adapter (e.g. a `dummy/*` recipe
-        // shadowing the test DummyAdapter). Built-ins win; the recipe is skipped with a warning.
-        if reg.get(&adapter_name).is_some() {
-            tracing::warn!("recipe prefix `{adapter_name}` collides with a built-in adapter — skipping the recipe-backed one");
-            continue;
-        }
-        tracing::info!("registering recipe-backed adapter `{adapter_name}`");
-        reg.register(Arc::new(RecipeAdapter::new(
-            adapter_name,
-            recipe_registry.clone(),
-            recipe_runner.clone(),
-        )));
-    }
+    let recipe_runner: Arc<dyn RecipeRunner> = Arc::new(CliRecipeRunner::new());
+    let reg = build_adapter_registry(&recipe_registry, &recipe_runner);
     if recipe_registry.is_empty() {
         tracing::info!(
             "no recipes installed in {} — only browser-free adapters are available (add with `pcw recipe add`)",
@@ -82,7 +70,14 @@ async fn main() -> Result<()> {
     // adapters. Browser tasks then fail Terminal with a clear message.
     let browser = Arc::new(CliBrowser::new());
 
-    let engine = Engine::new(store, reg, cfg, Arc::new(SystemClock), Arc::new(SeededRng::new(rand_seed()))).with_browser(browser);
+    let engine = Engine::new(
+        store,
+        reg,
+        cfg,
+        Arc::new(SystemClock),
+        Arc::new(SeededRng::new(rand_seed())),
+    )
+    .with_browser(browser);
     engine.recover_on_boot()?;
 
     // Reconcile the declarative schedule files into the queue on boot, so recurring/scheduled
@@ -96,7 +91,10 @@ async fn main() -> Result<()> {
         match schedule::reconcile(&engine.store, &*engine.clock, &valid, false) {
             Ok(r) => tracing::info!(
                 "schedule reconcile: {} created, {} updated, {} canceled ({} entries)",
-                r.created.len(), r.updated.len(), r.canceled.len(), valid.len()
+                r.created.len(),
+                r.updated.len(),
+                r.canceled.len(),
+                valid.len()
             ),
             Err(e) => tracing::error!("schedule reconcile failed: {e}"),
         }
@@ -115,7 +113,9 @@ async fn main() -> Result<()> {
     let engine = Arc::new(Mutex::new(engine));
     let srv = Arc::new(server::Server {
         engine,
-        registry: recipe_registry,
+        registry: RwLock::new(recipe_registry),
+        recipes_dir: recipes_dir(),
+        recipe_runner,
         schedules_dir: schedules_dir(),
         auth,
     });
@@ -148,7 +148,9 @@ fn web_addr() -> Option<std::net::SocketAddr> {
     match raw.parse() {
         Ok(a) => Some(a),
         Err(e) => {
-            tracing::warn!("PACEWRIGHT_WEB_ADDR `{raw}` is not a valid address ({e}) — dashboard off");
+            tracing::warn!(
+                "PACEWRIGHT_WEB_ADDR `{raw}` is not a valid address ({e}) — dashboard off"
+            );
             None
         }
     }
@@ -157,5 +159,9 @@ fn web_addr() -> Option<std::net::SocketAddr> {
 // A boot-time seed derived from the pid + start; randomness only affects pacing jitter.
 fn rand_seed() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0) ^ (std::process::id() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (std::process::id() as u64)
 }
