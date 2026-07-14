@@ -219,7 +219,7 @@ launchctl load ~/Library/LaunchAgents/com.paperclip.pacewrightd.plist
 | M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter |
 | M5 | Riverside adapter (extract raw, export magic clips, → Spotify, → YouTube unlisted) |
 | M6 | YouTube adapter + daily limits |
-| **M7 ⏳** | **MCP server ✅** (`pacewright-mcp`, 20 tools over stdio) — Claude skill still to come |
+| **M7 ✅** | MCP server (`pacewright-mcp`, 20 tools over stdio) + Claude skill (`.claude/skills/pacewright`) |
 | M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz |
 
 ## Known gaps (M1)
