@@ -174,3 +174,117 @@ fn test_run_columns_roundtrip_and_lookup() {
     assert!(store.find_active_by_dedup("ep172:publish_long").unwrap().is_none());
     assert!(store.find_by_dedup_any("ep172:publish_long").unwrap().is_some());
 }
+
+/// Drive ticks until the run settles or we hit a bounded cap.
+async fn drain(e: &Engine, run_id: &str) {
+    for _ in 0..40 {
+        e.tick().await.unwrap();
+        let tasks = e.store.tasks_in_run(run_id).unwrap();
+        if tasks.iter().all(|t| {
+            matches!(t.status, TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled)
+        }) {
+            return;
+        }
+    }
+}
+
+fn step_of(e: &Engine, run_id: &str, name: &str) -> Task {
+    e.store
+        .tasks_in_run(run_id)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.step_name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no step {name}"))
+}
+
+#[tokio::test]
+async fn test_failing_verify_blocks_the_dependent_step() {
+    // The regression test for the real incidents: riverside/publish_clips reported
+    // success while publishing ZERO shorts, and share_spotify reported success while
+    // leaving a blank draft. Here the step "succeeds" but its verify fails, and the
+    // next step MUST NOT run on the strength of that false success.
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let src = r#"pipeline "d" {
+        step "publish" recipe="dummy/echo" {
+            verify recipe="dummy/always_fail" { }
+        }
+        step "after" recipe="dummy/echo" after="publish" { }
+    }"#;
+    let def = pacewright_core::pipeline::parse_pipeline(src).unwrap();
+    pacewright_core::run::start(&e.store, &def, "r1", &serde_json::json!({}), 1_000).unwrap();
+
+    drain(&e, "r1").await;
+
+    assert_eq!(step_of(&e, "r1", "publish").status, TaskStatus::Succeeded);
+    assert_eq!(step_of(&e, "r1", "publish.verify").status, TaskStatus::Failed);
+    assert_ne!(
+        step_of(&e, "r1", "after").status,
+        TaskStatus::Succeeded,
+        "a dependent must never run past a failed verification"
+    );
+}
+
+#[tokio::test]
+async fn test_passing_verify_releases_the_dependent_step() {
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let src = r#"pipeline "d" {
+        step "publish" recipe="dummy/echo" {
+            verify recipe="dummy/echo" { }
+        }
+        step "after" recipe="dummy/echo" after="publish" { }
+    }"#;
+    let def = pacewright_core::pipeline::parse_pipeline(src).unwrap();
+    pacewright_core::run::start(&e.store, &def, "r2", &serde_json::json!({}), 1_000).unwrap();
+
+    drain(&e, "r2").await;
+
+    assert_eq!(step_of(&e, "r2", "publish.verify").status, TaskStatus::Succeeded);
+    assert_eq!(step_of(&e, "r2", "after").status, TaskStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn test_result_flows_from_one_step_into_the_next() {
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    // dummy/echo returns its params, so `one` produces {"id":"abc"} and `two` should
+    // receive that value resolved out of it.
+    let src = r#"pipeline "d" {
+        step "one" recipe="dummy/echo" { params { id "abc" } }
+        step "two" recipe="dummy/echo" after="one" {
+            params {
+                got "{{ steps.one.result.id }}"
+                label "EP{{ vars.n }}"
+            }
+        }
+    }"#;
+    let def = pacewright_core::pipeline::parse_pipeline(src).unwrap();
+    pacewright_core::run::start(&e.store, &def, "r3", &serde_json::json!({"n": "172"}), 1_000)
+        .unwrap();
+
+    drain(&e, "r3").await;
+
+    let two = step_of(&e, "r3", "two");
+    assert_eq!(two.status, TaskStatus::Succeeded);
+    let res = two.result.unwrap();
+    assert_eq!(res["got"], "abc", "a step result must reach the next step");
+    assert_eq!(res["label"], "EP172", "run vars must resolve too");
+}
+
+#[tokio::test]
+async fn test_unresolvable_reference_fails_the_task_instead_of_leaking_braces() {
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let src = r#"pipeline "d" {
+        step "only" recipe="dummy/echo" { params { x "{{ steps.ghost.result.y }}" } }
+    }"#;
+    let def = pacewright_core::pipeline::parse_pipeline(src).unwrap();
+    pacewright_core::run::start(&e.store, &def, "r4", &serde_json::json!({}), 1_000).unwrap();
+
+    drain(&e, "r4").await;
+
+    let t = step_of(&e, "r4", "only");
+    assert_eq!(t.status, TaskStatus::Failed);
+    assert!(t.last_error.unwrap().contains("steps.ghost.result.y"));
+}
