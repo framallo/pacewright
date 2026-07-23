@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod pipeline;
 pub mod refs;
 pub mod rng;
+pub mod run;
 pub mod runner;
 pub mod scheduler;
 pub mod secrets;

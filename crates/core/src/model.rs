@@ -54,6 +54,9 @@ pub struct Task {
     pub dedup_key: Option<String>,
     pub run_id: Option<String>,
     pub step_name: Option<String>,
+    /// When released by a dependency, wait a jittered pause of about this long
+    /// before becoming eligible. Humanizes the gap between pipeline steps.
+    pub pace_ms: Option<i64>,
     pub attempts: i64,
     pub max_attempts: i64,
     pub last_error: Option<String>,
@@ -79,6 +82,7 @@ impl Task {
             dedup_key: None,
             run_id: None,
             step_name: None,
+            pace_ms: None,
             attempts: 0,
             max_attempts: 3,
             last_error: None,

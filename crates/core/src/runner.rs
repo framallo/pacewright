@@ -84,7 +84,39 @@ pub async fn execute_and_record(
     // `execute()` must not take down the tick loop or the daemon: catch it here and
     // fold it into the same Terminal path as any other unrecoverable adapter error, so
     // it fails just that task with a normal audit trail instead of crashing the process.
-    let result = match AssertUnwindSafe(adapter.execute(&ctx, &task.action, task.params.clone())).catch_unwind().await {
+    // Resolve {{ steps.*.result.* }} / {{ vars.* }} against this run's sibling results at
+    // DISPATCH time, not enqueue time: the referenced step has only just produced its
+    // result. Non-run tasks are untouched, so nothing about existing behaviour changes.
+    let params = match task.run_id.clone() {
+        None => task.params.clone(),
+        Some(rid) => {
+            let mut results = std::collections::HashMap::new();
+            let mut vars = serde_json::Value::Object(Default::default());
+            for sib in store.tasks_in_run(&rid)? {
+                if sib.step_name.as_deref() == Some(crate::run::VARS_STEP) {
+                    vars = sib.params.clone();
+                } else if let (Some(name), Some(res)) = (sib.step_name.clone(), sib.result.clone()) {
+                    results.insert(name, res);
+                }
+            }
+            match crate::refs::resolve(&task.params, &vars, &results) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Refuse to hand a literal "{{ … }}" to an adapter.
+                    let now = clock.now_ms();
+                    task.status = TaskStatus::Failed;
+                    task.last_error = Some(e.to_string());
+                    task.finished_at = Some(now);
+                    task.updated_at = now;
+                    store.update_task(&task)?;
+                    store.append_event(&event(&task, TaskStatus::Running, TaskStatus::Failed, now, serde_json::json!({"unresolved": true})))?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let result = match AssertUnwindSafe(adapter.execute(&ctx, &task.action, params)).catch_unwind().await {
         Ok(r) => r,
         Err(panic_payload) => Err(AdapterError::Terminal(format!("adapter panicked: {}", panic_message(panic_payload)))),
     };

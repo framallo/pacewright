@@ -104,7 +104,7 @@ impl Engine {
         if self.is_paused_all() {
             return Ok(None);
         }
-        resolve_blocked(&self.store, &*self.clock)?;
+        resolve_blocked(&self.store, &*self.clock, &*self.rng)?;
         let runnable = select_runnable(&self.store, &*self.clock)?;
         for task in runnable {
             if self.is_adapter_paused(&task.adapter) {

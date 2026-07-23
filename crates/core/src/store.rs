@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     dedup_key TEXT,
     run_id TEXT,
     step_name TEXT,
+    pace_ms INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     last_error TEXT,
@@ -73,6 +74,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     for ddl in [
         "ALTER TABLE tasks ADD COLUMN run_id TEXT",
         "ALTER TABLE tasks ADD COLUMN step_name TEXT",
+        "ALTER TABLE tasks ADD COLUMN pace_ms INTEGER",
     ] {
         match conn.execute(ddl, []) {
             Ok(_) => {}
@@ -121,6 +123,7 @@ impl Store {
             dedup_key: row.get("dedup_key")?,
             run_id: row.get("run_id")?,
             step_name: row.get("step_name")?,
+            pace_ms: row.get("pace_ms")?,
             attempts: row.get("attempts")?,
             max_attempts: row.get("max_attempts")?,
             last_error: row.get("last_error")?,
@@ -134,12 +137,12 @@ impl Store {
     pub fn insert_task(&self, t: &Task) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO tasks (id,adapter,action,params,status,scheduled_for,next_eligible_at,priority,recurrence,depends_on,dedup_key,run_id,step_name,attempts,max_attempts,last_error,result,created_at,updated_at,finished_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+            "INSERT INTO tasks (id,adapter,action,params,status,scheduled_for,next_eligible_at,priority,recurrence,depends_on,dedup_key,run_id,step_name,pace_ms,attempts,max_attempts,last_error,result,created_at,updated_at,finished_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 t.id, t.adapter, t.action, serde_json::to_string(&t.params).unwrap(),
                 t.status.as_str(), t.scheduled_for, t.next_eligible_at, t.priority,
-                t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.attempts, t.max_attempts,
+                t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.pace_ms, t.attempts, t.max_attempts,
                 t.last_error, t.result.as_ref().map(|v| serde_json::to_string(v).unwrap()),
                 t.created_at, t.updated_at, t.finished_at
             ],
@@ -150,11 +153,11 @@ impl Store {
     pub fn update_task(&self, t: &Task) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE tasks SET adapter=?2,action=?3,params=?4,status=?5,scheduled_for=?6,next_eligible_at=?7,priority=?8,recurrence=?9,depends_on=?10,dedup_key=?11,run_id=?12,step_name=?13,attempts=?14,max_attempts=?15,last_error=?16,result=?17,created_at=?18,updated_at=?19,finished_at=?20 WHERE id=?1",
+            "UPDATE tasks SET adapter=?2,action=?3,params=?4,status=?5,scheduled_for=?6,next_eligible_at=?7,priority=?8,recurrence=?9,depends_on=?10,dedup_key=?11,run_id=?12,step_name=?13,pace_ms=?14,attempts=?15,max_attempts=?16,last_error=?17,result=?18,created_at=?19,updated_at=?20,finished_at=?21 WHERE id=?1",
             params![
                 t.id, t.adapter, t.action, serde_json::to_string(&t.params).unwrap(),
                 t.status.as_str(), t.scheduled_for, t.next_eligible_at, t.priority,
-                t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.attempts, t.max_attempts,
+                t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.pace_ms, t.attempts, t.max_attempts,
                 t.last_error, t.result.as_ref().map(|v| serde_json::to_string(v).unwrap()),
                 t.created_at, t.updated_at, t.finished_at
             ],

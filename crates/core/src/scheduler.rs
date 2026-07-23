@@ -1,4 +1,5 @@
 use crate::clock::Clock;
+use crate::rng::Rng;
 use crate::model::{Task, TaskStatus};
 use crate::store::Store;
 
@@ -22,13 +23,21 @@ pub fn select_runnable(store: &Store, clock: &dyn Clock) -> rusqlite::Result<Vec
     Ok(candidates)
 }
 
-pub fn resolve_blocked(store: &Store, clock: &dyn Clock) -> rusqlite::Result<()> {
+pub fn resolve_blocked(store: &Store, clock: &dyn Clock, rng: &dyn Rng) -> rusqlite::Result<()> {
     let now = clock.now_ms();
     for mut t in store.tasks_in_status(TaskStatus::Blocked)? {
         let Some(dep) = t.depends_on.clone() else { continue };
         match store.get_task(&dep)? {
             Some(d) if d.status == TaskStatus::Succeeded => {
                 t.status = TaskStatus::Pending;
+                // Humanized pause between pipeline steps: a released task waits a
+                // jittered spell before it is eligible, so a run does not fire its
+                // steps back to back the instant each dependency clears.
+                if let Some(pace) = t.pace_ms {
+                    if pace > 0 {
+                        t.next_eligible_at = Some(now + rng.jitter(pace, 0.35).max(0));
+                    }
+                }
                 t.updated_at = now;
                 store.update_task(&t)?;
             }
@@ -89,12 +98,12 @@ mod tests {
         store.insert_task(&parent).unwrap();
         store.insert_task(&child).unwrap();
         // blocked child is not selected, and stays blocked while parent pending
-        resolve_blocked(&store, &clock).unwrap();
+        resolve_blocked(&store, &clock, &crate::rng::TestRng::fixed(0)).unwrap();
         assert_eq!(store.get_task(&child.id).unwrap().unwrap().status, TaskStatus::Blocked);
         // parent succeeds -> child becomes pending -> selectable
         parent.status = TaskStatus::Succeeded;
         store.update_task(&parent).unwrap();
-        resolve_blocked(&store, &clock).unwrap();
+        resolve_blocked(&store, &clock, &crate::rng::TestRng::fixed(0)).unwrap();
         assert_eq!(store.get_task(&child.id).unwrap().unwrap().status, TaskStatus::Pending);
         assert_eq!(select_runnable(&store, &clock).unwrap().len(), 1);
     }
