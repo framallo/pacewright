@@ -1066,19 +1066,21 @@ git commit -m "feat(cli): pacewright run/runs/show for pipeline runs"
 
 ---
 
-## Deferred to Phase 1b (explicitly NOT in this plan)
+## Deferred items — NOW DONE (2026-07-22)
 
-These are specified in `docs/specs/2026-07-22-pipeline-runs-and-verified-steps.md` but deliberately
-left out so Phase 1 lands as working software:
+All of Phase 1 shipped, and the two items originally deferred were completed in the same pass:
 
-- **`fallback` execution.** Task 3 parses it and Task 4 carries it, but nothing runs it yet. It needs
-  a failure edge (`depends_on_failed`) in `scheduler.rs`, since the current scheduler only releases a
-  dependent when its parent *succeeded*. Until that lands, a failing verify simply blocks the run,
-  which is the safe behaviour.
-- **Paced eligibility.** `pace min/max` is parsed and stored on `PipelineDef` but not yet applied to
-  `next_eligible_at`. Steps currently run as soon as their dependency clears, still subject to the
-  existing per-recipe `limit-key` caps.
-- **`output` block resolution** into a final run report.
+- **`fallback` execution — DONE.** `Task.dep_on_failure` gives the failure edge and
+  `Task.escalation` links a verify to its adjudicator. Guardrails: it may overturn a verify only,
+  must return `ok:true` with non-empty `evidence`, and the outcome is marked `adjudicated`.
+  Fixed a race the tests caught: `resolve_blocked` used to fail dependents the instant a verify
+  failed, discarding runs the adjudicator was about to rescue.
+- **Paced eligibility — DONE.** `Task.pace_ms`; a released task gets `next_eligible_at = now +
+  jitter(pace, 0.35)` from the existing `Rng`, so a run does not fire steps back to back.
+Still open, deliberately:
+
+- **`output` block resolution** into a final run report. It is parsed and stored; `pacewright show`
+  prints each step's result, so the URLs are visible, just not yet collapsed into one object.
 - **Multi-dependency steps.** `Task.depends_on` is a single `Option<String>`; `expand` rejects
   `after=` with more than one entry rather than silently honouring the first.
 
