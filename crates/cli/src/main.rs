@@ -1,5 +1,6 @@
 mod auth_cmd;
 mod client;
+mod oauth_cmd;
 mod recipe_install;
 mod recipe_job;
 mod schedule_cmd;
@@ -67,6 +68,26 @@ enum Cmd {
     Limits,
     Adapters,
     Status,
+    /// Start or resume a pipeline run. Idempotent: succeeded steps are never redone.
+    Run {
+        /// Pipeline name, e.g. `podcast/episode`
+        pipeline: String,
+        /// Stable id for this run, e.g. `ep172`. Re-use it to resume.
+        #[arg(long)]
+        run_id: String,
+        /// JSON object of pipeline vars
+        #[arg(long, default_value = "{}")]
+        params: String,
+        /// Re-queue this run's FAILED steps before starting
+        #[arg(long)]
+        retry_failed: bool,
+    },
+    /// List runs with a rollup of their step statuses.
+    Runs,
+    /// Show one run's steps, in order.
+    Show {
+        run_id: String,
+    },
     Tui,
     /// Manage recipes installed from GitHub repos.
     #[command(subcommand)]
@@ -79,6 +100,34 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<AuthCmd>,
     },
+    /// OAuth token auth for first-party APIs (LinkedIn, YouTube) — login/status/logout.
+    Oauth {
+        #[command(subcommand)]
+        cmd: Option<OauthCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OauthCmd {
+    /// Show each provider: app configured? · token valid/expired/absent · scope · author URN.
+    Status,
+    /// Run the consent flow: opens the browser, catches the loopback redirect, stores the token.
+    Login {
+        /// Provider to authorize (currently `linkedin`).
+        provider: String,
+        /// App client id. Falls back to the stored value, then an interactive prompt.
+        #[arg(long)]
+        client_id: Option<String>,
+        /// App client secret (kept 0600, never logged). Falls back to stored, then a hidden prompt.
+        #[arg(long)]
+        client_secret: Option<String>,
+        /// Loopback base for the redirect URI (default `http://localhost:8765`); the URI is
+        /// `{base}/{provider}/callback`. Must match what's registered on the app.
+        #[arg(long)]
+        callback_base: Option<String>,
+    },
+    /// Drop a provider's tokens (keeps its app credentials for a quick re-login).
+    Logout { provider: String },
 }
 
 #[derive(Subcommand)]
@@ -169,6 +218,15 @@ async fn main() -> Result<()> {
         Cmd::Limits => Request::Limits,
         Cmd::Adapters => Request::Adapters,
         Cmd::Status => Request::Status,
+        Cmd::Run { pipeline, run_id, params, retry_failed } => Request::RunStart {
+            pipeline,
+            run_id,
+            params: serde_json::from_str(&params)
+                .map_err(|e| anyhow::anyhow!("--params must be a JSON object: {e}"))?,
+            retry_failed,
+        },
+        Cmd::Runs => Request::RunList,
+        Cmd::Show { run_id } => Request::RunShow { run_id },
         Cmd::Tui => {
             return tui::run(&sock).await;
         }
@@ -219,6 +277,20 @@ async fn main() -> Result<()> {
                 AuthCmd::Status => auth_cmd::status(&sock).await,
                 AuthCmd::Login { account, all } => auth_cmd::login(&sock, account, all).await,
                 AuthCmd::Recheck { account } => auth_cmd::recheck(&sock, account).await,
+            };
+        }
+        // OAuth is a local flow (browser + secret store) — it never touches the daemon socket.
+        Cmd::Oauth { cmd } => {
+            let home = pw_dir();
+            return match cmd.unwrap_or(OauthCmd::Status) {
+                OauthCmd::Status => oauth_cmd::status(home).await,
+                OauthCmd::Login {
+                    provider,
+                    client_id,
+                    client_secret,
+                    callback_base,
+                } => oauth_cmd::login(home, provider, client_id, client_secret, callback_base).await,
+                OauthCmd::Logout { provider } => oauth_cmd::logout(home, provider).await,
             };
         }
     };

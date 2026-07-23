@@ -11,7 +11,6 @@ use pacewright_core::runner::execute_and_record;
 use pacewright_proto::{Request, Response};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
@@ -58,54 +57,6 @@ pub fn build_adapter_registry(
 }
 
 /// The daemon's default browser idle-reap threshold when `config.toml` doesn't set one: 10 minutes.
-pub const DEFAULT_BROWSER_IDLE_TIMEOUT_MS: i64 = 600_000;
-/// How often the reaper runs `chrome-agent gc`. Independent of the idle threshold.
-const BROWSER_REAP_EVERY: Duration = Duration::from_secs(60);
-
-/// Spawn the background loop that periodically runs `chrome-agent gc --idle-secs N`, closing browsers
-/// idle longer than `idle_timeout_ms` so Chrome instances don't pile up. A non-positive timeout
-/// disables reaping. Uses the same `chrome-agent` binary the runner does (`CHROME_AGENT_BIN` or PATH).
-/// Reaping is safe: a closed browser's cookies persist in its profile dir, so the next task relaunches
-/// it still signed in; hand-driven `--connect` windows use a different profile path and are never touched.
-pub fn spawn_browser_reaper(idle_timeout_ms: i64) {
-    if idle_timeout_ms <= 0 {
-        tracing::info!("browser idle-reaper disabled (browser.idle_timeout = 0)");
-        return;
-    }
-    let idle_secs = (idle_timeout_ms / 1000).max(1).to_string();
-    let bin = std::env::var("CHROME_AGENT_BIN").unwrap_or_else(|_| "chrome-agent".to_string());
-    tracing::info!("browser idle-reaper on: closing browsers idle > {idle_timeout_ms}ms");
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(BROWSER_REAP_EVERY);
-        loop {
-            interval.tick().await;
-            match tokio::process::Command::new(&bin)
-                .args(["gc", "--idle-secs", &idle_secs, "--json"])
-                .output()
-                .await
-            {
-                Ok(out) if out.status.success() => {
-                    // Only log when it actually closed something, so the log isn't noisy every minute.
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        let n = v.get("reaped_count").and_then(|c| c.as_u64()).unwrap_or(0);
-                        if n > 0 {
-                            tracing::info!("browser gc: closed {n} idle/dead browser(s)");
-                        }
-                    }
-                }
-                Ok(out) => tracing::debug!("browser gc exited {}", out.status),
-                // chrome-agent absent is fine (browser-free box) — don't spam; debug only.
-                Err(e) => tracing::debug!("browser gc could not run `{bin}`: {e}"),
-            }
-        }
-    });
-}
-
-/// A login's bounded post-open poll: recheck every 4 s, up to 5 minutes, then give up and clear
-/// `logging_in`. Matches the spec's "poll `login.check` every few seconds (bounded, e.g. 5 min)".
-const LOGIN_POLL_EVERY: Duration = Duration::from_secs(4);
-const LOGIN_POLL_MAX_RECHECKS: u32 = 75;
-
 /// Serialize one `AccountInfo` to the `AuthList` row shape (`signed_in` is `true|false|null`).
 fn account_json(a: &pacewright_adapter_recipe::AccountInfo) -> serde_json::Value {
     serde_json::json!({
@@ -116,19 +67,6 @@ fn account_json(a: &pacewright_adapter_recipe::AccountInfo) -> serde_json::Value
         "last_checked": a.status.last_checked_ms,
         "logging_in": a.status.logging_in,
     })
-}
-
-/// Spawn the detached bounded poll that flips an account green once its check passes after a login.
-/// Captures the engine clock so `last_checked` stamps stay on the daemon's clock.
-fn spawn_login_poll(srv: &Server, account: String, clock: Arc<dyn pacewright_core::clock::Clock>) {
-    let auth = srv.auth.clone();
-    let now = Arc::new(move || clock.now_ms());
-    tokio::spawn(auth.poll_until_signed_in(
-        account,
-        LOGIN_POLL_EVERY,
-        LOGIN_POLL_MAX_RECHECKS,
-        now,
-    ));
 }
 
 /// The `Auth*` RPCs, handled outside the engine-locked synchronous dispatch because they spawn
@@ -152,11 +90,13 @@ async fn handle_auth(srv: &Server, req: &Request) -> Option<Response> {
                 Ok(serde_json::json!({ "accounts": srv.auth.list().iter().map(account_json).collect::<Vec<_>>() }))
             }
         },
+        // Open the headed login window and stop. We deliberately do NOT drive the browser while the
+        // human signs in — an automated recheck loop here would navigate the very profile being
+        // logged into, spawning tabs and interrupting sign-in (fatal on bot-sensitive LinkedIn). The
+        // operator runs `pcw auth recheck <account>` when done; that reads the session and flips the
+        // account green (and clears `logging_in`).
         Request::AuthLogin { account } => match srv.auth.login(account).await {
-            Ok(()) => {
-                spawn_login_poll(srv, account.clone(), clock.clone());
-                Ok(serde_json::json!({ "account": account, "logging_in": true }))
-            }
+            Ok(()) => Ok(serde_json::json!({ "account": account, "logging_in": true })),
             Err(e) => Err(e),
         },
         Request::AuthLoginAll => {
@@ -164,7 +104,6 @@ async fn handle_auth(srv: &Server, req: &Request) -> Option<Response> {
             // Open one window at a time for every account not already known to be signed in.
             for row in srv.auth.list() {
                 if row.status.signed_in != Some(true) && srv.auth.login(&row.account).await.is_ok() {
-                    spawn_login_poll(srv, row.account.clone(), clock.clone());
                     opened.push(row.account);
                 }
             }
@@ -300,6 +239,80 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                     })
                     .collect();
                 Ok(serde_json::json!({ "date": date, "counters": counters }))
+            }
+            Request::RunStart { pipeline, run_id, params, retry_failed } => {
+                // Pipelines live beside recipes: ~/.pacewright/recipes/pipelines/<name>.kdl
+                // with '/' in the pipeline name flattened to '-'.
+                let dir = std::env::var("PACEWRIGHT_HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                            .join(".pacewright")
+                    })
+                    .join("recipes/pipelines");
+                let file = dir.join(format!("{}.kdl", pipeline.replace('/', "-")));
+                let src = std::fs::read_to_string(&file)
+                    .map_err(|err| format!("cannot read {}: {err}", file.display()))?;
+                let def = pacewright_core::pipeline::parse_pipeline(&src).map_err(|e| e.to_string())?;
+                let now = e.clock.now_ms();
+                let requeued = if retry_failed {
+                    pacewright_core::run::retry_failed(&e.store, &run_id, now).map_err(|e| e.to_string())?
+                } else {
+                    0
+                };
+                let started = pacewright_core::run::start(&e.store, &def, &run_id, &params, now)
+                    .map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({
+                    "run_id": run_id,
+                    "pipeline": def.name,
+                    "created": started.iter().filter_map(|t| t.step_name.clone()).collect::<Vec<_>>(),
+                    "requeued_failed": requeued,
+                }))
+            }
+            Request::RunList => {
+                let mut runs: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
+                    Default::default();
+                for t in e.store.list_tasks(None, i64::MAX).map_err(|e| e.to_string())? {
+                    let Some(rid) = t.run_id.clone() else { continue };
+                    let entry = runs.entry(rid).or_default();
+                    let k = t.status.as_str().to_string();
+                    let n = entry.get(&k).and_then(serde_json::Value::as_i64).unwrap_or(0) + 1;
+                    entry.insert(k, serde_json::Value::from(n));
+                }
+                let list: Vec<_> = runs
+                    .into_iter()
+                    .map(|(id, counts)| serde_json::json!({ "run_id": id, "steps": counts }))
+                    .collect();
+                Ok(serde_json::json!({ "runs": list }))
+            }
+            Request::RunShow { run_id } => {
+                let steps: Vec<_> = e
+                    .store
+                    .tasks_in_run(&run_id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|t| {
+                        let name = t.step_name.clone().unwrap_or_default();
+                        // A `<step>.verify` task is the independent confirmation; naming
+                        // the kind here is what makes "verified" visible in the report.
+                        let kind = if name == pacewright_core::run::VARS_STEP {
+                            "vars"
+                        } else if name.ends_with(".verify") {
+                            "verify"
+                        } else {
+                            "step"
+                        };
+                        serde_json::json!({
+                            "step": name,
+                            "kind": kind,
+                            "status": t.status.as_str(),
+                            "attempts": t.attempts,
+                            "error": t.last_error,
+                            "result": t.result,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "run_id": run_id, "steps": steps }))
             }
             Request::Adapters => {
                 let list: Vec<_> = e

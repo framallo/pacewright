@@ -87,6 +87,22 @@ pub enum Request {
         key: String,
         config: LimitSpec,
     },
+    /// Start or resume a pipeline run. Idempotent: already-succeeded steps are skipped.
+    RunStart {
+        pipeline: String,
+        run_id: String,
+        #[serde(default)]
+        params: Value,
+        /// Re-queue this run's FAILED steps before starting (succeeded work is kept).
+        #[serde(default)]
+        retry_failed: bool,
+    },
+    /// Every run with a rollup of its step statuses.
+    RunList,
+    /// One run's steps, in order, with status / attempts / error / result.
+    RunShow {
+        run_id: String,
+    },
     /// The account catalog + cached signed-in status (read side; no checks run).
     AuthList,
     /// Re-run an account's signed-in check headless in its profile and update the cache.
