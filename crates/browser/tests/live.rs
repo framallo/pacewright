@@ -12,8 +12,9 @@ use pacewright_core::browser::BrowserHandle;
 #[tokio::test]
 #[ignore]
 async fn drives_a_real_page() {
-    // No cookies/stealth needed for a static page; keeps the operator's Chrome profile out of it.
-    let b = CliBrowser::new().stealth(false).copy_cookies(false).timeout_secs(30);
+    // Attaches to the always-on Chrome on DEFAULT_CHROME_CONNECT (these tests are `#[ignore]`d and
+    // need it running). Stealth off: a static page needs no anti-detection patches.
+    let b = CliBrowser::new().stealth(false).timeout_secs(30);
 
     let nav = b.goto("https://example.com").await.expect("goto failed");
     assert_eq!(nav.title, "Example Domain");
@@ -28,7 +29,7 @@ async fn drives_a_real_page() {
 #[tokio::test]
 #[ignore]
 async fn stringified_object_round_trips_as_a_json_string() {
-    let b = CliBrowser::new().stealth(false).copy_cookies(false).timeout_secs(30);
+    let b = CliBrowser::new().stealth(false).timeout_secs(30);
     b.goto("https://example.com").await.expect("goto failed");
 
     let raw = b

@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::registry::{RecipeMeta, RecipeRegistry};
-use crate::runner::RecipeRunner;
+use crate::runner::{RecipeRunner, RunOpts};
 
 pub struct RecipeAdapter {
     adapter: String,
@@ -125,7 +125,11 @@ impl Adapter for RecipeAdapter {
         // copies the everyday session; public recipes navigate cold.
         let envelope = self
             .runner
-            .run(&meta.path, &vars_json, meta.auth, meta.account.as_deref())
+            .run(
+                &meta.path,
+                &vars_json,
+                &RunOpts { account: meta.account.clone(), foreground: meta.foreground },
+            )
             .await?;
 
         // An `unexpected` run (e.g. a cardinality miss) is not a failure — surface it in the
@@ -227,11 +231,11 @@ mod tests {
             .unwrap();
         assert_eq!(out["name"], "Jane");
         assert_eq!(runner.call_count(), 1);
-        // `auth account="prevetted-linkedin"` → auth flag set AND the account name propagated,
-        // so the runner will use that persistent profile.
+        // `auth account="prevetted-linkedin"` → the account name propagates, so the runner drives
+        // that account's own TAB of the attached Chrome.
         let call = runner.calls.lock().unwrap()[0].clone();
-        assert!(call.2, "auth flag should propagate");
-        assert_eq!(call.3.as_deref(), Some("prevetted-linkedin"));
+        assert_eq!(call.2.account.as_deref(), Some("prevetted-linkedin"));
+        assert!(!call.2.foreground, "a scrape must not steal focus");
     }
 
     #[tokio::test]

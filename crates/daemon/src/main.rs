@@ -56,7 +56,14 @@ async fn main() -> Result<()> {
     // live in `adapter-linkedin` is now a gitignored testbed recipe `linkedin/scrape_profile`.
     // `build_adapter_registry` (shared with `RecipeReload`) also registers the built-in DummyAdapter.
     let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
-    let recipe_runner: Arc<dyn RecipeRunner> = Arc::new(CliRecipeRunner::new());
+    // All three chrome-agent callers (runner, login launcher, CliBrowser) must attach to the SAME
+    // always-on Chrome, so `browser.connect` is threaded to each rather than defaulted per-caller.
+    // Cloned up front because `cfg` moves into the engine before the launcher is built.
+    let browser_connect = cfg.browser_connect.clone();
+    let recipe_runner: Arc<dyn RecipeRunner> = Arc::new(match &cfg.browser_connect {
+        Some(endpoint) => CliRecipeRunner::new().connect(endpoint),
+        None => CliRecipeRunner::new(),
+    });
     let reg = build_adapter_registry(&recipe_registry, &recipe_runner);
     if recipe_registry.is_empty() {
         tracing::info!(
@@ -65,15 +72,15 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Lazy: no Chrome process is touched until a task actually drives the browser, so a
-    // daemon on a machine without `chrome-agent` still boots and runs browser-free
-    // adapters. Browser tasks then fail Terminal with a clear message.
-    let browser = Arc::new(CliBrowser::new());
-
-    // Read the browser idle-reap threshold before `cfg` moves into the engine (default 10 min).
-    let browser_idle_timeout_ms = cfg
-        .browser_idle_timeout_ms
-        .unwrap_or(server::DEFAULT_BROWSER_IDLE_TIMEOUT_MS);
+    // Lazy: nothing touches Chrome until a task actually drives the browser, so a daemon on a
+    // machine without `chrome-agent` — or with the always-on Chrome down — still boots and runs
+    // browser-free adapters. Browser tasks then fail Terminal with a clear message.
+    //
+    // Read the attach endpoint before `cfg` moves into the engine.
+    let browser = Arc::new(match &cfg.browser_connect {
+        Some(endpoint) => CliBrowser::new().connect(endpoint),
+        None => CliBrowser::new(),
+    });
 
     let engine = Engine::new(
         store,
@@ -85,8 +92,10 @@ async fn main() -> Result<()> {
     .with_browser(browser);
     engine.recover_on_boot()?;
 
-    // Periodically close idle Chrome browsers so instances don't accumulate.
-    server::spawn_browser_reaper(browser_idle_timeout_ms);
+    // (No browser reaper. pacewright no longer launches browsers, so there is nothing to reap:
+    // the one Chrome is supervised by launchd, and `chrome-agent gc` never touches an attached
+    // session — verified 2026-07-16. The old reaper was also silently broken: it passed `--json`
+    // *after* the `gc` subcommand, which is a usage error, and logged the non-zero exit at debug.)
 
     // Reconcile the declarative schedule files into the queue on boot, so recurring/scheduled
     // tasks come back after a restart. Invalid entries are logged and skipped, not fatal.
@@ -115,7 +124,10 @@ async fn main() -> Result<()> {
     let auth = Arc::new(AuthManager::new(
         recipe_registry.clone(),
         recipe_runner.clone(),
-        Arc::new(CliLoginLauncher::new()),
+        Arc::new(match &browser_connect {
+            Some(endpoint) => CliLoginLauncher::new().connect(endpoint),
+            None => CliLoginLauncher::new(),
+        }),
     ));
 
     let engine = Arc::new(Mutex::new(engine));
