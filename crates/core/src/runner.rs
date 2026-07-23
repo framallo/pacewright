@@ -99,6 +99,15 @@ pub async fn execute_and_record(
                     results.insert(name, res);
                 }
             }
+            // Project the run's state to its shared dataset before dispatch. Recipes run
+            // in a separate process and cannot read the store, so this file is how a recipe
+            // sees the run. Best-effort: a write failure must not fail the task, since the
+            // file is a projection and the store remains the source of truth.
+            let ds = crate::run::write_dataset(&crate::run::home_dir(), &rid, &vars, &results).ok();
+            if let (Some(p), Some(o)) = (ds, vars.as_object_mut()) {
+                o.insert("dataset".into(), serde_json::Value::String(p.display().to_string()));
+            }
+
             match crate::refs::resolve(&task.params, &vars, &results) {
                 Ok(v) => v,
                 Err(e) => {
