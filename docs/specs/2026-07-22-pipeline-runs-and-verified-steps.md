@@ -228,3 +228,59 @@ what we think it is."
   Mitigated by having them hit APIs rather than the DOM.
 - **A long run holds a browser session** for a while. Pacing between steps mitigates; renders are
   already polled via `retry-if-positive` rather than blocking.
+
+---
+
+## Addendum: the run dataset (Federico, 2026-07-22)
+
+**Problem this solves.** Recipes execute in a *different process* (chrome-agent), so they cannot
+read pacewright's SQLite. Today the only channel is one-way per step: pacewright renders `{{ … }}`
+into params, chrome-agent runs, and returns one result JSON. That is enough to pass a value from
+step N to step N+1, but not for a recipe to accumulate or consult the run's wider state, and it is
+why authoring `youtube/verify_video` stalled.
+
+**The proposal.** Give every run a JSON dataset that steps and recipes share.
+
+```
+~/.pacewright/runs/<run_id>.json
+```
+
+**Shape.** The dataset is the merged, read-mostly view of the run:
+
+```json
+{
+  "run_id": "ep172",
+  "vars":  { "episode_number": "172", "title": "Jane Doe on X" },
+  "steps": {
+    "publish_long": { "publish": { "video_id": "abc123" } },
+    "publish_long.verify": { "url": "https://youtu.be/abc123", "verified": true }
+  }
+}
+```
+
+**Flow.**
+1. Before dispatching a step, pacewright writes the dataset from the run's tasks (this is the same
+   data `refs::resolve` already assembles, so it is a projection, not a second source of truth).
+2. It passes the path in as a var, e.g. `{{ dataset }}`, so a recipe can read it with an existing
+   step rather than a new primitive.
+3. A recipe contributes through its **existing `output` sink** (`recipe/model.rs:242`, "render the
+   result and write it to a templated path"), templated to the run, e.g. `{{ dataset_dir }}/<step>.json`.
+4. After the step, pacewright merges what the recipe wrote into that task's `result`.
+
+**Why the per-step `result` stays the source of truth.** SQLite rows are immutable per step,
+auditable, and survive resume; the JSON file is a regenerable projection. If a run is resumed on a
+machine where the file is gone, pacewright rewrites it from the tasks. Making the file authoritative
+would reintroduce exactly the "did this actually happen" ambiguity verification exists to remove,
+and would race when two steps ever run concurrently.
+
+**Why this keeps the engine generic.** pacewright learns "a run has a JSON dataset at a path".
+It learns nothing about videos, episodes, or platforms. Every recipe decides for itself what to read
+and what to contribute.
+
+**Open questions before building.**
+- Does chrome-agent have a *read* step for a JSON file, or does the dataset need to arrive as a
+  rendered var? (`output` covers writing; reading is unconfirmed.)
+- Confirm captures are addressable as `{{ key }}` in later steps of the same recipe. `validate()`
+  checking that every `{{ … }}` resolves implies yes; worth proving with `linkedin/whoami`.
+- Concurrency: today a run's steps are sequential via `depends_on`. If parallel steps ever land,
+  the merge in (4) needs to be per-step-key, never a whole-file overwrite.
