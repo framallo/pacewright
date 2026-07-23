@@ -315,3 +315,62 @@ pipeline "demo" {
         assert_eq!(b.attempts, 0);
     }
 }
+
+/// The pacewright home dir. Read once by callers, never inside helpers, so tests never
+/// have to mutate process-global env (which destabilizes parallel tests).
+pub fn home_dir() -> std::path::PathBuf {
+    std::env::var("PACEWRIGHT_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".pacewright")
+    })
+}
+
+/// Where a run's shared dataset lives. Recipes execute in a separate process and cannot
+/// read the store, so the run's accumulated state is projected to a JSON file they load.
+pub fn dataset_path(home: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+    home.join("runs").join(format!("{run_id}.json"))
+}
+
+/// Write the run dataset. A REGENERABLE PROJECTION of the tasks, never the source of
+/// truth: if it is missing or stale it is simply rewritten from the store before the next
+/// dispatch. Making the file authoritative would reintroduce the "did this actually
+/// happen" ambiguity that verification exists to remove.
+pub fn write_dataset(
+    home: &std::path::Path, run_id: &str, vars: &Value, results: &HashMap<String, Value>,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = dataset_path(home, run_id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let steps: Map<String, Value> =
+        results.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let doc = serde_json::json!({
+        "run_id": run_id,
+        "vars": vars,
+        "steps": Value::Object(steps),
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
+    Ok(path)
+}
+
+#[cfg(test)]
+mod dataset_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dataset_is_written_with_vars_and_step_results() {
+        let tmp = std::env::temp_dir().join(format!("pw-ds-{}", std::process::id()));
+        let results = HashMap::from([(
+            "publish_long".to_string(),
+            json!({"publish": {"video_id": "abc123"}}),
+        )]);
+        let path = write_dataset(&tmp, "ep172", &json!({"episode_number": "172"}), &results).unwrap();
+
+        let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(doc["run_id"], "ep172");
+        assert_eq!(doc["vars"]["episode_number"], "172");
+        assert_eq!(doc["steps"]["publish_long"]["publish"]["video_id"], "abc123");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
