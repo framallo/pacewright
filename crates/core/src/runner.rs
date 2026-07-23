@@ -133,6 +133,47 @@ pub async fn execute_and_record(
             store.update_task(&task)?;
             store.append_event(&event(&task, TaskStatus::Running, TaskStatus::Succeeded, now, serde_json::json!({"spent": keys})))?;
 
+            // ADJUDICATION. If this task is the escalation backstopping another, a
+            // well-formed verdict can flip that task to Succeeded. Deliberately narrow,
+            // because an adjudicator asked "did this work?" drifts toward yes, and that
+            // is the exact failure mode verification exists to prevent:
+            //   - it may overturn a VERIFY only, never a real action's failure
+            //   - it must return ok:true AND non-empty evidence; absence of evidence is
+            //     failure, not success
+            //   - the outcome is recorded `adjudicated`, never `verified`
+            if let Some(rid) = task.run_id.clone() {
+                let verdict = task.result.clone().unwrap_or(serde_json::Value::Null);
+                let ok = verdict.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                let has_evidence = match verdict.get("evidence") {
+                    Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+                    Some(serde_json::Value::Array(a)) => !a.is_empty(),
+                    Some(serde_json::Value::Object(o)) => !o.is_empty(),
+                    _ => false,
+                };
+                for mut backstopped in store.tasks_in_run(&rid)? {
+                    if backstopped.escalation.as_deref() != Some(task.id.as_str()) {
+                        continue;
+                    }
+                    if ok && has_evidence {
+                        backstopped.status = TaskStatus::Succeeded;
+                        backstopped.last_error = None;
+                        let mut res = backstopped.result.clone().unwrap_or(serde_json::json!({}));
+                        if let Some(o) = res.as_object_mut() {
+                            o.insert("adjudicated".into(), serde_json::Value::Bool(true));
+                            o.insert("adjudication".into(), verdict.clone());
+                        }
+                        backstopped.result = Some(res);
+                    } else {
+                        backstopped.last_error = Some(format!(
+                            "escalation declined to confirm (ok={ok}, evidence={has_evidence})"
+                        ));
+                    }
+                    backstopped.finished_at = Some(now);
+                    backstopped.updated_at = now;
+                    store.update_task(&backstopped)?;
+                }
+            }
+
             if let Some(cron) = task.recurrence.clone() {
                 if let Some(next_ms) = next_occurrence_ms(&cron, now) {
                     let mut nxt = Task::new_now(task.adapter.clone(), task.action.clone(), task.params.clone(), next_ms);

@@ -26,6 +26,8 @@ impl Adapter for DummyAdapter {
             ActionSpec { name: "flaky".into(), limit_keys: vec![], params_schema: json!({"fail_times":"number"}), description: "fails then succeeds".into() },
             ActionSpec { name: "always_fail".into(), limit_keys: vec![], params_schema: Value::Null, description: "terminal error".into() },
             ActionSpec { name: "rate_heavy".into(), limit_keys: vec!["dummy.capped".into()], params_schema: Value::Null, description: "spends dummy.capped".into() },
+            ActionSpec { name: "verdict_ok".into(), limit_keys: vec![], params_schema: Value::Null, description: "a well-formed adjudication verdict (ok + evidence)".into() },
+            ActionSpec { name: "verdict_no_evidence".into(), limit_keys: vec![], params_schema: Value::Null, description: "claims ok but cites nothing — must NOT be accepted".into() },
             ActionSpec { name: "panic".into(), limit_keys: vec![], params_schema: Value::Null, description: "deliberately panics, for exercising panic isolation".into() },
         ]
     }
@@ -33,6 +35,8 @@ impl Adapter for DummyAdapter {
     async fn execute(&self, ctx: &RunCtx, action: &str, params: Value) -> Result<Value, AdapterError> {
         match action {
             "echo" | "rate_heavy" => Ok(params),
+            "verdict_ok" => Ok(json!({"ok": true, "evidence": ["the platform API returned the id"]})),
+            "verdict_no_evidence" => Ok(json!({"ok": true, "evidence": []})),
             "slow" => {
                 let ms = params.get("ms").and_then(|v| v.as_u64()).unwrap_or(0);
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;

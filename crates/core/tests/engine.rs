@@ -288,3 +288,56 @@ async fn test_unresolvable_reference_fails_the_task_instead_of_leaking_braces() 
     assert_eq!(t.status, TaskStatus::Failed);
     assert!(t.last_error.unwrap().contains("steps.ghost.result.y"));
 }
+
+#[tokio::test]
+async fn test_fallback_can_adjudicate_a_failed_verify_but_only_with_evidence() {
+    // The escape hatch: a verify can itself be wrong. A fallback may overturn it, but
+    // only on a well-formed verdict, and the outcome is marked `adjudicated` so a run
+    // that leaned on it is visibly different from one that passed clean.
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let src = r#"pipeline "d" {
+        step "publish" recipe="dummy/echo" {
+            verify recipe="dummy/always_fail" { }
+            fallback recipe="dummy/verdict_ok" { }
+        }
+        step "after" recipe="dummy/echo" after="publish" { }
+    }"#;
+    let def = pacewright_core::pipeline::parse_pipeline(src).unwrap();
+    pacewright_core::run::start(&e.store, &def, "adj", &serde_json::json!({}), 1_000).unwrap();
+
+    drain(&e, "adj").await;
+
+    let verify = step_of(&e, "adj", "publish.verify");
+    assert_eq!(verify.status, TaskStatus::Succeeded, "a sound verdict overturns the verify");
+    assert_eq!(
+        verify.result.as_ref().unwrap()["adjudicated"],
+        serde_json::json!(true),
+        "and it is recorded as adjudicated, never as verified"
+    );
+    assert_eq!(step_of(&e, "adj", "after").status, TaskStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn test_fallback_claiming_success_without_evidence_is_refused() {
+    // An adjudicator asked "did this work?" drifts toward yes. Absence of evidence is
+    // failure, not success, or the whole verification layer becomes a rubber stamp.
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let src = r#"pipeline "d" {
+        step "publish" recipe="dummy/echo" {
+            verify recipe="dummy/always_fail" { }
+            fallback recipe="dummy/verdict_no_evidence" { }
+        }
+        step "after" recipe="dummy/echo" after="publish" { }
+    }"#;
+    let def = pacewright_core::pipeline::parse_pipeline(src).unwrap();
+    pacewright_core::run::start(&e.store, &def, "adj2", &serde_json::json!({}), 1_000).unwrap();
+
+    drain(&e, "adj2").await;
+
+    let verify = step_of(&e, "adj2", "publish.verify");
+    assert_eq!(verify.status, TaskStatus::Failed, "no evidence, no pass");
+    assert!(verify.last_error.unwrap().contains("declined to confirm"));
+    assert_ne!(step_of(&e, "adj2", "after").status, TaskStatus::Succeeded);
+}

@@ -100,7 +100,24 @@ pub fn expand(
                 // repeats the same query. One attempt unless the pipeline says otherwise.
                 vt.max_attempts = 1;
                 let vid = vt.id.clone();
-                out.push(vt);
+
+                // A fallback runs only when the verify FAILED, and can adjudicate it.
+                if let Some(fb) = &s.fallback {
+                    let (fa, fac) = split_recipe(&fb.recipe);
+                    let mut ft = Task::new_now(fa, fac, fb.params.clone(), now_ms);
+                    ft.run_id = Some(run_id.to_string());
+                    ft.step_name = Some(format!("{}.fallback", s.name));
+                    ft.dedup_key = Some(format!("{run_id}:{}.fallback", s.name));
+                    ft.depends_on = Some(vid.clone());
+                    ft.dep_on_failure = true;
+                    ft.status = TaskStatus::Blocked;
+                    ft.max_attempts = 1;
+                    vt.escalation = Some(ft.id.clone());
+                    out.push(vt);
+                    out.push(ft);
+                } else {
+                    out.push(vt);
+                }
                 // THE GATE: dependents wait on the verify, never on the raw step.
                 gate.insert(s.name.clone(), vid);
             }

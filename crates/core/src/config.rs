@@ -42,9 +42,9 @@ impl LimitConfig {
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub limits: HashMap<String, LimitConfig>,
-    /// How long an idle browser may sit before the daemon reaps it (`chrome-agent gc`), in ms.
-    /// `None` = not configured (daemon applies its own default); `Some(0)` = reaping disabled.
-    pub browser_idle_timeout_ms: Option<i64>,
+    /// Endpoint of the always-on Chrome to attach to (`http://127.0.0.1:9222`, or `auto`).
+    /// `None` = not configured; the browser layer falls back to `browser::DEFAULT_CHROME_CONNECT`.
+    pub browser_connect: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,11 +54,14 @@ struct RawConfig {
     #[serde(default)]
     browser: Option<RawBrowser>,
 }
+/// Unknown keys are ignored by design (serde's default): `idle_timeout` lived here until the
+/// browser reaper was retired, and an operator upgrading with it still in `config.toml` must not
+/// hit a hard failure on daemon boot.
 #[derive(Deserialize)]
 struct RawBrowser {
-    /// e.g. `"10m"`, `"600s"`, or `"0"` to disable idle reaping.
+    /// e.g. `"http://127.0.0.1:9222"`, `"ws://…"`, or `"auto"`.
     #[serde(default)]
-    idle_timeout: Option<String>,
+    connect: Option<String>,
 }
 #[derive(Deserialize)]
 struct RawLimit {
@@ -108,11 +111,8 @@ impl Config {
                 active_end_min: aend,
             });
         }
-        let browser_idle_timeout_ms = match raw.browser.and_then(|b| b.idle_timeout) {
-            Some(s) => Some(parse_duration_ms(&s)?),
-            None => None,
-        };
-        Ok(Config { limits, browser_idle_timeout_ms })
+        let browser_connect = raw.browser.and_then(|b| b.connect);
+        Ok(Config { limits, browser_connect })
     }
 
     pub fn limit_for(&self, key: &str) -> LimitConfig {
@@ -147,15 +147,25 @@ active = "09:00-18:00"
         assert_eq!(l.active_end_min, 1080);
     }
     #[test]
-    fn test_browser_idle_timeout_parses_and_defaults() {
-        // Absent → None (daemon applies its own default).
-        assert_eq!(Config::from_toml("").unwrap().browser_idle_timeout_ms, None);
-        // A duration string parses to ms.
+    fn test_browser_connect_parses_and_defaults() {
+        // Absent → None (the browser layer falls back to DEFAULT_CHROME_CONNECT).
+        assert_eq!(Config::from_toml("").unwrap().browser_connect, None);
+        // An explicit endpoint overrides, so the port can move without a rebuild.
+        let c = Config::from_toml("[browser]\nconnect = \"http://127.0.0.1:9333\"\n").unwrap();
+        assert_eq!(c.browser_connect.as_deref(), Some("http://127.0.0.1:9333"));
+        // chrome-agent's own discovery mode is a legal value too.
+        let c = Config::from_toml("[browser]\nconnect = \"auto\"\n").unwrap();
+        assert_eq!(c.browser_connect.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn test_retired_idle_timeout_key_is_ignored_not_fatal() {
+        // `browser.idle_timeout` drove the browser reaper, which is gone: pacewright no longer
+        // launches browsers to reap, and `chrome-agent gc` never touches an attached session
+        // anyway. An operator upgrading with the old key in config.toml must not get a hard
+        // failure on daemon boot.
         let c = Config::from_toml("[browser]\nidle_timeout = \"10m\"\n").unwrap();
-        assert_eq!(c.browser_idle_timeout_ms, Some(10 * 60_000));
-        // "0" explicitly disables.
-        let c = Config::from_toml("[browser]\nidle_timeout = \"0\"\n").unwrap();
-        assert_eq!(c.browser_idle_timeout_ms, Some(0));
+        assert_eq!(c.browser_connect, None);
     }
 
     #[test]

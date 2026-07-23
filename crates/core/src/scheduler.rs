@@ -11,8 +11,10 @@ pub fn select_runnable(store: &Store, clock: &dyn Clock) -> rusqlite::Result<Vec
             if t.scheduled_for > now { continue; }
             if let Some(nea) = t.next_eligible_at { if nea > now { continue; } }
             if let Some(dep) = &t.depends_on {
+                // A fallback waits for its dependency to FAIL; everything else for success.
+                let want = if t.dep_on_failure { TaskStatus::Failed } else { TaskStatus::Succeeded };
                 match store.get_task(dep)? {
-                    Some(d) if d.status == TaskStatus::Succeeded => {}
+                    Some(d) if d.status == want => {}
                     _ => continue,
                 }
             }
@@ -27,8 +29,9 @@ pub fn resolve_blocked(store: &Store, clock: &dyn Clock, rng: &dyn Rng) -> rusql
     let now = clock.now_ms();
     for mut t in store.tasks_in_status(TaskStatus::Blocked)? {
         let Some(dep) = t.depends_on.clone() else { continue };
+        let want = if t.dep_on_failure { TaskStatus::Failed } else { TaskStatus::Succeeded };
         match store.get_task(&dep)? {
-            Some(d) if d.status == TaskStatus::Succeeded => {
+            Some(d) if d.status == want => {
                 t.status = TaskStatus::Pending;
                 // Humanized pause between pipeline steps: a released task waits a
                 // jittered spell before it is eligible, so a run does not fire its
@@ -41,7 +44,20 @@ pub fn resolve_blocked(store: &Store, clock: &dyn Clock, rng: &dyn Rng) -> rusql
                 t.updated_at = now;
                 store.update_task(&t)?;
             }
-            Some(d) if matches!(d.status, TaskStatus::Failed | TaskStatus::Canceled) => {
+            // A failed dependency is only FINAL once any escalation backstopping it has
+            // also finished unsuccessfully. Failing dependents the instant a verify fails
+            // would race the adjudicator and discard a run it was about to rescue.
+            Some(d)
+                if !t.dep_on_failure
+                    && matches!(d.status, TaskStatus::Failed | TaskStatus::Canceled)
+                    && match d.escalation.as_deref() {
+                        None => true,
+                        Some(esc) => matches!(
+                            store.get_task(esc)?.map(|x| x.status),
+                            Some(TaskStatus::Failed) | Some(TaskStatus::Canceled) | None
+                        ),
+                    } =>
+            {
                 t.status = TaskStatus::Failed;
                 t.last_error = Some(format!("dependency {} ended {}", dep, d.status.as_str()));
                 t.finished_at = Some(now);

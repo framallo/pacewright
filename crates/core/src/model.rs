@@ -57,6 +57,12 @@ pub struct Task {
     /// When released by a dependency, wait a jittered pause of about this long
     /// before becoming eligible. Humanizes the gap between pipeline steps.
     pub pace_ms: Option<i64>,
+    /// Release this task when its dependency FAILED rather than succeeded. The escape
+    /// hatch edge: a fallback runs precisely when the thing it backstops did not work.
+    pub dep_on_failure: bool,
+    /// Task id of an escalation that backstops this one. If that task succeeds with a
+    /// well-formed verdict, this task is marked Succeeded-by-adjudication.
+    pub escalation: Option<String>,
     pub attempts: i64,
     pub max_attempts: i64,
     pub last_error: Option<String>,
@@ -83,6 +89,8 @@ impl Task {
             run_id: None,
             step_name: None,
             pace_ms: None,
+            dep_on_failure: false,
+            escalation: None,
             attempts: 0,
             max_attempts: 3,
             last_error: None,

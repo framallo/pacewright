@@ -14,6 +14,102 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
+/// Where the operator's always-on Chrome listens for CDP. pacewright **attaches** to that Chrome
+/// (started by launchd with `--remote-debugging-port`, never by chrome-agent) and separates sites
+/// by named *tabs* rather than by browser profiles.
+///
+/// Launching is what breaks auth: a CDP-launched browser is a bot signal, so LinkedIn walls the
+/// profile and revokes `li_at`, and Google refuses sign-in outright. See
+/// `docs/plans/2026-07-16-single-chrome-attach.md`.
+///
+/// Lives in core (which stays browser-free) purely as a shared constant: both callers of
+/// chrome-agent — `pacewright-browser` and `pacewright-adapter-recipe` — depend on core and not on
+/// each other, so this is the only home that keeps them from drifting onto different endpoints.
+pub const DEFAULT_CHROME_CONNECT: &str = "http://127.0.0.1:9222";
+
+/// `PACEWRIGHT_CHROME_CONNECT` overrides the endpoint (`auto`, or a `ws://`/`http://` URL).
+pub fn default_connect_endpoint() -> Option<String> {
+    Some(
+        std::env::var("PACEWRIGHT_CHROME_CONNECT")
+            .unwrap_or_else(|_| DEFAULT_CHROME_CONNECT.to_string()),
+    )
+}
+
+/// Rewrite chrome-agent's "Could not resolve CDP WebSocket from …" into something that names the
+/// actual cause and the fix. That message means the always-on Chrome isn't listening — the single
+/// most likely browser failure now that pacewright never launches one — but it reads like an
+/// internal protocol fault and sends you debugging the wrong layer.
+///
+/// Returns `None` for anything else, so unrelated failures pass through untouched.
+pub fn explain_connect_failure(msg: &str) -> Option<String> {
+    if !msg.contains("Could not resolve CDP WebSocket") {
+        return None;
+    }
+    Some(format!(
+        "the always-on Chrome is not reachable — pacewright attaches to it and never launches one, \
+         so every browser task is blocked until it is back. Start it with \
+         `launchctl load ~/Library/LaunchAgents/com.paperclip.pacewright-chrome.plist`, or check \
+         `browser.connect` in ~/.pacewright/config.toml matches its --remote-debugging-port. \
+         (chrome-agent said: {msg})"
+    ))
+}
+
+/// True when chrome-agent failed because a *page*'s cached CDP target is stale — the tab it
+/// recorded in `~/.chrome-agent/sessions.json` was closed since, so its `targetId` no longer
+/// appears in `/json/list`. Unlike the browser-level GUID (which chrome-agent re-resolves from
+/// `--connect`), a stale page target is NOT self-healed: chrome-agent errors instead of adopting or
+/// recreating the tab. Verified live 2026-07-17: closing the `linkedin` tab made the next task fail
+/// with exactly this until the page record was pruned.
+///
+/// Caller contract: on a match, `prune_stale_page` the offending page and retry once — with the
+/// record gone, chrome-agent opens a fresh tab for that page name and proceeds.
+pub fn is_stale_page_target(msg: &str) -> bool {
+    // chrome-agent's wording: "Failed to connect to page after N attempts: Target <id> not found
+    // in /json/list". Match the stable spine, not the attempt count or the volatile target id.
+    msg.contains("not found in /json/list")
+        || (msg.contains("Failed to connect to page") && msg.contains("Target "))
+}
+
+/// chrome-agent's session store. Overridable via `CHROME_AGENT_HOME` for tests and non-default
+/// installs; defaults to `~/.chrome-agent/sessions.json`.
+pub fn chrome_sessions_path() -> std::path::PathBuf {
+    let home = std::env::var("CHROME_AGENT_HOME")
+        .unwrap_or_else(|_| format!("{}/.chrome-agent", std::env::var("HOME").unwrap_or_default()));
+    std::path::PathBuf::from(home).join("sessions.json")
+}
+
+/// Remove one `browser`/`page` entry from chrome-agent's `sessions.json` so the next command opens a
+/// fresh tab for that page instead of re-attaching to a dead target (see `is_stale_page_target`).
+///
+/// Deliberately forgiving — a missing file, unparseable JSON, or absent browser/page is a no-op, not
+/// an error: this runs on a recovery path where the goal is "get unstuck", and a failure to prune
+/// just means the retry surfaces the same error the caller already had. Returns whether it removed
+/// anything (for logging/tests). Only ever removes the single named page — never the browser, never
+/// another page, never `default`.
+pub fn prune_stale_page(browser: &str, page: &str) -> bool {
+    let path = chrome_sessions_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let removed = root
+        .get_mut("browsers")
+        .and_then(|b| b.get_mut(browser))
+        .and_then(|b| b.get_mut("pages"))
+        .and_then(|p| p.as_object_mut())
+        .map(|pages| pages.remove(page).is_some())
+        .unwrap_or(false);
+    if removed {
+        // Best-effort write-back; if it fails the retry just re-hits the same error.
+        if let Ok(serialized) = serde_json::to_string_pretty(&root) {
+            let _ = std::fs::write(&path, serialized);
+        }
+    }
+    removed
+}
+
 /// What a navigation landed on. Adapters check this to detect auth walls
 /// (LinkedIn bounces unauthenticated sessions to `/authwall` or `/login`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,5 +271,96 @@ mod tests {
         assert!(matches!(AdapterError::from(BrowserError::Io("t".into())), AdapterError::Retryable(_)));
         assert!(matches!(AdapterError::from(BrowserError::Unavailable("t".into())), AdapterError::Terminal(_)));
         assert!(matches!(AdapterError::from(BrowserError::Eval("t".into())), AdapterError::Terminal(_)));
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+
+    /// The verbatim message chrome-agent emits when the endpoint is dead (captured live
+    /// 2026-07-16 against a port with nothing listening).
+    const REAL_MSG: &str = "Could not resolve CDP WebSocket from http://127.0.0.1:9999. If Chrome uses built-in remote debugging, run `chrome-agent --connect` without a URL for auto-discovery.";
+
+    #[test]
+    fn connect_failure_names_the_cause_and_the_fix() {
+        let e = explain_connect_failure(REAL_MSG).expect("must match the real message");
+        assert!(e.contains("always-on Chrome is not reachable"));
+        assert!(e.contains("launchctl load"), "must give the fix: {e}");
+        assert!(e.contains("browser.connect"), "must point at the config key: {e}");
+        // the original is preserved for debugging, not swallowed
+        assert!(e.contains("Could not resolve CDP WebSocket"));
+    }
+
+    #[test]
+    fn unrelated_failures_pass_through_untouched() {
+        assert_eq!(explain_connect_failure("element not found: n42"), None);
+        assert_eq!(explain_connect_failure(""), None);
+    }
+
+    /// The verbatim stale-page-target message, captured live 2026-07-17 by closing the `linkedin`
+    /// tab and driving it again.
+    const STALE_PAGE_MSG: &str = "Failed to connect to page after 8 attempts: Target A7ACAA268173BBBFDFB541DCA50A10E5 not found in /json/list";
+
+    #[test]
+    fn detects_the_stale_page_target_error() {
+        assert!(is_stale_page_target(STALE_PAGE_MSG));
+        // matches the spine even if the attempt count or id changes
+        assert!(is_stale_page_target("Failed to connect to page after 3 attempts: Target ZZZ not found in /json/list"));
+        // must NOT fire on the browser-level connect failure (that self-heals via --connect)
+        assert!(!is_stale_page_target(REAL_MSG));
+        assert!(!is_stale_page_target("element not found: n42"));
+        assert!(!is_stale_page_target(""));
+    }
+
+    /// Build a temp `sessions.json`, point `CHROME_AGENT_HOME` at it, and return the dir (kept alive
+    /// by the caller). Serialized via a process-wide lock because env vars are global.
+    fn with_sessions(json: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pcw-prune-{}-{}",
+            std::process::id(),
+            // a monotonic-ish suffix without Date/rand (both banned in this crate's other tests)
+            std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sessions.json"), json).unwrap();
+        dir
+    }
+
+    // env is process-global; these prune tests must not run concurrently with each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn prune_removes_only_the_named_page() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = with_sessions(
+            r#"{"browsers":{"pacewright":{"wsEndpoint":"ws://x","pages":{"linkedin":{"targetId":"A"},"youtube":{"targetId":"B"}}},"other":{"pages":{"linkedin":{"targetId":"C"}}}}}"#,
+        );
+        std::env::set_var("CHROME_AGENT_HOME", &dir);
+        assert!(prune_stale_page("pacewright", "linkedin"));
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("sessions.json")).unwrap()).unwrap();
+        let pages = &after["browsers"]["pacewright"]["pages"];
+        assert!(pages.get("linkedin").is_none(), "pruned the stale page");
+        assert!(pages.get("youtube").is_some(), "left the sibling page intact");
+        // never touches another browser's same-named page
+        assert!(after["browsers"]["other"]["pages"]["linkedin"].is_object());
+        std::env::remove_var("CHROME_AGENT_HOME");
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_absent_or_missing() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // missing page → false, file untouched
+        let dir = with_sessions(r#"{"browsers":{"pacewright":{"pages":{"youtube":{"targetId":"B"}}}}}"#);
+        std::env::set_var("CHROME_AGENT_HOME", &dir);
+        assert!(!prune_stale_page("pacewright", "linkedin"), "absent page → no-op");
+        assert!(!prune_stale_page("nonexistent-browser", "linkedin"));
+        // missing file → false, never panics
+        let empty = std::env::temp_dir().join(format!("pcw-prune-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::env::set_var("CHROME_AGENT_HOME", &empty);
+        assert!(!prune_stale_page("pacewright", "linkedin"));
+        std::env::remove_var("CHROME_AGENT_HOME");
     }
 }
