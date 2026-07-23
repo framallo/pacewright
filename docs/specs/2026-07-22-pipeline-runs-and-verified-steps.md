@@ -284,3 +284,62 @@ and what to contribute.
   checking that every `{{ … }}` resolves implies yes; worth proving with `linkedin/whoami`.
 - Concurrency: today a run's steps are sequential via `depends_on`. If parallel steps ever land,
   the merge in (4) needs to be per-step-key, never a whole-file overwrite.
+
+---
+
+## Addendum 2: what still blocks the verify recipes (2026-07-22)
+
+**Confirmed (Federico):** a `capture`d value IS addressable as `{{ key }}` in a later step of the
+same recipe. So chaining `api` steps and referring to earlier captures works.
+
+**But a token-only recipe cannot yet express failure.** Reading `capture_response`
+(`chrome-agent/src/recipe/engine.rs:172`) shows two hard limits:
+
+1. **A missing path yields `Value::Null`, it does not fail the step.** So
+   `capture "found" path="pageInfo.totalResults"` on a video that does not exist captures null and
+   the step still SUCCEEDS. That is precisely the false-success this whole design exists to stop.
+2. **Array index segments do not resolve.** The walk is `cur.get(seg)` with `seg: &str`, and
+   `Value::get(&str)` on an array returns `None`. So `items.0.status.privacyStatus` is always null.
+   Verifying privacy or title needs array indexing.
+
+`expect-status` does not help: YouTube's `videos.list` returns **200 with an empty `items`** for an
+unknown id, not 404. An absent video is indistinguishable from a present one by status alone.
+
+`eval` can express the rule, but it requires a browser page, which defeats the token-only design
+that makes these checks cheap and reliable.
+
+### The missing capability is generic
+
+Not "a YouTube adapter" — an **assert step** in chrome-agent, which knows nothing about any platform:
+
+```kdl
+step {
+    api "GET" url="…/videos?part=snippet,status&id={{ video_id }}" bearer="{{ token }}" expect-status=200 {
+        capture "found"   path="pageInfo.totalResults"
+        capture "privacy" path="items.0.status.privacyStatus"
+    }
+}
+step { assert "{{ found }}"   not-equals="0"        message="no such video; nothing was published" }
+step { assert "{{ privacy }}" equals="{{ expect_privacy }}" message="wrong privacy" }
+```
+
+Two changes in chrome-agent, both platform-agnostic:
+
+- **Numeric path segments** in `capture_response`: when a segment parses as a usize and `cur` is an
+  array, index it. One `match` arm.
+- **A new `assert` step**: compare a rendered value against `equals` / `not-equals` / `non-empty`,
+  and fail the step (terminal) with `message` when it does not hold.
+
+With those, all four verify recipes are plain KDL with no engine or adapter changes on the
+pacewright side, and pacewright stays entirely generic as required.
+
+### Order of work for Phase 2
+
+1. `assert` step + numeric path segments in chrome-agent; rebuild, `pacewright recipe reload`.
+2. Restart the daemon: the running one dates from Jul 19 and answers `no_adapter`.
+3. `youtube/verify_video`, `youtube/verify_shorts`, `spotify/verify_episode`,
+   `riverside/verify_exports` as KDL.
+4. `claude/adjudicate` for the two fallbacks in `podcast/episode`.
+
+YouTube OAuth is no longer a blocker: the token from `~/.youtube-cli-token-prevetted-channel.json`
+was imported into the secret store (scope `…/auth/youtube`, refresh token present, refreshes on use).
