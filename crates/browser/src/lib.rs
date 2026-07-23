@@ -2,9 +2,16 @@
 //!
 //! chrome-agent (github.com/sderosiaux/chrome-agent) is CDP-direct and keeps a
 //! persistent Chrome session across invocations, so each verb is a short-lived
-//! subprocess acting on the *same* live page. `--stealth` + `--copy-cookies`
-//! inherit the operator's real, logged-in Chrome profile — the substrate the
-//! design spec (§9) argues for over a throwaway Chromium.
+//! subprocess acting on the *same* live page.
+//!
+//! Every verb **attaches** (`--connect`) to the operator's always-on, non-headless Chrome —
+//! started by launchd on `--remote-debugging-port`, never by chrome-agent. That Chrome IS the
+//! substrate the design spec (§9) argues for over a throwaway Chromium, so `--copy-cookies` is
+//! gone: there is no throwaway profile left to snapshot cookies into.
+//!
+//! Letting chrome-agent *launch* the browser is what broke auth — a CDP-launched browser is a bot
+//! signal, so LinkedIn walled the profile and revoked `li_at`, and Google refused sign-in outright.
+//! See `docs/plans/2026-07-16-single-chrome-attach.md`.
 //!
 //! This is the pragmatic first implementation of the seam. A native impl over a
 //! forked `chrome_agent` *library* (see `docs/specs/2026-07-07-chrome-agent-fork-lib.md`)
@@ -23,13 +30,19 @@ use serde_json::Value;
 pub const DEFAULT_BROWSER_NAME: &str = "pacewright";
 pub const DEFAULT_PAGE_NAME: &str = "pacewright";
 
-/// Session-establishing flags are passed on `goto`, which is what opens/reuses the
-/// page; later verbs (`eval`, `screenshot`) act on that already-stealthed session.
+/// Where the always-on Chrome listens. Re-exported from core so the two callers of chrome-agent
+/// cannot drift onto different endpoints.
+pub use pacewright_core::browser::{default_connect_endpoint, explain_connect_failure, DEFAULT_CHROME_CONNECT};
+
+/// Every verb **attaches** to the operator's always-on, non-headless Chrome (started by launchd
+/// on `--remote-debugging-port`, never by chrome-agent). There is no session-establishing verb
+/// anymore: `goto` used to carry `--copy-cookies` to snapshot cookies into a throwaway profile,
+/// but the attached profile IS the live session.
 pub struct CliBrowser {
     bin: String,
     timeout_secs: u64,
     stealth: bool,
-    copy_cookies: bool,
+    connect: Option<String>,
     browser_name: String,
     page_name: String,
 }
@@ -46,7 +59,7 @@ impl CliBrowser {
             bin: std::env::var("CHROME_AGENT_BIN").unwrap_or_else(|_| "chrome-agent".to_string()),
             timeout_secs: 90,
             stealth: true,
-            copy_cookies: true,
+            connect: default_connect_endpoint(),
             browser_name: DEFAULT_BROWSER_NAME.to_string(),
             page_name: DEFAULT_PAGE_NAME.to_string(),
         }
@@ -63,8 +76,9 @@ impl CliBrowser {
         self.stealth = on;
         self
     }
-    pub fn copy_cookies(mut self, on: bool) -> Self {
-        self.copy_cookies = on;
+    /// Endpoint of the always-on Chrome to attach to (`http://127.0.0.1:9222` or `auto`).
+    pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
+        self.connect = Some(endpoint.into());
         self
     }
     /// Override the dedicated chrome-agent browser profile name.
@@ -78,10 +92,11 @@ impl CliBrowser {
         self
     }
 
-    /// Global flags that must precede the subcommand. `--browser`/`--page` go on
-    /// *every* verb, not just `goto`: they are what bind each short-lived
-    /// subprocess to the same isolated tab.
-    fn global_args(&self, session_flags: bool) -> Vec<String> {
+    /// Global flags that must precede the subcommand. `--connect`/`--browser`/`--page` go on
+    /// *every* verb, not just `goto`: they are what bind each short-lived subprocess to the same
+    /// tab of the same attached Chrome. There is no session-establishing verb anymore — attaching
+    /// to the live profile replaced the `--copy-cookies`-on-`goto` snapshot.
+    fn global_args(&self) -> Vec<String> {
         let mut v = vec![
             "--json".to_string(),
             "--timeout".to_string(),
@@ -91,20 +106,33 @@ impl CliBrowser {
             "--page".to_string(),
             self.page_name.clone(),
         ];
-        if session_flags {
-            if self.stealth {
-                v.push("--stealth".into());
-            }
-            if self.copy_cookies {
-                v.push("--copy-cookies".into());
-            }
+        if let Some(endpoint) = &self.connect {
+            v.push("--connect".into());
+            v.push(endpoint.clone());
+        }
+        if self.stealth {
+            v.push("--stealth".into());
         }
         v
     }
 
+    /// Run once, and if it failed because this page's cached CDP target is stale (the tab was
+    /// closed since chrome-agent recorded it), prune that page from the session store and run once
+    /// more — chrome-agent then opens a fresh tab for the page name. A closed tab would otherwise be
+    /// a silent, permanent task failure. Bounded to a single retry so a genuinely broken page can't
+    /// loop. Verified live 2026-07-17.
     async fn run(&self, args: Vec<String>) -> Result<String, BrowserError> {
+        let out = self.run_once(&args).await;
+        if stale_page_target(&out) {
+            pacewright_core::browser::prune_stale_page(&self.browser_name, &self.page_name);
+            return self.run_once(&args).await;
+        }
+        out
+    }
+
+    async fn run_once(&self, args: &[String]) -> Result<String, BrowserError> {
         let out = tokio::process::Command::new(&self.bin)
-            .args(&args)
+            .args(args)
             .output()
             .await
             .map_err(|e| BrowserError::Unavailable(format!("cannot spawn `{}`: {e}", self.bin)))?;
@@ -118,6 +146,21 @@ impl CliBrowser {
             )));
         }
         Ok(stdout)
+    }
+}
+
+/// Did this run fail on a stale page target? chrome-agent may report it either as a non-zero exit
+/// (→ `Err`) or as an in-band `{"ok":false,"error":"…"}` on a zero exit (→ `Ok(stdout)`), so check
+/// both shapes.
+fn stale_page_target(out: &Result<String, BrowserError>) -> bool {
+    use pacewright_core::browser::is_stale_page_target;
+    match out {
+        Err(e) => is_stale_page_target(&e.to_string()),
+        Ok(stdout) => last_json(stdout)
+            .ok()
+            .filter(|v| v.get("ok").and_then(Value::as_bool) == Some(false))
+            .and_then(|v| v.get("error").and_then(Value::as_str).map(is_stale_page_target))
+            .unwrap_or(false),
     }
 }
 
@@ -155,6 +198,12 @@ fn check_ok(v: &Value) -> Result<(), BrowserError> {
             .get("error")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
+        // A dead always-on Chrome arrives here as an in-band `ok:false` on a ZERO exit, so it
+        // would otherwise surface as an opaque "eval failed: Could not resolve CDP WebSocket".
+        // `Unavailable` is the honest class for it (and still maps to Terminal).
+        if let Some(explained) = explain_connect_failure(msg) {
+            return Err(BrowserError::Unavailable(explained));
+        }
         return Err(BrowserError::Eval(msg.to_string()));
     }
     Ok(())
@@ -163,7 +212,7 @@ fn check_ok(v: &Value) -> Result<(), BrowserError> {
 #[async_trait]
 impl BrowserHandle for CliBrowser {
     async fn goto(&self, url: &str) -> Result<NavInfo, BrowserError> {
-        let mut args = self.global_args(true);
+        let mut args = self.global_args();
         args.push("goto".into());
         args.push(url.to_string());
         let out = self.run(args).await?;
@@ -185,7 +234,7 @@ impl BrowserHandle for CliBrowser {
     }
 
     async fn eval(&self, js: &str) -> Result<Value, BrowserError> {
-        let mut args = self.global_args(false);
+        let mut args = self.global_args();
         args.push("eval".into());
         args.push(js.to_string());
         let out = self.run(args).await?;
@@ -197,7 +246,7 @@ impl BrowserHandle for CliBrowser {
     }
 
     async fn screenshot(&self) -> Result<Vec<u8>, BrowserError> {
-        let mut args = self.global_args(false);
+        let mut args = self.global_args();
         args.push("screenshot".into());
         args.push("--filename".into());
         args.push("pacewright_shot.png".into());
@@ -248,49 +297,50 @@ mod tests {
     /// Regression: every verb must be pinned to pacewright's own browser+page, or a
     /// concurrent chrome-agent consumer can navigate the shared `default` page
     /// between our goto and our eval, and we scrape the wrong site as "success".
+    /// Still true under `--connect`: observed 2026-07-16, omitting `--browser` filed our
+    /// pages under the browser key `default` — the exact hijack this guards.
     #[test]
     fn every_verb_is_pinned_to_a_named_browser_and_page() {
-        let b = CliBrowser::new();
-        for session_flags in [true, false] {
-            let g = b.global_args(session_flags);
-            let pos = |flag: &str| g.iter().position(|a| a == flag).expect("flag present");
-            assert_eq!(g[pos("--browser") + 1], DEFAULT_BROWSER_NAME);
-            assert_eq!(g[pos("--page") + 1], DEFAULT_PAGE_NAME);
-        }
-        // and never the global default page that other tools use
+        let g = CliBrowser::new().global_args();
+        let pos = |flag: &str| g.iter().position(|a| a == flag).expect("flag present");
+        assert_eq!(g[pos("--browser") + 1], DEFAULT_BROWSER_NAME);
+        assert_eq!(g[pos("--page") + 1], DEFAULT_PAGE_NAME);
+        // and never the global default page/browser that other tools use
         assert_ne!(DEFAULT_PAGE_NAME, "default");
         assert_ne!(DEFAULT_BROWSER_NAME, "default");
     }
 
     #[test]
     fn browser_and_page_names_are_overridable() {
-        let g = CliBrowser::new().browser_name("b1").page_name("p1").global_args(false);
+        let g = CliBrowser::new().browser_name("b1").page_name("p1").global_args();
         let pos = |flag: &str| g.iter().position(|a| a == flag).unwrap();
         assert_eq!(g[pos("--browser") + 1], "b1");
         assert_eq!(g[pos("--page") + 1], "p1");
     }
 
+    /// Every verb attaches to the always-on Chrome. There is no longer a "session-establishing"
+    /// verb: `goto` used to carry `--copy-cookies` to snapshot the operator's cookies into a
+    /// throwaway profile, but the attached profile IS the live session, so goto and eval are
+    /// identical. Launching is what got LinkedIn's `li_at` revoked.
     #[test]
-    fn goto_carries_session_flags_but_eval_does_not() {
-        let b = CliBrowser::new()
-            .stealth(true)
-            .copy_cookies(true)
-            .timeout_secs(5);
-        let g = b.global_args(true);
-        assert!(g.contains(&"--stealth".to_string()) && g.contains(&"--copy-cookies".to_string()));
+    fn every_verb_attaches_and_carries_no_session_flags() {
+        let b = CliBrowser::new().timeout_secs(5);
+        let g = b.global_args();
+        let pos = |f: &str| g.iter().position(|a| a == f).unwrap_or_else(|| panic!("{f} absent: {g:?}"));
+        assert_eq!(g[pos("--connect") + 1], DEFAULT_CHROME_CONNECT);
+        assert!(!g.contains(&"--copy-cookies".to_string()), "nothing to copy when attached: {g:?}");
+        assert!(!g.contains(&"--headed".to_string()), "attached Chrome is visible already: {g:?}");
         // --json and --timeout are always present, and precede the subcommand.
         assert_eq!(g[0], "--json");
         assert_eq!((g[1].as_str(), g[2].as_str()), ("--timeout", "5"));
-        let e = b.global_args(false);
-        assert!(
-            !e.contains(&"--stealth".to_string()) && !e.contains(&"--copy-cookies".to_string())
-        );
     }
 
+    /// CDP attach still leaves `navigator.webdriver` true, which is itself a detection signal,
+    /// so stealth stays on by default.
     #[test]
-    fn flags_can_be_disabled() {
-        let b = CliBrowser::new().stealth(false).copy_cookies(false);
-        assert!(!b.global_args(true).contains(&"--stealth".to_string()));
+    fn stealth_is_on_by_default_and_can_be_disabled() {
+        assert!(CliBrowser::new().global_args().contains(&"--stealth".to_string()));
+        assert!(!CliBrowser::new().stealth(false).global_args().contains(&"--stealth".to_string()));
     }
 
     #[tokio::test]

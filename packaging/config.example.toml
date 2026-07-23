@@ -2,11 +2,15 @@
 # Every (platform, action) that needs throttling gets a limit key.
 # Keys not listed here are unrestricted.
 
-# The daemon closes Chrome browsers left idle this long so instances don't pile up.
-# Default is "10m" if this section is omitted; set "0" to disable reaping entirely.
-# (Closing a browser loses nothing — cookies persist in its profile; the next task relaunches it.)
+# The always-on Chrome that pacewright ATTACHES to, started by the launchd job
+# (packaging/com.paperclip.pacewright-chrome.plist). pacewright never launches a browser itself:
+# a CDP-launched browser is a bot signal, so LinkedIn walls the profile and revokes `li_at`, and
+# Google refuses sign-in on it outright. Sites are separated by named TABS in this one Chrome.
+#
+# Must match the job's --remote-debugging-port. Omit the section for the default below.
+# "auto" lets chrome-agent discover the endpoint itself. PACEWRIGHT_CHROME_CONNECT overrides both.
 [browser]
-idle_timeout = "10m"
+connect = "http://127.0.0.1:9222"
 
 [limits."dummy.capped"]
 daily_cap = 3

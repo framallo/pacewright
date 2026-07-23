@@ -1,6 +1,78 @@
 # pacewright — handoff
 
-Last updated: 2026-07-10 (recipe **auth & login** landed — account recipes, persistent per-account sessions, `pcw auth` + Accounts panes). Written for the next agent.
+Last updated: 2026-07-17 (**single attached Chrome, one tab per site** — Phases 1–5 done + auth
+gate PASSED + recipes de-generated; uncommitted). Written for the next agent.
+
+## ⛔ START HERE — single attached Chrome (2026-07-16, IN PROGRESS, UNCOMMITTED)
+
+Plan + full findings: **`docs/plans/2026-07-16-single-chrome-attach.md`**. Read it before touching
+the browser layer — the section below is only the resume state.
+
+**What changed.** pacewright no longer lets chrome-agent *launch* a browser. It **attaches**
+(`--connect`) to one always-on, non-headless Google Chrome, and separates sites by named **tabs**
+instead of per-account browser profiles. Launching was the root cause of the auth bugs: a
+CDP-launched browser is a bot signal, so LinkedIn walled the profile and revoked `li_at`, and Google
+refused sign-in outright.
+
+- account → `--page <account>` (was `--browser <account>`), one shared `--browser pacewright`
+- `--headed` and `--copy-cookies` **deleted** — they only existed to make a launched throwaway
+  Chromium resemble a real signed-in Chrome
+- `auth login` no longer launches; it `--activate`s the account's tab for the human to sign in
+- browser reaper **deleted** (it was also silently broken — see plan, Phase 5)
+- `[browser] idle_timeout` → `[browser] connect` in `config.toml` (old key ignored, not fatal)
+- new `foreground #true` recipe flag → `--activate`; on `riverside/render_clips` only
+- `RunOpts { account, foreground }` replaces `run(.., auth, account)` — `auth` was dead
+
+**✅ Recipes are now static (was: generated).** Per Federico's directive, the riverside recipes are
+hand-maintained static `.kdl` files parameterized by `{{ url }}`/`{{ guest }}`, no generator. Root
+cause of the old generation: `youtube_export` was a compiled chrome-agent verb that no longer
+exists (`recipe check` → unknown step verb), so the JS was inlined. That inlined form is canonical
+now. Headers rewritten, repo staging synced (it had held the dead-verb form), generator retired to
+`gen_recipes.py.RETIRED` + README. All six riverside recipes pass `chrome-agent recipe check`.
+⚠️ The external **awesome-recipes** repo (the real distribution channel per `.gitignore`) is not
+reachable from here and still needs the same static versions, or `pcw recipe add` reinstalls the
+dead verb form.
+
+**No foreground mutex — deliberately.** The dispatch loop already awaits each task before claiming
+the next, so tasks never overlap and cannot contend for the one foreground tab. That property is
+pinned by `foreground_serialization_is_load_bearing` (`daemon/tests/e2e.rs`), which fails loudly if
+anyone parallelizes the loop. Read the failure as: `foreground` now needs real serialization.
+
+**State:** 178 tests green, clippy clean. **Nothing is committed.** The working tree already held
+unrelated in-flight work (Cargo.lock, `crates/cli/*`, `registry.rs` — OAuth-ish) before this
+started, so committing would sweep that up. Separate the two before committing.
+
+**The Chrome is installed and running.** `packaging/com.paperclip.pacewright-chrome.plist` is
+loaded as a LaunchAgent (port 9222, profile `~/.pacewright/chrome-profile`). KeepAlive revival and
+attach self-heal across restarts are both verified live.
+
+**✅ AUTH GATE PASSED (2026-07-17).** Federico signed into Google + LinkedIn by hand; driven through
+`--connect`, YouTube Studio loaded signed in and LinkedIn survived a profile load with `li_at`
+intact (feed reload after still signed in). Google accepts sign-in on a `--remote-debugging-port`
+Chrome, and attach does NOT burn LinkedIn — the two things the whole refactor bet on. Riverside was
+not re-checked this session but is the same attach path.
+
+**✅ Stale page-target auto-recovery (2026-07-17).** Fixed: `core::browser::is_stale_page_target`
++ `prune_stale_page`, wired into both `CliBrowser::run` and `CliRecipeRunner::run` — on a stale
+target they prune that one page from `sessions.json` and retry once, so chrome-agent opens a fresh
+tab. Bounded to a single retry. Pure logic unit-tested (`CHROME_AGENT_HOME`-scoped temp store);
+wiring proven live by closing a tab mid-flight and watching `CliBrowser` recover on its own. A
+closed tab is no longer a silent task failure.
+
+**Next, in order:** (1) push the static riverside recipes to the external awesome-recipes repo (not
+reachable from here); (2) handle the stale-page-target error class in the daemon (recreate + retry
+once); (3) `pcw chrome status` (must NOT trust `sessions.json`'s `headless` field — it reads `true`
+for attached sessions); (4) finish Phase 6 — retire the three launched profiles from
+`sessions.json` (move aside, don't delete), drop the "Google can't use auth_login" caveat from the
+pacewright skill; (5) untangle + commit (see below).
+
+---
+
+## Recipe auth & login (2026-07-10) — SUPERSEDED IN PART
+
+⚠️ The **browser model** below (per-account launched profiles, `--headed`, `--copy-cookies`, page
+`main`) is superseded by the 2026-07-16 plan above. The rest — account recipes as KDL, the auth
+status cache, `pcw auth`, the Accounts panes — still stands.
 
 ## Recipe auth & login — account recipes + persistent sessions (2026-07-10)
 

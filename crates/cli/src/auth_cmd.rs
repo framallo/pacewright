@@ -74,29 +74,51 @@ pub async fn recheck(sock: &Path, account: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Block until the operator presses Return. Reading stdin here (in the CLI, which owns the terminal)
+/// is what gates the recheck: the login window is left completely alone while the human signs in —
+/// no automated navigation touches the profile — and only once they confirm do we drive the browser
+/// to read the session. This is the fix for the tab-storm that a timed auto-poll caused.
+fn wait_for_return(msg: &str) -> Result<()> {
+    use std::io::Write;
+    print!("{msg}");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(())
+}
+
 pub async fn login(sock: &Path, account: Option<String>, all: bool) -> Result<()> {
     if all || account.is_none() {
         let resp = client::call(sock, Request::AuthLoginAll).await?;
-        match resp {
-            Response::Ok(v) => {
-                let opened = v["opened"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-                if opened.is_empty() {
-                    println!("nothing to do — every account is already signed in.");
-                } else {
-                    let names: Vec<&str> = opened.iter().filter_map(Value::as_str).collect();
-                    println!("opened login windows for: {}", names.join(", "));
-                    println!("sign in to each — they'll go green once the check passes.");
-                }
-            }
+        let opened: Vec<String> = match resp {
+            Response::Ok(v) => v["opened"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default(),
             Response::Error { message } => anyhow::bail!("{message}"),
+        };
+        if opened.is_empty() {
+            println!("nothing to do — every account is already signed in.");
+            return Ok(());
         }
+        println!("opened login windows for: {}", opened.join(", "));
+        println!("sign in to each by hand (take your time; 2FA/checkpoint is fine).");
+        wait_for_return("press Return once you're signed in to all of them… ")?;
+        eprintln!("checking sessions…");
+        let re = client::call(sock, Request::AuthRecheck { account: None }).await?;
+        print_table(&accounts_of(&re)?);
         return Ok(());
     }
     let account = account.unwrap();
     let resp = client::call(sock, Request::AuthLogin { account: account.clone() }).await?;
     match resp {
         Response::Ok(_) => {
-            println!("opened a login window for `{account}` — sign in, then it'll go green.");
+            println!("opened a login window for `{account}` — sign in by hand (take your time; 2FA/checkpoint is fine).");
+            println!("nothing will drive the window while you sign in.");
+            wait_for_return("press Return once you're signed in… ")?;
+            eprintln!("checking the session…");
+            let re = client::call(sock, Request::AuthRecheck { account: Some(account) }).await?;
+            print_table(&accounts_of(&re)?);
             Ok(())
         }
         Response::Error { message } => anyhow::bail!("{message}"),

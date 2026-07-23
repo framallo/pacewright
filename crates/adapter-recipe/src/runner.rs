@@ -10,19 +10,85 @@
 
 use async_trait::async_trait;
 use pacewright_core::model::AdapterError;
+use pacewright_core::secrets::SecretStore;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// `~/.pacewright/secrets.json` — the OAuth secret store (mode 0600).
+fn secrets_path() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".pacewright")
+        .join("secrets.json")
+}
+
+/// The provider (recipe-name prefix) of a recipe source: `recipe "linkedin/post"` → `"linkedin"`.
+fn recipe_provider(src: &str) -> Option<String> {
+    let after = src.split("recipe ").nth(1)?.trim_start();
+    let inner = after.strip_prefix('"')?;
+    let name = &inner[..inner.find('"')?];
+    name.split('/').next().map(str::to_string)
+}
+
+/// True if the recipe declares `var "<name>"`.
+fn declares_var(src: &str, name: &str) -> bool {
+    src.contains(&format!("var \"{name}\""))
+}
+
+/// Merge OAuth secrets into `vars_json` for a recipe that declares a `token` var: a currently-valid
+/// access token for the recipe's provider (plus its `author_urn`) from `store`. Best-effort — returns
+/// `vars_json` unchanged if the recipe needs no token, the provider has no valid token, or the JSON
+/// won't parse (the recipe then fails clearly on the missing var). Never overwrites a value already
+/// present in `vars_json` (an explicit param wins).
+fn inject_oauth_vars(src: &str, vars_json: &str, store: &SecretStore, now_ms: i64) -> String {
+    if !declares_var(src, "token") {
+        return vars_json.to_string();
+    }
+    let Some(provider) = recipe_provider(src) else {
+        return vars_json.to_string();
+    };
+    // 5-minute skew: only inject a token with real runway left.
+    let Some(token) = store.valid_access_token(&provider, now_ms, 300_000) else {
+        return vars_json.to_string();
+    };
+    let Ok(Value::Object(mut obj)) = serde_json::from_str::<Value>(vars_json) else {
+        return vars_json.to_string();
+    };
+    obj.entry("token".to_string())
+        .or_insert_with(|| Value::String(token.to_string()));
+    if let Some(urn) = store.get(&provider).and_then(|r| r.author_urn.clone()) {
+        obj.entry("author_urn".to_string())
+            .or_insert(Value::String(urn));
+    }
+    serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| vars_json.to_string())
+}
+
+/// How one recipe run should be driven. A struct rather than positional flags because the
+/// old `(auth: bool, account: Option<&str>)` pair no longer described anything: attaching to the
+/// live Chrome removed the throwaway profile that `auth` chose cookie-copying for, leaving it dead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunOpts {
+    /// `auth account="<name>"` — run in the account's own **tab** of the attached Chrome (the
+    /// session the human established there via `pcw auth login`). `None` → the shared page.
+    pub account: Option<String>,
+    /// `foreground #true` — raise the tab (`--activate`) for the run. Chrome throttles background
+    /// tabs, which stalls a Riverside render.
+    pub foreground: bool,
+}
+
+impl RunOpts {
+    pub fn account(name: impl Into<String>) -> Self {
+        Self { account: Some(name.into()), foreground: false }
+    }
+    pub fn foreground(mut self, on: bool) -> Self {
+        self.foreground = on;
+        self
+    }
+}
 
 /// Runs a recipe file and returns its run envelope, or the mapped failure class.
 #[async_trait]
 pub trait RecipeRunner: Send + Sync {
-    /// Run `recipe_path` binding `vars_json` (a JSON **object** string).
-    ///
-    /// - `account = Some(name)` → run in the persistent per-account profile `name` (established via
-    ///   `pcw auth login`), with **no** cookie copy; the profile itself holds the live session.
-    /// - `account = None`, `auth = true` → the legacy `auth #true`: shared `pacewright` profile with
-    ///   `--copy-cookies` (a snapshot of the everyday Chrome).
-    /// - `account = None`, `auth = false` → public recipe, shared profile, no copy.
+    /// Run `recipe_path` binding `vars_json` (a JSON **object** string), per `opts`.
     ///
     /// On success returns the run envelope `{"ok":true,"result":{…},"unexpected":[…]}`; on failure
     /// the `AdapterError` whose class is recovered from the child's error output.
@@ -30,23 +96,35 @@ pub trait RecipeRunner: Send + Sync {
         &self,
         recipe_path: &Path,
         vars_json: &str,
-        auth: bool,
-        account: Option<&str>,
+        opts: &RunOpts,
     ) -> Result<Value, AdapterError>;
 }
 
-/// The real runner: `chrome-agent --browser pacewright --page pacewright recipe run <file>`.
+/// The endpoint of the always-on Chrome. Re-exported from core so the two callers of chrome-agent
+/// cannot drift onto different endpoints.
+pub use pacewright_core::browser::{default_connect_endpoint, DEFAULT_CHROME_CONNECT};
+
+/// The real runner:
+/// `chrome-agent --connect <endpoint> --browser pacewright --page <account> recipe run <file>`.
 ///
-/// Pins the same dedicated browser/page as `CliBrowser` (so a concurrent chrome-agent
-/// consumer on the shared `default` page can't hijack the run), and carries `--stealth`.
-/// Cookie copying is **per-recipe**: `--copy-cookies` is added only when the recipe declares
-/// `auth #true` (passed as the `auth` arg to `run`), so a public recipe never needs a
-/// signed-in Chrome. `copy_cookies` here is an optional global force-on override (default off).
+/// **Attaches** to the operator's always-on, non-headless Chrome (launched by launchd on
+/// `--remote-debugging-port`, never by chrome-agent) rather than launching one. Launching is
+/// what breaks auth: LinkedIn walls a CDP-launched profile and revokes `li_at`, and Google
+/// refuses sign-in on one outright.
+///
+/// Sites are separated by named **tabs**, not by browser profiles — `account` picks the page.
+/// `--browser` is still pinned even though `--connect` identifies the browser: it is the
+/// `sessions.json` bookkeeping key, and leaving it at `default` invites the shared-`default`
+/// hijack another chrome-agent consumer can walk into.
+///
+/// `--stealth` is retained: CDP attach still leaves `navigator.webdriver` true, which is itself
+/// a detection signal. `--headed`/`--copy-cookies` are gone — the attached profile IS the live
+/// session, and the real Chrome is visible by definition.
 pub struct CliRecipeRunner {
     bin: String,
     timeout_secs: u64,
     stealth: bool,
-    copy_cookies: bool,
+    connect: Option<String>,
     browser_name: String,
     page_name: String,
 }
@@ -64,9 +142,7 @@ impl CliRecipeRunner {
             // A recipe drives many steps in one process; give it more room than a single verb.
             timeout_secs: 180,
             stealth: true,
-            // Off by default: the per-recipe `auth` flag (from `auth #true`) drives cookie
-            // copying. This override only force-copies for every recipe when set true.
-            copy_cookies: false,
+            connect: default_connect_endpoint(),
             // Keep in lockstep with pacewright_browser::DEFAULT_{BROWSER,PAGE}_NAME.
             browser_name: "pacewright".to_string(),
             page_name: "pacewright".to_string(),
@@ -84,8 +160,9 @@ impl CliRecipeRunner {
         self.stealth = on;
         self
     }
-    pub fn copy_cookies(mut self, on: bool) -> Self {
-        self.copy_cookies = on;
+    /// Endpoint of the always-on Chrome to attach to (`http://127.0.0.1:9222` or `auto`).
+    pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
+        self.connect = Some(endpoint.into());
         self
     }
     pub fn browser_name(mut self, name: impl Into<String>) -> Self {
@@ -97,26 +174,33 @@ impl CliRecipeRunner {
         self
     }
 
-    fn args(&self, recipe_path: &Path, vars_json: &str, auth: bool, account: Option<&str>) -> Vec<String> {
-        // An account-bound recipe runs in that account's own persistent profile and must NOT copy
-        // cookies (the profile already holds the live, self-refreshing session). Legacy `auth #true`
-        // (no account) keeps the shared profile + `--copy-cookies` snapshot.
-        let browser = account.unwrap_or(&self.browser_name);
-        let copy_cookies = account.is_none() && (auth || self.copy_cookies);
+    fn args(&self, recipe_path: &Path, vars_json: &str, opts: &RunOpts) -> Vec<String> {
+        // The inversion: an account no longer selects a *browser* (its own launched profile) but a
+        // named *tab* inside the one attached Chrome. Verified live 2026-07-16 — named pages are
+        // real, independent tabs and driving one does not clobber another. Public/shared recipes
+        // keep the runner's default page.
+        let page = opts.account.as_deref().unwrap_or(&self.page_name);
         let mut v = vec![
             "--json".to_string(),
             "--timeout".to_string(),
             self.timeout_secs.to_string(),
             "--browser".to_string(),
-            browser.to_string(),
+            self.browser_name.clone(),
             "--page".to_string(),
-            self.page_name.clone(),
+            page.to_string(),
         ];
+        // Attach to the always-on Chrome. Global flag → must precede the subcommand.
+        if let Some(endpoint) = &self.connect {
+            v.push("--connect".into());
+            v.push(endpoint.clone());
+        }
+        // Raise the tab only when the recipe asked: exactly one tab can be foreground, and
+        // stealing focus on the operator's Mac is not a thing to do by default.
+        if opts.foreground {
+            v.push("--activate".into());
+        }
         if self.stealth {
             v.push("--stealth".into());
-        }
-        if copy_cookies {
-            v.push("--copy-cookies".into());
         }
         v.push("recipe".into());
         v.push("run".into());
@@ -133,18 +217,49 @@ impl RecipeRunner for CliRecipeRunner {
         &self,
         recipe_path: &Path,
         vars_json: &str,
-        auth: bool,
-        account: Option<&str>,
+        opts: &RunOpts,
     ) -> Result<Value, AdapterError> {
-        let args = self.args(recipe_path, vars_json, auth, account);
+        // Inject OAuth secrets (token/author_urn) for token-based recipes from the 0600 secret store,
+        // just before spawning — so scheduled API posts fire headless with no auth wall. Best-effort:
+        // a recipe that needs no token, or a provider with no valid token, passes through untouched.
+        let src = std::fs::read_to_string(recipe_path).unwrap_or_default();
+        let store = SecretStore::load(secrets_path()).unwrap_or_default();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let injected = inject_oauth_vars(&src, vars_json, &store, now_ms);
+        let args = self.args(recipe_path, &injected, opts);
+        let outcome = self.spawn_once(&args).await;
+        // If the run failed because this page's cached CDP target is stale (its tab was closed
+        // since chrome-agent recorded it), prune the page and run once more — chrome-agent then
+        // opens a fresh tab. A closed tab would otherwise be a silent, permanent task failure. The
+        // page is opts.account (its own tab) or the shared default page. See is_stale_page_target.
+        if is_stale_outcome(&outcome) {
+            let page = opts.account.as_deref().unwrap_or(&self.page_name);
+            pacewright_core::browser::prune_stale_page(&self.browser_name, page);
+            return self.spawn_once(&args).await;
+        }
+        outcome
+    }
+}
+
+impl CliRecipeRunner {
+    async fn spawn_once(&self, args: &[String]) -> Result<Value, AdapterError> {
         let out = tokio::process::Command::new(&self.bin)
-            .args(&args)
+            .args(args)
             .output()
             .await
             .map_err(|e| AdapterError::Terminal(format!("cannot spawn `{}`: {e}", self.bin)))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         interpret_output(out.status.success(), &stdout, &stderr)
+    }
+}
+
+/// A recipe run's failure is a stale page target if its error message is one — whether it came back
+/// classed (interpret_output tags an untagged chrome-agent error Terminal) or raw.
+fn is_stale_outcome(outcome: &Result<Value, AdapterError>) -> bool {
+    match outcome {
+        Err(e) => pacewright_core::browser::is_stale_page_target(&e.to_string()),
+        Ok(_) => false,
     }
 }
 
@@ -189,6 +304,12 @@ pub fn interpret_output(success: bool, stdout: &str, stderr: &str) -> Result<Val
 /// pacewright's real rate-limiting is the config-driven limits engine (declared `limit-key`s),
 /// not this signal.
 pub fn classify(msg: &str) -> AdapterError {
+    // A dead always-on Chrome is untagged (chrome-agent fails before the recipe engine can class
+    // it), so it would land in the catch-all below as an opaque Terminal. Name it instead: it is
+    // now the single most likely browser failure, since pacewright never launches a browser.
+    if let Some(explained) = pacewright_core::browser::explain_connect_failure(msg) {
+        return AdapterError::Terminal(explained);
+    }
     if let Some(rest) = msg.strip_prefix("[Terminal]") {
         AdapterError::Terminal(rest.trim().to_string())
     } else if let Some(rest) = msg.strip_prefix("[Retryable]") {
@@ -225,16 +346,16 @@ fn first_nonempty<'a>(a: &'a str, b: &'a str) -> &'a str {
 
 #[cfg(test)]
 pub mod fake {
-    use super::{AdapterError, Path, RecipeRunner, Value};
+    use super::{AdapterError, Path, RecipeRunner, RunOpts, Value};
     use async_trait::async_trait;
     use std::sync::Mutex;
 
     type Responder = Box<dyn Fn(&Path, &str) -> Result<Value, AdapterError> + Send + Sync>;
 
-    /// One recorded `run` call: (recipe path, vars_json, auth flag, account profile).
-    pub type Call = (String, String, bool, Option<String>);
+    /// One recorded `run` call: (recipe path, vars_json, opts).
+    pub type Call = (String, String, RunOpts);
 
-    /// A scriptable `RecipeRunner` for adapter tests. Records (path, vars_json, auth, account) calls
+    /// A scriptable `RecipeRunner` for adapter tests. Records (path, vars_json, opts) calls
     /// and returns whatever the injected closure produces.
     pub struct FakeRecipeRunner {
         responder: Responder,
@@ -265,14 +386,12 @@ pub mod fake {
             &self,
             recipe_path: &Path,
             vars_json: &str,
-            auth: bool,
-            account: Option<&str>,
+            opts: &RunOpts,
         ) -> Result<Value, AdapterError> {
             self.calls.lock().unwrap().push((
                 recipe_path.to_string_lossy().into_owned(),
                 vars_json.to_string(),
-                auth,
-                account.map(str::to_string),
+                opts.clone(),
             ));
             (self.responder)(recipe_path, vars_json)
         }
@@ -283,6 +402,60 @@ pub mod fake {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn store_with_token() -> SecretStore {
+        let mut s = SecretStore::default();
+        s.set_app("linkedin", "cid", "csec");
+        // valid for a long time from now_ms=1000 below
+        s.set_tokens("linkedin", "TOK", None, 10_000_000_000, None).unwrap();
+        s.set_author_urn("linkedin", "urn:li:person:ME").unwrap();
+        s
+    }
+
+    const POST_SRC: &str = r#"recipe "linkedin/post_with_mentions" {
+        var "token" required=#true
+        var "author_urn" required=#true
+        var "commentary" required=#true
+    }"#;
+
+    #[test]
+    fn recipe_provider_extracts_prefix() {
+        assert_eq!(recipe_provider(POST_SRC).as_deref(), Some("linkedin"));
+        assert_eq!(
+            recipe_provider(r#"recipe "riverside/list_projects" {}"#).as_deref(),
+            Some("riverside")
+        );
+    }
+
+    #[test]
+    fn inject_adds_token_and_author_urn() {
+        let out = inject_oauth_vars(POST_SRC, r#"{"commentary":"hi"}"#, &store_with_token(), 1000);
+        let obj: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(obj["token"], "TOK");
+        assert_eq!(obj["author_urn"], "urn:li:person:ME");
+        assert_eq!(obj["commentary"], "hi");
+    }
+
+    #[test]
+    fn inject_is_noop_when_recipe_declares_no_token() {
+        let src = r#"recipe "riverside/list_projects" { var "production_id" }"#;
+        let vars = r#"{"production_id":"x"}"#;
+        assert_eq!(inject_oauth_vars(src, vars, &store_with_token(), 1000), vars);
+    }
+
+    #[test]
+    fn inject_does_not_overwrite_explicit_token() {
+        let out = inject_oauth_vars(POST_SRC, r#"{"token":"EXPLICIT"}"#, &store_with_token(), 1000);
+        let obj: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(obj["token"], "EXPLICIT");
+    }
+
+    #[test]
+    fn inject_noop_when_no_valid_token() {
+        // Empty store → no token for linkedin → vars unchanged (recipe fails on missing var later).
+        let vars = r#"{"commentary":"hi"}"#;
+        assert_eq!(inject_oauth_vars(POST_SRC, vars, &SecretStore::default(), 1000), vars);
+    }
 
     #[test]
     fn ok_envelope_passes_through() {
@@ -327,8 +500,8 @@ mod tests {
     #[test]
     fn cli_runner_builds_the_pinned_invocation() {
         let r = CliRecipeRunner::new().timeout_secs(90);
-        // auth=false: a public recipe → no cookie copy.
-        let args = r.args(Path::new("/r/hn.kdl"), r#"{"url":"u"}"#, false, None);
+        // a public recipe → the shared page, no account tab.
+        let args = r.args(Path::new("/r/hn.kdl"), r#"{"url":"u"}"#, &RunOpts::default());
         // pinned browser+page, stealth, then the subcommand + vars-json
         let find = |f: &str| args.iter().position(|a| a == f).expect("flag present");
         assert_eq!(args[find("--browser") + 1], "pacewright");
@@ -342,30 +515,86 @@ mod tests {
     }
 
     #[test]
-    fn cli_runner_copies_cookies_only_when_auth() {
-        let r = CliRecipeRunner::new();
-        // auth=true, no account: legacy `auth #true` → copy cookies into the shared profile.
-        let authed = r.args(Path::new("/r/li.kdl"), "{}", true, None);
-        assert!(authed.contains(&"--copy-cookies".to_string()));
-        assert_eq!(authed[authed.iter().position(|a| a == "--browser").unwrap() + 1], "pacewright");
-        // the global override force-copies regardless of the per-recipe flag.
-        let forced = CliRecipeRunner::new().copy_cookies(true);
-        assert!(forced.args(Path::new("/r/x.kdl"), "{}", false, None).contains(&"--copy-cookies".to_string()));
+    fn cli_runner_attaches_and_never_launches() {
+        // The whole point of the refactor: pacewright ATTACHES to the operator's real, always-on
+        // Chrome instead of letting chrome-agent launch one. A launched browser is a bot signal —
+        // LinkedIn walls the profile and revokes `li_at`; Google refuses sign-in outright.
+        let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
+        let args = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
+        let find = |f: &str| args.iter().position(|a| a == f).unwrap_or_else(|| panic!("{f} absent: {args:?}"));
+        assert_eq!(args[find("--connect") + 1], "http://127.0.0.1:9222");
+        // --connect is a global flag → must precede the `recipe` subcommand.
+        assert!(find("--connect") < find("recipe"));
     }
 
     #[test]
-    fn cli_runner_account_uses_persistent_profile_no_copy() {
-        // An account-bound recipe runs in the account's own profile and must NOT copy cookies.
-        let r = CliRecipeRunner::new().copy_cookies(true); // even with the global force on
-        let args = r.args(Path::new("/r/rv.kdl"), "{}", true, Some("prevetted-riverside"));
-        assert_eq!(args[args.iter().position(|a| a == "--browser").unwrap() + 1], "prevetted-riverside");
-        assert!(!args.contains(&"--copy-cookies".to_string()), "account profile must not copy: {args:?}");
+    fn cli_runner_attached_drops_headed_and_copy_cookies() {
+        // Both flags existed only to make a launched throwaway Chromium resemble a real signed-in
+        // Chrome. Attached, the profile IS the session: there is nothing to copy, and the real
+        // Chrome is visible by definition. Passing either is now meaningless at best.
+        let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
+        for opts in [RunOpts::account("prevetted-linkedin"), RunOpts::default()] {
+            let args = r.args(Path::new("/r/x.kdl"), "{}", &opts);
+            assert!(!args.contains(&"--headed".to_string()), "attached must not pass --headed: {args:?}");
+            assert!(!args.contains(&"--copy-cookies".to_string()), "attached has nothing to copy: {args:?}");
+        }
+    }
+
+    #[test]
+    fn cli_runner_maps_account_to_page_not_browser() {
+        // The core inversion. Was: account → its own launched browser profile. Now: one shared
+        // attached browser, and the account picks a named TAB inside it. Verified live on
+        // 2026-07-16 — three named pages coexist as three real tabs and do not clobber each other.
+        let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
+        let li = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
+        let rv = r.args(Path::new("/r/rv.kdl"), "{}", &RunOpts::account("prevetted-riverside"));
+        let page = |a: &Vec<String>| a[a.iter().position(|x| x == "--page").unwrap() + 1].clone();
+        let browser = |a: &Vec<String>| a[a.iter().position(|x| x == "--browser").unwrap() + 1].clone();
+        assert_eq!(page(&li), "prevetted-linkedin");
+        assert_eq!(page(&rv), "prevetted-riverside");
+        assert_ne!(page(&li), page(&rv), "each account gets its own tab");
+        // ...but they share ONE browser now.
+        assert_eq!(browser(&li), browser(&rv), "one attached Chrome for every account");
+        // A public/shared recipe keeps the runner's default page.
+        let pubrec = r.args(Path::new("/r/hn.kdl"), "{}", &RunOpts::default());
+        assert_eq!(page(&pubrec), "pacewright");
+    }
+
+    #[test]
+    fn cli_runner_activates_only_foreground_recipes() {
+        // One attached Chrome has exactly ONE foreground tab. Chrome throttles the rest, which is
+        // what stalls a Riverside render — so a recipe that needs to be watched must raise its tab.
+        let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
+        let fg = r.args(Path::new("/r/rv.kdl"), "{}", &RunOpts::account("prevetted-riverside").foreground(true));
+        assert!(fg.contains(&"--activate".to_string()), "foreground recipe must raise its tab: {fg:?}");
+        // --activate is a global flag → must precede the `recipe` subcommand.
+        let apos = fg.iter().position(|a| a == "--activate").unwrap();
+        let rpos = fg.iter().position(|a| a == "recipe").unwrap();
+        assert!(apos < rpos, "--activate must precede the subcommand: {fg:?}");
+
+        // Default off: raising a window steals focus on the operator's real Mac, and most recipes
+        // (scrapes, API polls) have no reason to.
+        let bg = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
+        assert!(!bg.contains(&"--activate".to_string()), "background recipe must not steal focus: {bg:?}");
+    }
+
+    #[test]
+    fn cli_runner_pins_a_named_browser_even_when_attached() {
+        // Under --connect the endpoint identifies the browser and `--browser` is only the
+        // sessions.json bookkeeping key — but it MUST still be pinned. Observed 2026-07-16:
+        // omitting it filed our pages under the browser key `default`, which is exactly the
+        // shared-`default` hijack another chrome-agent consumer can walk into.
+        let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
+        let args = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
+        let browser = &args[args.iter().position(|a| a == "--browser").unwrap() + 1];
+        assert_eq!(browser, "pacewright");
+        assert_ne!(browser, "default", "never the shared default browser key");
     }
 
     #[tokio::test]
     async fn missing_binary_is_terminal() {
         let r = CliRecipeRunner::new().bin("definitely-not-real-xyz");
-        let err = r.run(Path::new("/r/x.kdl"), "{}", false, None).await.unwrap_err();
+        let err = r.run(Path::new("/r/x.kdl"), "{}", &RunOpts::default()).await.unwrap_err();
         assert!(matches!(err, AdapterError::Terminal(_)), "got {err:?}");
     }
 

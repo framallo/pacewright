@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The always-on Chrome that pacewright ATTACHES to (see docs/plans/2026-07-16-single-chrome-attach.md).
+
+  This is the substrate for every browser task: one real, non-headless Google Chrome, with sites
+  separated by named tabs rather than by browser profiles. pacewright never launches it — letting
+  chrome-agent launch a browser is a bot signal that gets LinkedIn's `li_at` revoked and makes
+  Google refuse sign-in outright.
+
+  Install:
+    sed "s|__HOME__|$HOME|g" packaging/com.paperclip.pacewright-chrome.plist \
+      > ~/Library/LaunchAgents/com.paperclip.pacewright-chrome.plist
+    launchctl load ~/Library/LaunchAgents/com.paperclip.pacewright-chrome.plist
+
+  Then sign into LinkedIn / Google / Riverside by hand, once, in that window. The profile persists,
+  so the sessions survive restarts.
+
+  LaunchAgents (not LaunchDaemons): the window must be visible, which needs a logged-in GUI session.
+
+  ProcessType Interactive, and deliberately NOT Background: macOS throttles Background processes,
+  and Chrome already throttles its own non-foreground tabs — which is what would stall a Riverside
+  render. Do not "optimize" this to Background.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.paperclip.pacewright-chrome</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
+        <!-- Must match `browser.connect` in ~/.pacewright/config.toml (default :9222). -->
+        <string>--remote-debugging-port=9222</string>
+        <!-- A dedicated profile: pacewright's Chrome is never the one a human browses in, so a
+             stray window or a profile reset can't take the automation down with it. -->
+        <string>--user-data-dir=__HOME__/.pacewright/chrome-profile</string>
+        <string>--no-first-run</string>
+        <string>--no-default-browser-check</string>
+        <!-- Restores the tabs pacewright named (linkedin/youtube/riverside) rather than nagging
+             after a KeepAlive restart. -->
+        <string>--restore-last-session</string>
+        <string>about:blank</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>__HOME__/.pacewright/chrome.out.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/.pacewright/chrome.err.log</string>
+    <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

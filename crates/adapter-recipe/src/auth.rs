@@ -14,12 +14,11 @@
 //! the daemon wires it behind the `Auth*` RPCs, mirroring how it wires `schedule`.
 
 use crate::registry::RecipeRegistry;
-use crate::runner::RecipeRunner;
+use crate::runner::{default_connect_endpoint, RecipeRunner, RunOpts, DEFAULT_CHROME_CONNECT};
 use async_trait::async_trait;
 use pacewright_core::model::AdapterError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// Opens a headed browser for interactive login. The seam is a trait so the daemon drives real
 /// Chrome via chrome-agent while tests use a fake.
@@ -30,11 +29,17 @@ pub trait LoginLauncher: Send + Sync {
     async fn open(&self, account: &str, login_url: &str) -> Result<(), String>;
 }
 
-/// The real launcher: `chrome-agent --browser <account> --page main --headed goto <login_url>`.
-/// The named browser persists, so the window stays open for the operator and the recipe's later
-/// checks/runs reuse the same profile + session.
+/// The real launcher:
+/// `chrome-agent --connect <endpoint> --browser pacewright --page <account> --activate goto <url>`.
+///
+/// Despite the name, it no longer *launches* anything — it attaches to the operator's always-on
+/// Chrome and raises the account's tab. That distinction is the whole fix: a chrome-agent-launched
+/// browser is a bot signal, so the old launcher burnt the very session it was trying to establish
+/// (LinkedIn walls the profile and revokes `li_at`) and Google refused sign-in on it outright.
 pub struct CliLoginLauncher {
     bin: String,
+    connect: String,
+    browser_name: String,
 }
 
 impl Default for CliLoginLauncher {
@@ -47,11 +52,32 @@ impl CliLoginLauncher {
     pub fn new() -> Self {
         Self {
             bin: std::env::var("CHROME_AGENT_BIN").unwrap_or_else(|_| "chrome-agent".to_string()),
+            connect: default_connect_endpoint().unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string()),
+            browser_name: "pacewright".to_string(),
         }
     }
     pub fn bin(mut self, bin: impl Into<String>) -> Self {
         self.bin = bin.into();
         self
+    }
+    pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
+        self.connect = endpoint.into();
+        self
+    }
+
+    /// The chrome-agent invocation for a sign-in tab. The page is the **account's own tab** — the
+    /// same one the account recipe's check/run reuse (`CliRecipeRunner::args`), so login, sign-in,
+    /// and check all share one tab and the check reads the very page the human logged into.
+    /// `--activate` raises it (a background tab would navigate invisibly — "nothing opened").
+    /// No `--headed`: the attached Chrome is visible by definition.
+    fn login_args<'a>(&'a self, account: &'a str, login_url: &'a str) -> Vec<&'a str> {
+        vec![
+            "--connect", &self.connect,
+            "--browser", &self.browser_name,
+            "--page", account,
+            "--activate", "--stealth", "goto",
+            login_url,
+        ]
     }
 }
 
@@ -59,16 +85,7 @@ impl CliLoginLauncher {
 impl LoginLauncher for CliLoginLauncher {
     async fn open(&self, account: &str, login_url: &str) -> Result<(), String> {
         let status = tokio::process::Command::new(&self.bin)
-            .args([
-                "--browser",
-                account,
-                "--page",
-                "main",
-                "--headed",
-                "--stealth",
-                "goto",
-                login_url,
-            ])
+            .args(self.login_args(account, login_url))
             .status()
             .await
             .map_err(|e| format!("cannot spawn `{}`: {e}", self.bin))?;
@@ -158,7 +175,9 @@ impl AuthManager {
             return Err(format!("no account recipe `accounts/{account}` installed"));
         };
         let path = meta.path.clone();
-        let outcome = self.runner.run(&path, "{}", true, Some(account)).await;
+        // The signed-in check runs in the account's own tab, in the background: it must not steal
+        // focus from whatever the operator is doing, and reading a session needs no foreground.
+        let outcome = self.runner.run(&path, "{}", &RunOpts::account(account)).await;
         let signed_in = match outcome {
             Ok(_) => Some(true),
             // The recipe's `expect on-fail="terminal"` fires when signed out.
@@ -169,44 +188,32 @@ impl AuthManager {
         self.set(account, |s| {
             s.signed_in = signed_in;
             s.last_checked_ms = Some(now_ms);
+            // A recheck concludes any in-flight login: read the session, drop "logging in…".
+            s.logging_in = false;
         });
         Ok(self.status.lock().unwrap().get(account).cloned().unwrap_or_default())
     }
 
     /// Open a headed login window for `account` and mark it `logging_in`. Does not block on the
-    /// human; callers spawn `poll_until_signed_in` (or the operator triggers `recheck`) to confirm.
+    /// human and, deliberately, does NOT start any automated recheck: driving the browser while the
+    /// operator signs in would navigate the very profile being logged into (spawning tabs, breaking
+    /// bot-sensitive sign-ins like LinkedIn). The operator triggers `recheck` when done, which reads
+    /// the session and clears `logging_in`.
     pub async fn login(&self, account: &str) -> Result<(), String> {
         let Some(meta) = self.registry.account(account) else {
             return Err(format!("no account recipe `accounts/{account}` installed"));
         };
-        let Some(url) = meta.login_url.clone() else {
-            return Err(format!("account `{account}` declares no `login-url`"));
+        // Open the account's HOME (its check's landing page), not the raw login form: signed in →
+        // the operator sees the app; signed out → the app redirects them to sign in. Fall back to
+        // `login-url` only when the recipe declares no `goto` home.
+        let Some(url) = meta.home_url.clone().or_else(|| meta.login_url.clone()) else {
+            return Err(format!("account `{account}` declares no home (`goto`) or `login-url`"));
         };
         self.launcher.open(account, &url).await?;
         self.set(account, |s| s.logging_in = true);
         Ok(())
     }
 
-    /// Bounded poll after a login: recheck every `every` until signed in or `deadline` rechecks pass,
-    /// then clear `logging_in`. Uses injected `now` for the `last_checked_ms` stamp so it stays
-    /// wall-clock-free where it matters. Spawned detached by the daemon.
-    pub async fn poll_until_signed_in(
-        self: Arc<Self>,
-        account: String,
-        every: Duration,
-        max_rechecks: u32,
-        now: Arc<dyn Fn() -> i64 + Send + Sync>,
-    ) {
-        for _ in 0..max_rechecks {
-            tokio::time::sleep(every).await;
-            if let Ok(st) = self.recheck(&account, now()).await {
-                if st.signed_in == Some(true) {
-                    break;
-                }
-            }
-        }
-        self.set(&account, |s| s.logging_in = false);
-    }
 }
 
 #[cfg(test)]
@@ -294,12 +301,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_opens_the_window_and_marks_logging_in() {
+    async fn login_opens_home_not_the_login_form_and_marks_logging_in() {
+        // Login opens the account's HOME (the check's `goto` target), not the raw login form: a
+        // signed-in operator lands on the app and sees they're in; signed out, the app bounces them
+        // to sign in. Opening `/login` unconditionally shows a login form even when already signed in.
         let (m, launcher) = mgr(Arc::new(FakeRecipeRunner::ok(json!({"ok": true}))));
         m.login("prevetted-riverside").await.unwrap();
         let opened = launcher.opened.lock().unwrap();
-        assert_eq!(opened[0], ("prevetted-riverside".to_string(), "https://riverside.com/login".to_string()));
+        assert_eq!(opened[0], ("prevetted-riverside".to_string(), "https://riverside.com/dashboard".to_string()));
         assert!(m.list()[0].status.logging_in);
+    }
+
+    #[tokio::test]
+    async fn recheck_clears_logging_in() {
+        // A recheck is a definitive status read — the login interaction has concluded, so the
+        // account is no longer "logging in…". This is what flips a just-logged-in account green:
+        // the human signs in undisturbed (no browser-driving poll fights the login window), then a
+        // single `recheck` reads the session and clears the flag. Without this, a manual recheck
+        // after login would report "signed in" yet still show "logging in…" forever.
+        let (m, _) = mgr(Arc::new(FakeRecipeRunner::ok(json!({"ok": true}))));
+        m.login("prevetted-riverside").await.unwrap();
+        assert!(m.list()[0].status.logging_in, "login marks logging_in");
+        let st = m.recheck("prevetted-riverside", 1000).await.unwrap();
+        assert!(!st.logging_in, "recheck clears logging_in");
+        assert_eq!(st.signed_in, Some(true));
+    }
+
+    #[test]
+    fn login_attaches_and_never_launches_a_browser() {
+        // THE FIX. `auth login` used to LAUNCH a headed browser per account, and launching is what
+        // breaks sign-in: LinkedIn walls a CDP-launched profile and revokes `li_at` (so logging in
+        // burnt the very session it was establishing), and Google refuses sign-in on one outright
+        // — which is why `auth login prevetted-youtube` hung at "logging in…" forever.
+        // Now it attaches to the always-on Chrome the human already uses and just brings the
+        // account's tab forward for them to sign into.
+        let l = CliLoginLauncher::new();
+        let args = l.login_args("prevetted-linkedin", "https://x/login");
+        let pos = |f: &str| args.iter().position(|a| *a == f).unwrap_or_else(|| panic!("{f} absent: {args:?}"));
+        assert_eq!(args[pos("--connect") + 1], DEFAULT_CHROME_CONNECT);
+        assert!(!args.contains(&"--headed"), "attached Chrome is visible by definition: {args:?}");
+    }
+
+    #[test]
+    fn login_activates_the_accounts_own_tab() {
+        // The window must be raised, or a background tab navigates invisibly and reads as "nothing
+        // opened". The tab must be the account's own — the SAME one the signed-in check and every
+        // authed recipe run reuse (see `CliRecipeRunner::args`), so the check reads the very page
+        // the human logged into rather than spawning a second tab that navigates away.
+        let l = CliLoginLauncher::new();
+        let args = l.login_args("prevetted-linkedin", "https://x/login");
+        assert!(args.contains(&"--activate"), "must raise the window: {args:?}");
+        assert_eq!(args[args.iter().position(|a| *a == "--page").unwrap() + 1], "prevetted-linkedin");
+        assert_eq!(args.last(), Some(&"https://x/login"));
+        // and each account lands on its own tab, not a shared `main`
+        let l2 = CliLoginLauncher::new();
+        let rv = l2.login_args("prevetted-riverside", "https://y/login");
+        assert_eq!(rv[rv.iter().position(|a| *a == "--page").unwrap() + 1], "prevetted-riverside");
     }
 
     #[tokio::test]
