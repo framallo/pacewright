@@ -278,3 +278,28 @@ pipeline "demo/two-step" {
         assert!(dur_ms("soon").is_err());
     }
 }
+
+#[cfg(test)]
+mod shipped_pipelines {
+    use super::*;
+
+    /// The pipeline we ship must actually parse; a broken one would only surface at
+    /// `pacewright run` time, on the episode you were trying to publish.
+    #[test]
+    fn podcast_episode_pipeline_parses() {
+        let src = include_str!("../../../packaging/pipelines/podcast-episode.kdl");
+        let p = parse_pipeline(src).expect("shipped podcast/episode pipeline must parse");
+        assert_eq!(p.name, "podcast/episode");
+        assert_eq!(p.steps.len(), 4);
+        assert!(p.steps.iter().all(|s| s.verify.is_some()), "every step must be verified");
+        // The two least-proven steps carry an adjudicator.
+        let fb: Vec<&str> = p
+            .steps
+            .iter()
+            .filter(|s| s.fallback.is_some())
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(fb, vec!["publish_long", "share_spotify"]);
+        assert!(p.vars.iter().any(|v| v.name == "project_id" && v.required));
+    }
+}
