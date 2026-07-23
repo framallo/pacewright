@@ -151,3 +151,26 @@ async fn test_cap_defers_fourth_rate_heavy() {
     assert_eq!(succeeded, 3);
     assert_eq!(deferred, 1);
 }
+
+#[test]
+fn test_run_columns_roundtrip_and_lookup() {
+    let store = Store::open_in_memory().unwrap();
+    let mut t = Task::new_now("dummy", "echo", serde_json::json!({}), 1_000);
+    t.run_id = Some("ep172".into());
+    t.step_name = Some("publish_long".into());
+    t.dedup_key = Some("ep172:publish_long".into());
+    store.insert_task(&t).unwrap();
+
+    let got = store.get_task(&t.id).unwrap().unwrap();
+    assert_eq!(got.run_id.as_deref(), Some("ep172"));
+    assert_eq!(got.step_name.as_deref(), Some("publish_long"));
+    assert_eq!(store.tasks_in_run("ep172").unwrap().len(), 1);
+
+    // find_by_dedup_any must see TERMINAL tasks (this is what makes resume work,
+    // unlike find_active_by_dedup which deliberately excludes them).
+    let mut done = got.clone();
+    done.status = TaskStatus::Succeeded;
+    store.update_task(&done).unwrap();
+    assert!(store.find_active_by_dedup("ep172:publish_long").unwrap().is_none());
+    assert!(store.find_by_dedup_any("ep172:publish_long").unwrap().is_some());
+}

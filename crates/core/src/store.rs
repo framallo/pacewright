@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     recurrence TEXT,
     depends_on TEXT,
     dedup_key TEXT,
+    run_id TEXT,
+    step_name TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     last_error TEXT,
@@ -64,16 +66,40 @@ CREATE TABLE IF NOT EXISTS limit_overrides (
 );
 "#;
 
+/// `CREATE TABLE IF NOT EXISTS` will not alter an existing `tasks` table, so add the
+/// run columns when they are missing. Swallowing "duplicate column name" is the
+/// idiomatic sqlite way to make an additive migration idempotent.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    for ddl in [
+        "ALTER TABLE tasks ADD COLUMN run_id TEXT",
+        "ALTER TABLE tasks ADD COLUMN step_name TEXT",
+    ] {
+        match conn.execute(ddl, []) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_run_step \
+         ON tasks(run_id, step_name) WHERE run_id IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Store> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
     }
     pub fn open_in_memory() -> rusqlite::Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
     }
 
@@ -93,6 +119,8 @@ impl Store {
             recurrence: row.get("recurrence")?,
             depends_on: row.get("depends_on")?,
             dedup_key: row.get("dedup_key")?,
+            run_id: row.get("run_id")?,
+            step_name: row.get("step_name")?,
             attempts: row.get("attempts")?,
             max_attempts: row.get("max_attempts")?,
             last_error: row.get("last_error")?,
@@ -106,12 +134,12 @@ impl Store {
     pub fn insert_task(&self, t: &Task) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO tasks (id,adapter,action,params,status,scheduled_for,next_eligible_at,priority,recurrence,depends_on,dedup_key,attempts,max_attempts,last_error,result,created_at,updated_at,finished_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            "INSERT INTO tasks (id,adapter,action,params,status,scheduled_for,next_eligible_at,priority,recurrence,depends_on,dedup_key,run_id,step_name,attempts,max_attempts,last_error,result,created_at,updated_at,finished_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![
                 t.id, t.adapter, t.action, serde_json::to_string(&t.params).unwrap(),
                 t.status.as_str(), t.scheduled_for, t.next_eligible_at, t.priority,
-                t.recurrence, t.depends_on, t.dedup_key, t.attempts, t.max_attempts,
+                t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.attempts, t.max_attempts,
                 t.last_error, t.result.as_ref().map(|v| serde_json::to_string(v).unwrap()),
                 t.created_at, t.updated_at, t.finished_at
             ],
@@ -122,16 +150,32 @@ impl Store {
     pub fn update_task(&self, t: &Task) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE tasks SET adapter=?2,action=?3,params=?4,status=?5,scheduled_for=?6,next_eligible_at=?7,priority=?8,recurrence=?9,depends_on=?10,dedup_key=?11,attempts=?12,max_attempts=?13,last_error=?14,result=?15,created_at=?16,updated_at=?17,finished_at=?18 WHERE id=?1",
+            "UPDATE tasks SET adapter=?2,action=?3,params=?4,status=?5,scheduled_for=?6,next_eligible_at=?7,priority=?8,recurrence=?9,depends_on=?10,dedup_key=?11,run_id=?12,step_name=?13,attempts=?14,max_attempts=?15,last_error=?16,result=?17,created_at=?18,updated_at=?19,finished_at=?20 WHERE id=?1",
             params![
                 t.id, t.adapter, t.action, serde_json::to_string(&t.params).unwrap(),
                 t.status.as_str(), t.scheduled_for, t.next_eligible_at, t.priority,
-                t.recurrence, t.depends_on, t.dedup_key, t.attempts, t.max_attempts,
+                t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.attempts, t.max_attempts,
                 t.last_error, t.result.as_ref().map(|v| serde_json::to_string(v).unwrap()),
                 t.created_at, t.updated_at, t.finished_at
             ],
         )?;
         Ok(())
+    }
+
+    /// Find a task by dedup key INCLUDING terminal ones. `find_active_by_dedup`
+    /// deliberately excludes terminal tasks so a finished recurrence can be re-queued;
+    /// resume needs the opposite, to see that a step already succeeded.
+    pub fn find_by_dedup_any(&self, key: &str) -> rusqlite::Result<Option<Task>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT * FROM tasks WHERE dedup_key=?1 LIMIT 1", params![key], Self::row_to_task)
+            .optional()
+    }
+
+    pub fn tasks_in_run(&self, run_id: &str) -> rusqlite::Result<Vec<Task>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM tasks WHERE run_id=?1 ORDER BY created_at")?;
+        let rows = stmt.query_map(params![run_id], Self::row_to_task)?;
+        rows.collect()
     }
 
     pub fn get_task(&self, id: &str) -> rusqlite::Result<Option<Task>> {
