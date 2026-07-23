@@ -7,6 +7,7 @@ pub mod engine;
 pub mod limits;
 pub mod model;
 pub mod oauth;
+pub mod pipeline;
 pub mod refs;
 pub mod rng;
 pub mod runner;
