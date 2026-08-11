@@ -73,6 +73,22 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Preflight: recipes + pipelines shell out to `chrome-agent recipe run`. If the installed
+    // chrome-agent lacks the recipe subcommand (plain upstream, or a build from a branch without the
+    // engine), every recipe task would fail cryptically — warn once, loudly, at boot instead.
+    if !recipe_registry.is_empty() {
+        let bin = pacewright_adapter_recipe::chrome_agent_bin();
+        if pacewright_adapter_recipe::recipe_subcommand_available(&bin) {
+            tracing::info!("preflight: `{bin} recipe` available — recipes/pipelines can run");
+        } else {
+            tracing::error!(
+                "preflight: `{bin} recipe` is MISSING — every recipe/pipeline task will fail. \
+                 Install a chrome-agent built with the recipe engine (framallo/chrome-agent `main`); \
+                 browser-free adapters (agent/claude_cli/data/http/pipeline) still work."
+            );
+        }
+    }
+
     // Lazy: nothing touches Chrome until a task actually drives the browser, so a daemon on a
     // machine without `chrome-agent` — or with the always-on Chrome down — still boots and runs
     // browser-free adapters. Browser tasks then fail Terminal with a clear message.
