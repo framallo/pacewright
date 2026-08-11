@@ -41,6 +41,9 @@ The engine is **platform-agnostic**. Adapters implement one trait (`execute(acti
 | `pacewright-cli` | `pacewright` (alias `pcw`) — client subcommands + live ratatui TUI |
 | `pacewright-mcp` | `pacewright-mcp` — stdio MCP server bridging an MCP client (Claude) to the daemon socket |
 | `pacewright-adapter-dummy` | reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`/`panic`) for testing the engine |
+| `pacewright-browser` | `CliBrowser` — the real `BrowserHandle`, drives the attached Chrome via the `chrome-agent` CLI |
+| `pacewright-adapter-recipe` | KDL recipe engine: `RecipeAdapter`/`RecipeRegistry`/`RecipeRunner`, the declarative scheduler, and account auth |
+| `pacewright-adapter-agent` | Claude adapters: `agent`/`claude` (Messages API) + `claude_cli` (`claude -p`) + the Claude Max/Pro OAuth client |
 
 ## Build
 
@@ -245,6 +248,12 @@ open http://127.0.0.1:7878  # Feed · Schedule · Limits · Accounts
 - **Accounts** — one row per account recipe: a signed-in/out/unknown/logging-in **pill**, the recipes using it, last-checked, with per-row **Log in** / **Recheck** and header **Log in all**. A login pops a headed Chrome on the machine and flips green live when the check passes.
 
 It updates live over a WebSocket (a full snapshot pushed once a second — no polling) and adds no backend logic: every action is the same `proto::Request` the socket takes, funnelled through the one dispatch. A single self-contained HTML page (inlined CSS+JS, no build step), embedded in the binary.
+
+A second **feature dashboard** lives at **`/next`** (`open http://127.0.0.1:7878/next`), surfacing the
+newer capabilities the classic panes don't: **Overview** (live counts + Claude subscription status),
+**Fleet** (schedule toggles), **Escalations** (the "call Claude on issue" outbox, with **Drain**),
+**Datasets** (saved JSON task output, with an inline row view), **Ledger** (per-scope all-time dedup
+counts), and **Limits**. Same WebSocket snapshot, same `POST /api` control plane.
 
 ## Install as a background service (macOS launchd)
 
