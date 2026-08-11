@@ -1,3 +1,4 @@
+mod anthropic_cmd;
 mod auth_cmd;
 mod client;
 mod oauth_cmd;
@@ -70,7 +71,7 @@ enum Cmd {
     Status,
     /// Start or resume a pipeline run. Idempotent: succeeded steps are never redone.
     Run {
-        /// Pipeline name, e.g. `podcast/episode`
+        /// Pipeline name, e.g. `media/publish`
         pipeline: String,
         /// Stable id for this run, e.g. `ep172`. Re-use it to resume.
         #[arg(long)]
@@ -88,6 +89,14 @@ enum Cmd {
     Show {
         run_id: String,
     },
+    /// Print today's structured digest: what ran, what's queued, what failed, what needs a human.
+    Digest,
+    /// Show the escalation outbox — issues the notifier raised for Claude/a human to triage.
+    Escalations {
+        /// Delete each escalation after printing it (a one-shot pull).
+        #[arg(long)]
+        drain: bool,
+    },
     Tui,
     /// Manage recipes installed from GitHub repos.
     #[command(subcommand)]
@@ -100,20 +109,40 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<AuthCmd>,
     },
-    /// OAuth token auth for first-party APIs (LinkedIn, YouTube) — login/status/logout.
+    /// OAuth token auth for first-party provider APIs — login/status/logout.
     Oauth {
         #[command(subcommand)]
         cmd: Option<OauthCmd>,
     },
+    /// Log the daemon into a Claude Max/Pro subscription so Claude calls use it, not API quota.
+    Anthropic {
+        #[command(subcommand)]
+        cmd: AnthropicCmd,
+    },
 }
 
 #[derive(Subcommand)]
+enum AnthropicCmd {
+    /// Sign in with your Claude Max/Pro account (opens a browser; `--paste` for headless).
+    Login {
+        /// Don't run a loopback server; paste the code / redirect URL instead.
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Show whether a subscription token is stored and its freshness.
+    Status,
+    /// Clear the stored subscription tokens.
+    Logout,
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum OauthCmd {
     /// Show each provider: app configured? · token valid/expired/absent · scope · author URN.
     Status,
     /// Run the consent flow: opens the browser, catches the loopback redirect, stores the token.
     Login {
-        /// Provider to authorize (currently `linkedin`).
+        /// Provider name to authorize (e.g. `acme`).
         provider: String,
         /// App client id. Falls back to the stored value, then an interactive prompt.
         #[arg(long)]
@@ -125,6 +154,24 @@ enum OauthCmd {
         /// `{base}/{provider}/callback`. Must match what's registered on the app.
         #[arg(long)]
         callback_base: Option<String>,
+        /// OAuth authorization endpoint (required on first login; stored after).
+        #[arg(long)]
+        authorize_url: Option<String>,
+        /// OAuth token endpoint (required on first login; stored after).
+        #[arg(long)]
+        token_url: Option<String>,
+        /// Space-separated scope string (required on first login; stored after).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Optional userinfo endpoint; when set, an author/principal URN is resolved from it.
+        #[arg(long)]
+        userinfo_url: Option<String>,
+        /// Optional URN template with `{id}` substituted (e.g. `urn:li:person:{id}`).
+        #[arg(long)]
+        urn_template: Option<String>,
+        /// JSON field of the userinfo response holding the principal id (default `sub`).
+        #[arg(long)]
+        id_field: Option<String>,
     },
     /// Drop a provider's tokens (keeps its app credentials for a quick re-login).
     Logout { provider: String },
@@ -218,7 +265,12 @@ async fn main() -> Result<()> {
         Cmd::Limits => Request::Limits,
         Cmd::Adapters => Request::Adapters,
         Cmd::Status => Request::Status,
-        Cmd::Run { pipeline, run_id, params, retry_failed } => Request::RunStart {
+        Cmd::Run {
+            pipeline,
+            run_id,
+            params,
+            retry_failed,
+        } => Request::RunStart {
             pipeline,
             run_id,
             params: serde_json::from_str(&params)
@@ -227,6 +279,8 @@ async fn main() -> Result<()> {
         },
         Cmd::Runs => Request::RunList,
         Cmd::Show { run_id } => Request::RunShow { run_id },
+        Cmd::Digest => Request::Digest,
+        Cmd::Escalations { drain } => Request::Escalations { drain },
         Cmd::Tui => {
             return tui::run(&sock).await;
         }
@@ -289,8 +343,37 @@ async fn main() -> Result<()> {
                     client_id,
                     client_secret,
                     callback_base,
-                } => oauth_cmd::login(home, provider, client_id, client_secret, callback_base).await,
+                    authorize_url,
+                    token_url,
+                    scope,
+                    userinfo_url,
+                    urn_template,
+                    id_field,
+                } => {
+                    oauth_cmd::login(
+                        home,
+                        provider,
+                        client_id,
+                        client_secret,
+                        callback_base,
+                        authorize_url,
+                        token_url,
+                        scope,
+                        userinfo_url,
+                        urn_template,
+                        id_field,
+                    )
+                    .await
+                }
                 OauthCmd::Logout { provider } => oauth_cmd::logout(home, provider).await,
+            };
+        }
+        // The Claude Max/Pro login is a local OAuth flow (browser + secret store); no daemon socket.
+        Cmd::Anthropic { cmd } => {
+            return match cmd {
+                AnthropicCmd::Login { paste } => anthropic_cmd::login(paste).await,
+                AnthropicCmd::Status => anthropic_cmd::status(),
+                AnthropicCmd::Logout => anthropic_cmd::logout(),
             };
         }
     };

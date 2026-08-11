@@ -1,4 +1,5 @@
 use anyhow::Result;
+use pacewright_adapter_agent::{AgentAdapter, AnthropicCompleter, Completer};
 use pacewright_adapter_dummy::DummyAdapter;
 use pacewright_adapter_recipe::{
     schedule, AuthManager, RecipeAdapter, RecipeRegistry, RecipeRunner,
@@ -38,9 +39,31 @@ pub struct Server {
 pub fn build_adapter_registry(
     recipe_registry: &Arc<RecipeRegistry>,
     recipe_runner: &Arc<dyn RecipeRunner>,
+    store: &Arc<pacewright_core::store::Store>,
+    clock: &Arc<dyn pacewright_core::clock::Clock>,
 ) -> AdapterRegistry {
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
+    // The reasoning adapter: `agent/ask` + `agent/adjudicate` (aliased `claude/*`), backed by the
+    // Anthropic Messages API. One shared transport; auth comes from the daemon's env at call time.
+    // A recipe prefix `agent`/`claude` cannot shadow these (built-ins win the collision below).
+    let completer: Arc<dyn Completer> = Arc::new(AnthropicCompleter::new());
+    reg.register(Arc::new(AgentAdapter::with_completer(
+        "agent",
+        completer.clone(),
+    )));
+    reg.register(Arc::new(AgentAdapter::with_completer("claude", completer)));
+    // The full `claude -p` agent step (filesystem + tools), distinct from the single-turn `agent`.
+    // Absorbs book-promo and the paced LinkedIn/X commenting rounds with a daemon-owned cap (R1+R4).
+    reg.register(Arc::new(
+        pacewright_adapter_agent::claude_cli::ClaudeCliAdapter::new("claude_cli"),
+    ));
+    // The built-in pipeline launcher: `pipeline/start` kicks a fresh dated run so a scan-then-act
+    // pipeline can recur on the declarative schedule.
+    reg.register(Arc::new(crate::pipeline_adapter::PipelineAdapter::new(
+        store.clone(),
+        clock.clone(),
+    )));
     for adapter_name in recipe_registry.adapters() {
         if reg.get(&adapter_name).is_some() {
             tracing::warn!("recipe prefix `{adapter_name}` collides with a built-in adapter — skipping the recipe-backed one");
@@ -92,7 +115,7 @@ async fn handle_auth(srv: &Server, req: &Request) -> Option<Response> {
         },
         // Open the headed login window and stop. We deliberately do NOT drive the browser while the
         // human signs in — an automated recheck loop here would navigate the very profile being
-        // logged into, spawning tabs and interrupting sign-in (fatal on bot-sensitive LinkedIn). The
+        // logged into, spawning tabs and interrupting sign-in (fatal on a bot-sensitive site). The
         // operator runs `pcw auth recheck <account>` when done; that reads the session and flips the
         // account green (and clears `logging_in`).
         Request::AuthLogin { account } => match srv.auth.login(account).await {
@@ -240,7 +263,12 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                     .collect();
                 Ok(serde_json::json!({ "date": date, "counters": counters }))
             }
-            Request::RunStart { pipeline, run_id, params, retry_failed } => {
+            Request::RunStart {
+                pipeline,
+                run_id,
+                params,
+                retry_failed,
+            } => {
                 // Pipelines live beside recipes: ~/.pacewright/recipes/pipelines/<name>.kdl
                 // with '/' in the pipeline name flattened to '-'.
                 let dir = std::env::var("PACEWRIGHT_HOME")
@@ -253,10 +281,12 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 let file = dir.join(format!("{}.kdl", pipeline.replace('/', "-")));
                 let src = std::fs::read_to_string(&file)
                     .map_err(|err| format!("cannot read {}: {err}", file.display()))?;
-                let def = pacewright_core::pipeline::parse_pipeline(&src).map_err(|e| e.to_string())?;
+                let def =
+                    pacewright_core::pipeline::parse_pipeline(&src).map_err(|e| e.to_string())?;
                 let now = e.clock.now_ms();
                 let requeued = if retry_failed {
-                    pacewright_core::run::retry_failed(&e.store, &run_id, now).map_err(|e| e.to_string())?
+                    pacewright_core::run::retry_failed(&e.store, &run_id, now)
+                        .map_err(|e| e.to_string())?
                 } else {
                     0
                 };
@@ -270,13 +300,25 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 }))
             }
             Request::RunList => {
-                let mut runs: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
-                    Default::default();
-                for t in e.store.list_tasks(None, i64::MAX).map_err(|e| e.to_string())? {
-                    let Some(rid) = t.run_id.clone() else { continue };
+                let mut runs: std::collections::BTreeMap<
+                    String,
+                    serde_json::Map<String, serde_json::Value>,
+                > = Default::default();
+                for t in e
+                    .store
+                    .list_tasks(None, i64::MAX)
+                    .map_err(|e| e.to_string())?
+                {
+                    let Some(rid) = t.run_id.clone() else {
+                        continue;
+                    };
                     let entry = runs.entry(rid).or_default();
                     let k = t.status.as_str().to_string();
-                    let n = entry.get(&k).and_then(serde_json::Value::as_i64).unwrap_or(0) + 1;
+                    let n = entry
+                        .get(&k)
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0)
+                        + 1;
                     entry.insert(k, serde_json::Value::from(n));
                 }
                 let list: Vec<_> = runs
@@ -286,10 +328,10 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 Ok(serde_json::json!({ "runs": list }))
             }
             Request::RunShow { run_id } => {
-                let steps: Vec<_> = e
-                    .store
-                    .tasks_in_run(&run_id)
-                    .map_err(|e| e.to_string())?
+                let tasks = e.store.tasks_in_run(&run_id).map_err(|e| e.to_string())?;
+                // Collapse the pipeline's `output` block into a report of (verified) values.
+                let output = pacewright_core::run::resolve_output(&tasks);
+                let steps: Vec<_> = tasks
                     .into_iter()
                     .map(|t| {
                         let name = t.step_name.clone().unwrap_or_default();
@@ -312,7 +354,7 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                         })
                     })
                     .collect();
-                Ok(serde_json::json!({ "run_id": run_id, "steps": steps }))
+                Ok(serde_json::json!({ "run_id": run_id, "steps": steps, "output": output }))
             }
             Request::Adapters => {
                 let list: Vec<_> = e
@@ -339,12 +381,66 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 )
             }
             Request::Pause { scope } => {
-                e.pause(scope.clone());
+                e.pause(scope.clone()).map_err(|e| e.to_string())?;
                 Ok(serde_json::json!({ "scope": scope, "paused": true }))
             }
             Request::Resume { scope } => {
-                e.resume(&scope);
+                e.resume(&scope).map_err(|e| e.to_string())?;
                 Ok(serde_json::json!({ "scope": scope, "paused": false }))
+            }
+            Request::Digest => {
+                use chrono::{Local, TimeZone};
+                let all = e
+                    .store
+                    .list_tasks(None, i64::MAX)
+                    .map_err(|e| e.to_string())?;
+                let now = Local::now();
+                let midnight_ms = now
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .and_then(|d| Local.from_local_datetime(&d).single())
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(0);
+                let today = |t: &Task| t.finished_at.is_some_and(|f| f >= midnight_ms);
+                let (mut ran, mut running, mut queued) = (0i64, 0i64, 0i64);
+                let mut failed = Vec::new();
+                for t in &all {
+                    match t.status {
+                        TaskStatus::Succeeded if today(t) => ran += 1,
+                        TaskStatus::Failed if today(t) => failed.push(serde_json::json!({
+                            "id": t.id, "adapter": t.adapter, "action": t.action,
+                            "step": t.step_name, "run": t.run_id, "error": t.last_error,
+                        })),
+                        TaskStatus::Running => running += 1,
+                        TaskStatus::Pending | TaskStatus::Blocked | TaskStatus::Deferred => {
+                            queued += 1
+                        }
+                        _ => {}
+                    }
+                }
+                let paused = e.paused_scopes();
+                let escalations = crate::notify::list_escalations(false);
+                let failed_count = failed.len();
+                Ok(serde_json::json!({
+                    "date": now.format("%Y-%m-%d").to_string(),
+                    "ran_today": ran,
+                    "running": running,
+                    "queued": queued,
+                    "failed_today": failed,
+                    "paused_scopes": paused.clone(),
+                    "escalations": escalations.len(),
+                    // What needs a human: scopes to resume, failures to fix, and issues Claude was
+                    // asked to triage.
+                    "waiting_on_human": {
+                        "paused_scopes": paused,
+                        "failed_count": failed_count,
+                        "escalations": escalations.len(),
+                    },
+                }))
+            }
+            Request::Escalations { drain } => {
+                let items = crate::notify::list_escalations(drain);
+                Ok(serde_json::json!({ "count": items.len(), "escalations": items }))
             }
             Request::Subscribe => Ok(
                 serde_json::json!({ "note": "subscribe stream not enabled on this request path" }),
@@ -414,7 +510,8 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 // account recipes stay on the boot registry the AuthManager holds (needs a restart).
                 let fresh = Arc::new(RecipeRegistry::load_dir(&srv.recipes_dir));
                 let adapters = fresh.adapters();
-                e.registry = build_adapter_registry(&fresh, &srv.recipe_runner);
+                e.registry =
+                    build_adapter_registry(&fresh, &srv.recipe_runner, &e.store, &e.clock);
                 *srv.registry.write().unwrap() = fresh;
                 Ok(serde_json::json!({ "reloaded": true, "adapters": adapters }))
             }
@@ -482,7 +579,13 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                         let e = engine.lock().await;
                         match e.claim_one() {
                             Ok(Some(c)) => {
-                                Some((c, e.store.clone(), e.clock.clone(), e.browser.clone()))
+                                Some((
+                                    c,
+                                    e.store.clone(),
+                                    e.clock.clone(),
+                                    e.browser.clone(),
+                                    e.notifier.clone(),
+                                ))
                             }
                             Ok(None) => None,
                             Err(err) => {
@@ -491,7 +594,7 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                             }
                         }
                     };
-                    let Some((claimed, store, clock, browser)) = claimed else {
+                    let Some((claimed, store, clock, browser, notifier)) = claimed else {
                         break;
                     };
                     let handle = tokio::spawn(async move {
@@ -500,6 +603,7 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                             &*claimed.adapter,
                             &*clock,
                             browser,
+                            notifier,
                             claimed.task,
                         )
                         .await
@@ -605,18 +709,43 @@ mod tests {
     use pacewright_proto::AddTaskReq;
 
     #[tokio::test]
+    async fn test_agent_reasoning_adapter_is_registered() {
+        // "Involve Claude" must resolve to a real adapter, not `no_adapter`. Both the generic
+        // `agent` prefix and the `claude` alias are present with the ask + adjudicate actions and
+        // their own limit keys, so a scheduled task or a pipeline fallback can reach them.
+        let empty: Arc<RecipeRegistry> = Arc::new(RecipeRegistry::new());
+        let runner: Arc<dyn RecipeRunner> =
+            Arc::new(pacewright_adapter_recipe::CliRecipeRunner::new());
+        let store = Arc::new(pacewright_core::store::Store::open_in_memory().unwrap());
+        let clock: Arc<dyn pacewright_core::clock::Clock> =
+            Arc::new(pacewright_core::clock::SystemClock);
+        let reg = build_adapter_registry(&empty, &runner, &store, &clock);
+        for name in ["agent", "claude"] {
+            let a = reg
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} adapter missing"));
+            let actions: Vec<String> = a.actions().into_iter().map(|s| s.name).collect();
+            assert!(actions.contains(&"ask".to_string()), "{name} exposes ask");
+            assert!(
+                actions.contains(&"adjudicate".to_string()),
+                "{name} exposes adjudicate"
+            );
+            assert_eq!(a.limit_keys_for("ask"), vec![format!("{name}.ask")]);
+        }
+    }
+    #[tokio::test]
     async fn test_auth_list_reports_accounts_with_recipes_and_unknown_status() {
         let mut srv = test_server().await;
         let recipes = scratch("pcw-srv-auth");
         std::fs::create_dir_all(recipes.join("accounts")).unwrap();
         std::fs::write(
-            recipes.join("accounts/prevetted-riverside.kdl"),
-            "recipe \"accounts/prevetted-riverside\" { login-url \"https://riverside.com/login\"\n step { goto \"https://riverside.com/dashboard\" } }",
+            recipes.join("accounts/globex-account.kdl"),
+            "recipe \"accounts/globex-account\" { login-url \"https://globex.example/login\"\n step { goto \"https://globex.example/dashboard\" } }",
         )
         .unwrap();
         std::fs::write(
             recipes.join("rv.kdl"),
-            "recipe \"riverside/generate_magic_clips\" { auth account=\"prevetted-riverside\" }",
+            "recipe \"globex/generate_clips\" { auth account=\"globex-account\" }",
         )
         .unwrap();
         let registry = Arc::new(RecipeRegistry::load_dir(&recipes));
@@ -629,9 +758,9 @@ mod tests {
             Response::Ok(v) => {
                 let accts = v["accounts"].as_array().unwrap();
                 assert_eq!(accts.len(), 1);
-                assert_eq!(accts[0]["account"], "prevetted-riverside");
-                assert_eq!(accts[0]["login_url"], "https://riverside.com/login");
-                assert_eq!(accts[0]["recipes"][0], "riverside/generate_magic_clips");
+                assert_eq!(accts[0]["account"], "globex-account");
+                assert_eq!(accts[0]["login_url"], "https://globex.example/login");
+                assert_eq!(accts[0]["recipes"][0], "globex/generate_clips");
                 assert!(accts[0]["signed_in"].is_null(), "unknown before any check");
                 assert_eq!(accts[0]["logging_in"], false);
             }
@@ -672,14 +801,14 @@ mod tests {
             _ => panic!("adapters failed"),
         };
         assert!(
-            !names_before.iter().any(|n| n == "riverside"),
-            "riverside shouldn't exist pre-reload"
+            !names_before.iter().any(|n| n == "globex"),
+            "globex shouldn't exist pre-reload"
         );
 
         // Install a recipe, then reload.
         std::fs::write(
             recipes.join("rv.kdl"),
-            "recipe \"riverside/list_projects\" {}\n",
+            "recipe \"globex/list_projects\" {}\n",
         )
         .unwrap();
         let resp = handle_request(&srv, Request::RecipeReload).await;
@@ -690,19 +819,19 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|a| a == "riverside"));
+                    .any(|a| a == "globex"));
             }
             _ => panic!("reload failed"),
         }
 
-        // The engine now routes `riverside/*` to a recipe adapter, and the published registry sees it.
+        // The engine now routes `globex/*` to a recipe adapter, and the published registry sees it.
         let after = handle_request(&srv, Request::Adapters).await;
         match after {
             Response::Ok(v) => assert!(v["adapters"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|a| a["name"] == "riverside")),
+                .any(|a| a["name"] == "globex")),
             _ => panic!("adapters failed"),
         }
         assert!(srv
@@ -711,7 +840,7 @@ mod tests {
             .unwrap()
             .adapters()
             .iter()
-            .any(|n| n == "riverside"));
+            .any(|n| n == "globex"));
     }
 
     #[tokio::test]
@@ -921,6 +1050,48 @@ mod tests {
                 );
             }
             _ => panic!("status failed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_digest_reports_ran_failed_and_paused() {
+        let srv = test_server().await;
+        let now = chrono::Local::now().timestamp_millis();
+        {
+            let e = srv.engine.lock().await;
+            let mut ok = Task::new_now("dummy", "echo", serde_json::json!({}), now);
+            ok.status = TaskStatus::Succeeded;
+            ok.finished_at = Some(now);
+            e.store.insert_task(&ok).unwrap();
+            let mut bad = Task::new_now("dummy", "echo", serde_json::json!({}), now);
+            bad.status = TaskStatus::Failed;
+            bad.finished_at = Some(now);
+            bad.last_error = Some("logged out".into());
+            e.store.insert_task(&bad).unwrap();
+            let mut queued = Task::new_now("dummy", "echo", serde_json::json!({}), now);
+            queued.status = TaskStatus::Pending;
+            e.store.insert_task(&queued).unwrap();
+            e.pause("dummy".to_string()).unwrap();
+        }
+        match handle_request(&srv, Request::Digest).await {
+            Response::Ok(v) => {
+                assert!(
+                    v["ran_today"].as_i64().unwrap() >= 1,
+                    "the succeeded task is counted"
+                );
+                assert_eq!(v["queued"].as_i64().unwrap(), 1);
+                let failed = v["failed_today"].as_array().unwrap();
+                assert_eq!(failed.len(), 1);
+                assert_eq!(failed[0]["error"], "logged out");
+                let paused: Vec<String> =
+                    serde_json::from_value(v["paused_scopes"].clone()).unwrap();
+                assert!(
+                    paused.contains(&"dummy".to_string()),
+                    "paused scope surfaces for the human"
+                );
+                assert_eq!(v["waiting_on_human"]["failed_count"], 1);
+            }
+            other => panic!("digest failed: {other:?}"),
         }
     }
 }

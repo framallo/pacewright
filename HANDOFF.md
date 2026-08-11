@@ -1,5 +1,52 @@
 # pacewright — handoff
 
+## ⛔ START HERE — outreach fleet migration (2026-08-10)
+
+Built to `channels/pacewright-outreach-requirements-2026-08-10.md`. The engine gained the pieces the
+shell fleet needed, and the jobs are now declarative pacewright schedules. **233 tests pass, clippy
+`-D warnings` clean.** Not committed.
+
+### New engine capabilities (all tested)
+- **All-time dedup ledger (R7)** — `touched(scope,target_id,first_touched_at)` in `core::store`
+  (`is_touched`/`mark_touched`/`touched_count`). Replaces `mm-pitched-all.log` / `.apollo-revealed.txt`.
+- **Fan-out (R5)** — a pipeline `fanout after=<step> recipe=… items=… as=… scope=… id=… { params }`
+  block. On the producer step's success the runner turns its array `result` into one paced, deduped
+  act task per item (`core::run::materialize_fanout`), each keyed on the ledger id
+  (`dedup_key="touch:<scope>:<id>"`), spending the act recipe's `limit-key` for cap/gap, and marking
+  the ledger on its own success. `Task` gained `fanout`/`touch_scope`/`touch_id`.
+- **Escalation notifier — "call Claude when there is an issue"** — `core::notify::{Notifier,
+  EscalationEvent}` (+`NullNotifier`/`RecordingNotifier`). The runner escalates on terminal failure /
+  auto-paused scope. Daemon impl `daemon::notify::OutboxNotifier` writes
+  `~/.pacewright/escalations/*.json` (+ optional `claude -p` when `PACEWRIGHT_CLAUDE_NOTIFY=1`). Read
+  it via `pcw escalations [--drain]`, the MCP `escalations` tool, or the `digest`'s `waiting_on_human`.
+- **`claude_cli` adapter (R1 + R4)** — `claude_cli/run` shells a real `claude -p` (prompt/`prompt_file`,
+  `model`, `add_dir[]`, `cap_secs`) with a daemon-owned wall-clock cap and retry-on-fast-fail. This is
+  the "headless-claude round" the LinkedIn/X/book scripts hand-rolled with `caffeinate`/watchdog; now
+  it's a capped, escalating pacewright task. (`agent/ask` stays the single-turn API completer.)
+- **`pipeline` launcher** — built-in `pipeline/start` starts a fresh dated run (`<prefix>-YYYYMMDD`) so
+  a scan→act pipeline recurs on the declarative schedule. `schedule::partition` now accepts the
+  built-in adapters (`dummy`/`agent`/`claude`/`claude_cli`/`pipeline`).
+
+### The migrated fleet (deployed to `~/.pacewright`, canonical copies in `packaging/`)
+`schedules/outreach.toml` + `config.toml` (fleet caps) + `recipes/matchmaker-scan.kdl` +
+`recipes/pipelines/outreach-matchmaker.kdl`:
+- **matchmaker** → deterministic `outreach/matchmaker` pipeline (scan 5 categories → fan-out
+  `matchmaker/pitch`, cap 100/day, ledger dedup). The R5 showcase.
+- **linkedin-comment / x-engage / book-promo** → `claude_cli/run` schedules (the scripts already were
+  `claude -p` rounds; now daemon-capped + escalating instead of 8 launchd agents).
+- **linkedin-invitations** → scheduled `linkedin/invitations` recipe.
+- **x-harvest** → NOT migrated (deferred): a CSV-accumulating crawl needing a recipe result-sink
+  pacewright doesn't have; lowest spec priority; still runs as its launchd crawl.
+
+### Cutover (NOT done — your go; it starts real outreach)
+`packaging/cutover-outreach.sh` is reversible (`--undo`). It verifies the new daemon is up,
+`schedule apply`s, then unloads + archives the 6 migrated launchd plists (keeps `pacewright-chrome`,
+`caddy`, `paperclipai.server`, `linkedin-post-daily`, `x-harvest`). Run it deliberately once you
+restart the daemon on the new binary. Verified live in an isolated daemon: `pipeline/start`→dated run,
+terminal failure→escalation outbox+`pcw escalations`+digest; deterministic tests cover fan-out+ledger.
+**Live browser/`claude -p` runs were NOT exercised here** (need the logged-in Chrome + live sites).
+
+
 Last updated: 2026-07-17 (**single attached Chrome, one tab per site** — Phases 1–5 done + auth
 gate PASSED + recipes de-generated; uncommitted). Written for the next agent.
 
@@ -11,7 +58,7 @@ the browser layer — the section below is only the resume state.
 **What changed.** pacewright no longer lets chrome-agent *launch* a browser. It **attaches**
 (`--connect`) to one always-on, non-headless Google Chrome, and separates sites by named **tabs**
 instead of per-account browser profiles. Launching was the root cause of the auth bugs: a
-CDP-launched browser is a bot signal, so LinkedIn walled the profile and revoked `li_at`, and Google
+CDP-launched browser is a bot signal, so a social network walled the profile and revoked `li_at`, and Google
 refused sign-in outright.
 
 - account → `--page <account>` (was `--browser <account>`), one shared `--browser pacewright`
@@ -20,15 +67,15 @@ refused sign-in outright.
 - `auth login` no longer launches; it `--activate`s the account's tab for the human to sign in
 - browser reaper **deleted** (it was also silently broken — see plan, Phase 5)
 - `[browser] idle_timeout` → `[browser] connect` in `config.toml` (old key ignored, not fatal)
-- new `foreground #true` recipe flag → `--activate`; on `riverside/render_clips` only
+- new `foreground #true` recipe flag → `--activate`; on `globex/render_clips` only
 - `RunOpts { account, foreground }` replaces `run(.., auth, account)` — `auth` was dead
 
-**✅ Recipes are now static (was: generated).** Per Federico's directive, the riverside recipes are
+**✅ Recipes are now static (was: generated).** Per Federico's directive, the globex recipes are
 hand-maintained static `.kdl` files parameterized by `{{ url }}`/`{{ guest }}`, no generator. Root
-cause of the old generation: `youtube_export` was a compiled chrome-agent verb that no longer
+cause of the old generation: a compiled chrome-agent export verb that no longer
 exists (`recipe check` → unknown step verb), so the JS was inlined. That inlined form is canonical
 now. Headers rewritten, repo staging synced (it had held the dead-verb form), generator retired to
-`gen_recipes.py.RETIRED` + README. All six riverside recipes pass `chrome-agent recipe check`.
+`gen_recipes.py.RETIRED` + README. All six globex recipes pass `chrome-agent recipe check`.
 ⚠️ The external **awesome-recipes** repo (the real distribution channel per `.gitignore`) is not
 reachable from here and still needs the same static versions, or `pcw recipe add` reinstalls the
 dead verb form.
@@ -46,11 +93,11 @@ started, so committing would sweep that up. Separate the two before committing.
 loaded as a LaunchAgent (port 9222, profile `~/.pacewright/chrome-profile`). KeepAlive revival and
 attach self-heal across restarts are both verified live.
 
-**✅ AUTH GATE PASSED (2026-07-17).** Federico signed into Google + LinkedIn by hand; driven through
-`--connect`, YouTube Studio loaded signed in and LinkedIn survived a profile load with `li_at`
+**✅ AUTH GATE PASSED (2026-07-17).** Federico signed into Google + a social network by hand; driven through
+`--connect`, the social network survived a profile load with `li_at`
 intact (feed reload after still signed in). Google accepts sign-in on a `--remote-debugging-port`
-Chrome, and attach does NOT burn LinkedIn — the two things the whole refactor bet on. Riverside was
-not re-checked this session but is the same attach path.
+Chrome, and attach does NOT burn the social network — the two things the whole refactor bet on. The media
+platform was not re-checked this session but is the same attach path.
 
 **✅ Stale page-target auto-recovery (2026-07-17).** Fixed: `core::browser::is_stale_page_target`
 + `prune_stale_page`, wired into both `CliBrowser::run` and `CliRecipeRunner::run` — on a stale
@@ -59,7 +106,7 @@ tab. Bounded to a single retry. Pure logic unit-tested (`CHROME_AGENT_HOME`-scop
 wiring proven live by closing a tab mid-flight and watching `CliBrowser` recover on its own. A
 closed tab is no longer a silent task failure.
 
-**Next, in order:** (1) push the static riverside recipes to the external awesome-recipes repo (not
+**Next, in order:** (1) push the static globex recipes to the external awesome-recipes repo (not
 reachable from here); (2) handle the stale-page-target error class in the daemon (recreate + retry
 once); (3) `pcw chrome status` (must NOT trust `sessions.json`'s `headless` field — it reads `true`
 for attached sessions); (4) finish Phase 6 — retire the three launched profiles from
@@ -76,16 +123,16 @@ status cache, `pcw auth`, the Accounts panes — still stands.
 
 ## Recipe auth & login — account recipes + persistent sessions (2026-07-10)
 
-Running `riverside/generate_magic_clips` through pacewright 403'd: `chrome-agent --copy-cookies`
-copies a **static snapshot** of the everyday Chrome profile, and Riverside's access token has a
-**~9.5-minute TTL** — the snapshot is stale by the time the recipe runs (Google/YouTube: signed out
+Running `globex/generate_magic_clips` through pacewright 403'd: `chrome-agent --copy-cookies`
+copies a **static snapshot** of the everyday Chrome profile, and the media platform's access token has a
+**~9.5-minute TTL** — the snapshot is stale by the time the recipe runs (Google: signed out
 entirely). Fix: recipes reuse a **durable, self-refreshing per-account session**, and the operator
 can **establish + inspect** those sessions. Spec: `docs/specs/2026-07-10-recipe-auth-login.md`.
 
 **The model — a login IS a recipe.** Login procedures live under
 `~/.pacewright/recipes/accounts/<account>.kdl` (account name = file stem). An account recipe is a
 **normal recipe whose steps ARE the signed-in check**, plus a flat `login-url` node. A normal recipe
-references its account by evolving the `auth` flag: `auth account="prevetted-riverside"` (was `auth
+references its account by evolving the `auth` flag: `auth account="prevetted-globex"` (was `auth
 #true`). Recipes sharing an account share one session. chrome-agent needs **no changes** — `auth
 account=…` and `login-url` are unknown nodes it already ignores; account recipes run as ordinary
 recipes; `--headed` + persistent `--browser <name>` already exist.
@@ -111,18 +158,18 @@ recipes; `--headed` + persistent `--browser <name>` already exist.
   table/messages); web **Accounts** pane (4th tab, Log in / Recheck / Log in all); TUI **Accounts**
   pane (`tab` cycles Feed/Schedule/Limits/Accounts, `l`=login `r`=recheck on the selected row).
 
-**Verified live:** an `accounts/prevetted-riverside` recipe + a `riverside/generate_magic_clips`
-referencing it → daemon registered only the `riverside` task adapter (account excluded) → `pcw auth
+**Verified live:** an `accounts/prevetted-globex` recipe + a `globex/generate_magic_clips`
+referencing it → daemon registered only the `globex` task adapter (account excluded) → `pcw auth
 status` printed the account, `unknown`/never, with the recipe using it → `pcw auth login nope` errored
-cleanly, then a real interactive login on `prevetted-riverside` flipped it to **signed in** and the
+cleanly, then a real interactive login on `prevetted-globex` flipped it to **signed in** and the
 session persisted across a daemon restart.
 
 **Two gotchas the live run caught (do not relearn):**
 1. **`expect` is a TRIPWIRE** — it FAILS when its condition is TRUE (see `chrome-agent`
    `src/recipe/engine.rs`: `if condition_holds → return Err(on_fail)`). A signed-in check must trip on
-   the signed-OUT signal (`settled-url-matches #"riverside\.com/login"#`), NOT assert the signed-in URL.
+   the signed-OUT signal (`settled-url-matches #"globex\.com/login"#`), NOT assert the signed-in URL.
    My first account recipe had it inverted (tripped on `/dashboard`), so signed-in read as signed-out.
-2. **Regex in a locator/URL match must be a KDL raw string** (`#"riverside\.com/login"#`) — a plain
+2. **Regex in a locator/URL match must be a KDL raw string** (`#"globex\.com/login"#`) — a plain
    `"…\.…"` is an invalid KDL escape and the whole recipe fails to load.
 
 Deferred (spec §6): password-manager fill (`login-field`) — the account profile is an isolated
@@ -211,12 +258,12 @@ pacewright consumes it via `crates/adapter-recipe`:
   browser/page). The child's `[Terminal]/[Retryable]/[RateLimited]` tag is recovered into
   the pacewright error class. Pacing is unchanged (recipe declares `limit-key`s).
 - **Vault job-runner** — `pcw recipe job <note.md>` reads a note's YAML frontmatter
-  (`recipe: linkedin/scrape_profile` + var fields), binds frontmatter→vars (honoring `from`
+  (`recipe: acme/scrape_profile` + var fields), binds frontmatter→vars (honoring `from`
   aliases + `vault`/`out_dir`/`slug`/`note` context), and enqueues a **paced** task deduped
   on the note path. The recipe's `output` blocks write the md/JSON note back into the vault.
 
-To run the LinkedIn testbed end to end: `pcw recipe add <repo>` (or drop the testbed
-`.kdl` under `~/.pacewright/recipes/`), then `pcw add linkedin scrape_profile --params
+To run the acme testbed end to end: `pcw recipe add <repo>` (or drop the testbed
+`.kdl` under `~/.pacewright/recipes/`), then `pcw add acme scrape_profile --params
 '{"url":"…"}'` or `pcw recipe job <note>`. Needs the `chrome-agent` binary from the fork on
 PATH (build it in `~/work/chrome-agent`).
 
@@ -248,8 +295,8 @@ Full context: `README.md` (architecture, CLI, config, roadmap). Design spec:
 - `browser` — `CliBrowser`: the real `BrowserHandle`, drives the `chrome-agent` CLI (per-verb).
 - `adapter-recipe` — `RecipeAdapter` + `RecipeRegistry` + `RecipeRunner`: runs declarative KDL
   recipes as paced tasks by shelling `chrome-agent recipe run` (whole recipe in one process).
-  **Replaced the hand-written `adapter-linkedin`** — site logic is now a `.kdl` recipe (the
-  `linkedin/scrape_profile` testbed recipe lives gitignored under `/recipes/`, never committed).
+  **Replaced the hand-written `adapter-acme`** — site logic is now a `.kdl` recipe (the
+  `acme/scrape_profile` testbed recipe lives gitignored under `/recipes/`, never committed).
 
 ## Non-negotiable design invariants (do not break these)
 
@@ -301,10 +348,10 @@ Commit-message trailer convention used in this repo:
 ## State of the tree (git log, newest first)
 
 ```
-7f8372a docs: refresh HANDOFF — browser seam, first real LinkedIn task, chrome-agent gotchas
-c4f26c7 Merge m2-browser-seam: BrowserHandle seam + CliBrowser + LinkedIn adapter
-cb6ad99 fix(browser,linkedin): isolate chrome-agent page; check settled state after goto
-382218a feat: CliBrowser + LinkedIn profile adapter, wired into the daemon
+7f8372a docs: refresh HANDOFF — browser seam, first real acme task, chrome-agent gotchas
+c4f26c7 Merge m2-browser-seam: BrowserHandle seam + CliBrowser + acme adapter
+cb6ad99 fix(browser,acme): isolate chrome-agent page; check settled state after goto
+382218a feat: CliBrowser + acme profile adapter, wired into the daemon
 3d0e143 feat(core): BrowserHandle seam — trait in RunCtx, threaded through the runner
 d3164f7 docs: add implementation plan for chrome-agent fork (M2 workstream 1)
 4a218ad docs: add chrome-agent fork spec (M2 workstream 1 — lib API + §9 extensions)
@@ -324,14 +371,14 @@ and deleted — history is preserved by the `--no-ff` merge commits above.
    only the trait — no impl — so it stays deterministic and browser-free.
    `BrowserError → AdapterError`: navigation/io are `Retryable`, unavailable/eval `Terminal`.
 
-2. **`CliBrowser` + `LinkedInAdapter`.** `scrape_profile` runs against real LinkedIn today
-   (see "Running a real LinkedIn task"). The adapter declares `linkedin.profile_scrape`, so
-   pacing is enforced by the engine, not the adapter. URLs are validated to `linkedin.com`
+2. **`CliBrowser` + `AcmeAdapter`.** `scrape_profile` runs against the real site today
+   (see "Running a real acme task"). The adapter declares `acme.profile_scrape`, so
+   pacing is enforced by the engine, not the adapter. URLs are validated to `acme.com`
    over https so a queued task can't repoint the adapter at an arbitrary host.
 
 3. **Two bugs found only by actually running it** — both now regression-tested, and both
    written up under "chrome-agent gotchas": the machine-global `default` page collision
-   (the Riverside tooling navigated our page mid-task), and `goto` echoing the requested
+   (the media-platform tooling navigated our page mid-task), and `goto` echoing the requested
    URL so auth-wall detection read a stale URL.
 
 4. **`recipe add`/`list` (recipe distribution).** `crates/cli/src/recipe_install.rs`.
@@ -343,20 +390,20 @@ and deleted — history is preserved by the `--no-ff` merge commits above.
    `install_from_dir` so discover/validate/copy/record is unit-tested against a local dir;
    the live git path has an `#[ignore]`d smoke test. NOTE: this installs recipes as *data*;
    the engine that *executes* KDL recipes is not built yet (needs the chrome-agent fork — see
-   roadmap). LinkedIn recipes live in `/recipes/` (gitignored) as a local testbed only.
+   roadmap). acme recipes live in `/recipes/` (gitignored) as a local testbed only.
 
 Progress ledger with full detail: `.superpowers/sdd/progress.md` (gitignored, local only).
 
-## Running a real LinkedIn task (works today)
+## Running a real acme task (works today)
 
 ```bash
 cargo build --release
 ./target/release/pacewrightd &                       # or restart the existing one
-./target/release/pacewright adapters                 # linkedin/scrape_profile should be listed
-./target/release/pacewright add linkedin scrape_profile \
-    --params '{"url":"https://www.linkedin.com/in/me/"}'
+./target/release/pacewright adapters                 # acme/scrape_profile should be listed
+./target/release/pacewright add acme scrape_profile \
+    --params '{"url":"https://www.example.com/in/me/"}'
 ./target/release/pacewright get <id>                 # result = scraped profile JSON
-./target/release/pacewright limits                   # linkedin.profile_scrape counter incremented
+./target/release/pacewright limits                   # acme.profile_scrape counter incremented
 ```
 
 `/in/me/` resolves to your own profile — it proves the authenticated path **without**
@@ -371,32 +418,32 @@ while logged in does notify them; keep that in mind before pointing this at lead
    auth wall. Fix: `chrome-agent --browser pacewright close --purge`, then retry.
 2. **chrome-agent's browsers and pages are *named and global to the machine*.** At the
    defaults every consumer shares one browser and one page called `default`. The
-   Riverside/podcast tooling on this box drives that page. Because `goto` and `eval` are
+   media-platform/podcast tooling on this box drives that page. Because `goto` and `eval` are
    separate subprocesses, a concurrent consumer can navigate the page between them — we
-   observed an eval intended for a LinkedIn profile return `riverside.com`. `CliBrowser`
+   observed an eval intended for an acme profile return `globex.com`. `CliBrowser`
    therefore pins `--browser pacewright --page pacewright` on **every** verb. Never let
    pacewright touch the `default` page.
 
 Related: `goto` echoes the **requested** URL, not the post-redirect one. Always read the
 settled `location.href`/`document.title` back via `eval` before deciding anything (this is
-how `LinkedInAdapter` detects auth walls). And LinkedIn ships build-hashed class names
+how `AcmeAdapter` detects auth walls). And the site ships build-hashed class names
 (`e6590096 _3293afb7 …`) — class-based selectors rot instantly; anchor on the `<main>`
 heading and stable text patterns instead.
 
 ## Roadmap — what to build next
 
 M1 (core engine) is DONE. **M2's in-repo browser seam is DONE**, and **M3's first slice
-(`linkedin/scrape_profile`) runs against real LinkedIn.**
+(`acme/scrape_profile`) runs against the real site.**
 
 | M | Scope | State |
 |---|---|---|
 | M2a | **Browser handle in `RunCtx`** (`BrowserHandle` trait + `CliBrowser` + `FakeBrowser`) | ✅ done |
 | M2b | Fork chrome-agent → **KDL recipe engine** (superseded the lib-facade plan) | ✅ engine + write/HTTP verbs done on `feat/recipe-engine` (held); upstream PR held |
 | M2c | pacewright `adapter-recipe` (RecipeAdapter/Registry/Runner) + vault job-runner | ✅ done (this session) |
-| M3 | LinkedIn **profile** adapter | ✅ now a `linkedin/scrape_profile` **recipe** (Rust `adapter-linkedin` deleted); avatar capture not started |
-| M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter | not started |
-| M5 | Riverside adapter (extract raw, export magic clips → Spotify → YouTube unlisted) | not started |
-| M6 | YouTube adapter + daily limits | not started |
+| M3 | **profile** adapter | ✅ now a `acme/scrape_profile` **recipe** (Rust `adapter-acme` deleted); avatar capture not started |
+| M4 | **post / edit-mentions / reply-comments** + **pages** adapter | not started |
+| M5 | globex adapter (extract raw, export magic clips → Spotify → unlisted upload) | not started |
+| M6 | Content-platform upload adapter + daily limits | not started |
 | M7 | MCP server + Claude skill | not started |
 | M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz | not started |
 
@@ -408,14 +455,14 @@ published to crates.io but is **binary-only** (`[[bin]]`, `autolib = false`, no 
 so `cargo add chrome-agent` gives you nothing callable. That fork is still the intended
 substrate.
 
-To get a *working* LinkedIn task without blocking on the fork, `BrowserHandle`'s first impl
+To get a *working* acme task without blocking on the fork, `BrowserHandle`'s first impl
 (`CliBrowser`) shells out to the chrome-agent **CLI**. The trait's methods deliberately
 mirror the fork's planned `Page` API (`goto`/`eval`/`screenshot`), so a native
 `chrome_agent::Session`-backed impl drops in behind the same trait with **zero adapter
 changes**. Nothing about the fork plan is invalidated; it just isn't on the critical path.
 
 **Recommended next step:** either (a) build the fork per the existing plan and swap in a
-`NativeBrowser`, or (b) extend the LinkedIn adapter (avatar capture needs `screenshot` +
+`NativeBrowser`, or (b) extend the acme adapter (avatar capture needs `screenshot` +
 the viewport fix, which is exactly what the fork's §5.1 delivers — so (a) unblocks it).
 
 ## Remaining M1 "known gaps" (deferred, not bugs — see README)
@@ -437,14 +484,14 @@ the viewport fix, which is exactly what the fork's §5.1 delivers — so (a) unb
 - **The tick loop holds the engine lock for the whole task.** `serve()` does
   `let e = engine.lock().await; e.tick().await`, and `handle_request` also locks the engine.
   M1's tasks were microseconds; a browser task is seconds-to-90s, so a long
-  `linkedin/scrape_profile` will block every RPC (`status`, `list`, the TUI's 1s poll) until
+  `acme/scrape_profile` will block every RPC (`status`, `list`, the TUI's 1s poll) until
   it finishes. Worth fixing before browser tasks get common: run tasks outside the lock, or
   hold the lock only for store/registry reads.
 - **`CliBrowser` has one page.** Concurrent browser tasks in the same tick would interleave
   `goto`/`eval` on the same chrome-agent page and corrupt each other, the same way the
-  Riverside tooling corrupted us. Today the engine runs tasks sequentially, so this is
+  media-platform tooling corrupted us. Today the engine runs tasks sequentially, so this is
   latent — but any move to parallel task execution must give each task its own `--page`.
-- `LinkedInAdapter`'s `headline`/`location` are positional guesses over `top_card`. The raw
+- `AcmeAdapter`'s `headline`/`location` are positional guesses over `top_card`. The raw
   `top_card` array is returned precisely so this can be remapped without a redeploy. Avatar
   capture (M3's other half) needs `screenshot` + a real viewport (chrome-agent's default
   caps around ~469px) — i.e. it needs the fork.
@@ -467,8 +514,8 @@ the viewport fix, which is exactly what the fork's §5.1 delivers — so (a) unb
 2. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` —
    confirm the 72-test / clippy-clean baseline before changing anything.
 3. Read `docs/specs/2026-07-07-core-engine-design.md`, then `crates/core/src/browser.rs`
-   (the `BrowserHandle` seam) and `crates/adapter-linkedin/src/lib.rs`.
-4. Prove the stack still works end-to-end: run a real LinkedIn task (see the section above).
+   (the `BrowserHandle` seam) and `crates/adapter-acme/src/lib.rs`.
+4. Prove the stack still works end-to-end: run a real acme task (see the section above).
    If it hits an auth wall, re-read the two chrome-agent gotchas — it is almost always the
    fresh-launch cookie copy.
 5. Then pick up the chrome-agent fork (`docs/plans/2026-07-07-chrome-agent-fork-lib.md`)

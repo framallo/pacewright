@@ -35,7 +35,7 @@ pub trait LoginLauncher: Send + Sync {
 /// Despite the name, it no longer *launches* anything — it attaches to the operator's always-on
 /// Chrome and raises the account's tab. That distinction is the whole fix: a chrome-agent-launched
 /// browser is a bot signal, so the old launcher burnt the very session it was trying to establish
-/// (LinkedIn walls the profile and revokes `li_at`) and Google refused sign-in on it outright.
+/// (acme walls the profile and revokes `li_at`) and Google refused sign-in on it outright.
 pub struct CliLoginLauncher {
     bin: String,
     connect: String,
@@ -52,7 +52,8 @@ impl CliLoginLauncher {
     pub fn new() -> Self {
         Self {
             bin: std::env::var("CHROME_AGENT_BIN").unwrap_or_else(|_| "chrome-agent".to_string()),
-            connect: default_connect_endpoint().unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string()),
+            connect: default_connect_endpoint()
+                .unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string()),
             browser_name: "pacewright".to_string(),
         }
     }
@@ -72,10 +73,15 @@ impl CliLoginLauncher {
     /// No `--headed`: the attached Chrome is visible by definition.
     fn login_args<'a>(&'a self, account: &'a str, login_url: &'a str) -> Vec<&'a str> {
         vec![
-            "--connect", &self.connect,
-            "--browser", &self.browser_name,
-            "--page", account,
-            "--activate", "--stealth", "goto",
+            "--connect",
+            &self.connect,
+            "--browser",
+            &self.browser_name,
+            "--page",
+            account,
+            "--activate",
+            "--stealth",
+            "goto",
             login_url,
         ]
     }
@@ -177,7 +183,10 @@ impl AuthManager {
         let path = meta.path.clone();
         // The signed-in check runs in the account's own tab, in the background: it must not steal
         // focus from whatever the operator is doing, and reading a session needs no foreground.
-        let outcome = self.runner.run(&path, "{}", &RunOpts::account(account)).await;
+        let outcome = self
+            .runner
+            .run(&path, "{}", &RunOpts::account(account))
+            .await;
         let signed_in = match outcome {
             Ok(_) => Some(true),
             // The recipe's `expect on-fail="terminal"` fires when signed out.
@@ -191,13 +200,19 @@ impl AuthManager {
             // A recheck concludes any in-flight login: read the session, drop "logging in…".
             s.logging_in = false;
         });
-        Ok(self.status.lock().unwrap().get(account).cloned().unwrap_or_default())
+        Ok(self
+            .status
+            .lock()
+            .unwrap()
+            .get(account)
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// Open a headed login window for `account` and mark it `logging_in`. Does not block on the
     /// human and, deliberately, does NOT start any automated recheck: driving the browser while the
     /// operator signs in would navigate the very profile being logged into (spawning tabs, breaking
-    /// bot-sensitive sign-ins like LinkedIn). The operator triggers `recheck` when done, which reads
+    /// bot-sensitive sign-ins like acme). The operator triggers `recheck` when done, which reads
     /// the session and clears `logging_in`.
     pub async fn login(&self, account: &str) -> Result<(), String> {
         let Some(meta) = self.registry.account(account) else {
@@ -207,13 +222,14 @@ impl AuthManager {
         // the operator sees the app; signed out → the app redirects them to sign in. Fall back to
         // `login-url` only when the recipe declares no `goto` home.
         let Some(url) = meta.home_url.clone().or_else(|| meta.login_url.clone()) else {
-            return Err(format!("account `{account}` declares no home (`goto`) or `login-url`"));
+            return Err(format!(
+                "account `{account}` declares no home (`goto`) or `login-url`"
+            ));
         };
         self.launcher.open(account, &url).await?;
         self.set(account, |s| s.logging_in = true);
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -229,7 +245,10 @@ mod tests {
     #[async_trait]
     impl LoginLauncher for FakeLauncher {
         async fn open(&self, account: &str, login_url: &str) -> Result<(), String> {
-            self.opened.lock().unwrap().push((account.into(), login_url.into()));
+            self.opened
+                .lock()
+                .unwrap()
+                .push((account.into(), login_url.into()));
             Ok(())
         }
     }
@@ -238,25 +257,34 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "pcw-auth-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(dir.join("accounts")).unwrap();
         std::fs::write(
-            dir.join("accounts/prevetted-riverside.kdl"),
-            "recipe \"accounts/prevetted-riverside\" { login-url \"https://riverside.com/login\"\n step { goto \"https://riverside.com/dashboard\" } }",
+            dir.join("accounts/globex-account.kdl"),
+            "recipe \"accounts/globex-account\" { login-url \"https://globex.example/login\"\n step { goto \"https://globex.example/dashboard\" } }",
         )
         .unwrap();
         std::fs::write(
             dir.join("rv.kdl"),
-            "recipe \"riverside/generate_magic_clips\" { auth account=\"prevetted-riverside\"\n var \"project_id\" required=#true }",
+            "recipe \"globex/generate_clips\" { auth account=\"globex-account\"\n var \"project_id\" required=#true }",
         )
         .unwrap();
         Arc::new(RecipeRegistry::load_dir(&dir))
     }
 
     fn mgr(runner: Arc<dyn RecipeRunner>) -> (Arc<AuthManager>, Arc<FakeLauncher>) {
-        let launcher = Arc::new(FakeLauncher { opened: Mutex::new(vec![]) });
-        let m = Arc::new(AuthManager::new(registry_with_account(), runner, launcher.clone()));
+        let launcher = Arc::new(FakeLauncher {
+            opened: Mutex::new(vec![]),
+        });
+        let m = Arc::new(AuthManager::new(
+            registry_with_account(),
+            runner,
+            launcher.clone(),
+        ));
         (m, launcher)
     }
 
@@ -265,9 +293,12 @@ mod tests {
         let (m, _) = mgr(Arc::new(FakeRecipeRunner::ok(json!({"ok": true}))));
         let list = m.list();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].account, "prevetted-riverside");
-        assert_eq!(list[0].login_url.as_deref(), Some("https://riverside.com/login"));
-        assert_eq!(list[0].recipes, vec!["riverside/generate_magic_clips".to_string()]);
+        assert_eq!(list[0].account, "globex-account");
+        assert_eq!(
+            list[0].login_url.as_deref(),
+            Some("https://globex.example/login")
+        );
+        assert_eq!(list[0].recipes, vec!["globex/generate_clips".to_string()]);
         assert_eq!(list[0].status.signed_in, None, "unknown before any check");
     }
 
@@ -275,11 +306,11 @@ mod tests {
     async fn recheck_ok_run_is_signed_in() {
         let runner = Arc::new(FakeRecipeRunner::new(|p: &Path, _| {
             // the check runs the account recipe in its own profile
-            assert!(p.to_string_lossy().contains("prevetted-riverside"));
+            assert!(p.to_string_lossy().contains("globex-account"));
             Ok(json!({"ok": true, "unexpected": []}))
         }));
         let (m, _) = mgr(runner);
-        let st = m.recheck("prevetted-riverside", 1000).await.unwrap();
+        let st = m.recheck("globex-account", 1000).await.unwrap();
         assert_eq!(st.signed_in, Some(true));
         assert_eq!(st.last_checked_ms, Some(1000));
         assert_eq!(m.list()[0].status.signed_in, Some(true));
@@ -291,13 +322,19 @@ mod tests {
             Err(AdapterError::Terminal("signed out".into()))
         }));
         let (m, _) = mgr(signed_out);
-        assert_eq!(m.recheck("prevetted-riverside", 5).await.unwrap().signed_in, Some(false));
+        assert_eq!(
+            m.recheck("globex-account", 5).await.unwrap().signed_in,
+            Some(false)
+        );
 
         let flaky = Arc::new(FakeRecipeRunner::new(|_: &Path, _| {
             Err(AdapterError::Retryable("nav timeout".into()))
         }));
         let (m2, _) = mgr(flaky);
-        assert_eq!(m2.recheck("prevetted-riverside", 6).await.unwrap().signed_in, None);
+        assert_eq!(
+            m2.recheck("globex-account", 6).await.unwrap().signed_in,
+            None
+        );
     }
 
     #[tokio::test]
@@ -306,9 +343,15 @@ mod tests {
         // signed-in operator lands on the app and sees they're in; signed out, the app bounces them
         // to sign in. Opening `/login` unconditionally shows a login form even when already signed in.
         let (m, launcher) = mgr(Arc::new(FakeRecipeRunner::ok(json!({"ok": true}))));
-        m.login("prevetted-riverside").await.unwrap();
+        m.login("globex-account").await.unwrap();
         let opened = launcher.opened.lock().unwrap();
-        assert_eq!(opened[0], ("prevetted-riverside".to_string(), "https://riverside.com/dashboard".to_string()));
+        assert_eq!(
+            opened[0],
+            (
+                "globex-account".to_string(),
+                "https://globex.example/dashboard".to_string()
+            )
+        );
         assert!(m.list()[0].status.logging_in);
     }
 
@@ -320,9 +363,9 @@ mod tests {
         // single `recheck` reads the session and clears the flag. Without this, a manual recheck
         // after login would report "signed in" yet still show "logging in…" forever.
         let (m, _) = mgr(Arc::new(FakeRecipeRunner::ok(json!({"ok": true}))));
-        m.login("prevetted-riverside").await.unwrap();
+        m.login("globex-account").await.unwrap();
         assert!(m.list()[0].status.logging_in, "login marks logging_in");
-        let st = m.recheck("prevetted-riverside", 1000).await.unwrap();
+        let st = m.recheck("globex-account", 1000).await.unwrap();
         assert!(!st.logging_in, "recheck clears logging_in");
         assert_eq!(st.signed_in, Some(true));
     }
@@ -330,16 +373,23 @@ mod tests {
     #[test]
     fn login_attaches_and_never_launches_a_browser() {
         // THE FIX. `auth login` used to LAUNCH a headed browser per account, and launching is what
-        // breaks sign-in: LinkedIn walls a CDP-launched profile and revokes `li_at` (so logging in
+        // breaks sign-in: acme walls a CDP-launched profile and revokes `li_at` (so logging in
         // burnt the very session it was establishing), and Google refuses sign-in on one outright
-        // — which is why `auth login prevetted-youtube` hung at "logging in…" forever.
+        // — which is why `auth login` for such an account hung at "logging in…" forever.
         // Now it attaches to the always-on Chrome the human already uses and just brings the
         // account's tab forward for them to sign into.
         let l = CliLoginLauncher::new();
-        let args = l.login_args("prevetted-linkedin", "https://x/login");
-        let pos = |f: &str| args.iter().position(|a| *a == f).unwrap_or_else(|| panic!("{f} absent: {args:?}"));
+        let args = l.login_args("acme-account", "https://x/login");
+        let pos = |f: &str| {
+            args.iter()
+                .position(|a| *a == f)
+                .unwrap_or_else(|| panic!("{f} absent: {args:?}"))
+        };
         assert_eq!(args[pos("--connect") + 1], DEFAULT_CHROME_CONNECT);
-        assert!(!args.contains(&"--headed"), "attached Chrome is visible by definition: {args:?}");
+        assert!(
+            !args.contains(&"--headed"),
+            "attached Chrome is visible by definition: {args:?}"
+        );
     }
 
     #[test]
@@ -349,14 +399,23 @@ mod tests {
         // authed recipe run reuse (see `CliRecipeRunner::args`), so the check reads the very page
         // the human logged into rather than spawning a second tab that navigates away.
         let l = CliLoginLauncher::new();
-        let args = l.login_args("prevetted-linkedin", "https://x/login");
-        assert!(args.contains(&"--activate"), "must raise the window: {args:?}");
-        assert_eq!(args[args.iter().position(|a| *a == "--page").unwrap() + 1], "prevetted-linkedin");
+        let args = l.login_args("acme-account", "https://x/login");
+        assert!(
+            args.contains(&"--activate"),
+            "must raise the window: {args:?}"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| *a == "--page").unwrap() + 1],
+            "acme-account"
+        );
         assert_eq!(args.last(), Some(&"https://x/login"));
         // and each account lands on its own tab, not a shared `main`
         let l2 = CliLoginLauncher::new();
-        let rv = l2.login_args("prevetted-riverside", "https://y/login");
-        assert_eq!(rv[rv.iter().position(|a| *a == "--page").unwrap() + 1], "prevetted-riverside");
+        let rv = l2.login_args("globex-account", "https://y/login");
+        assert_eq!(
+            rv[rv.iter().position(|a| *a == "--page").unwrap() + 1],
+            "globex-account"
+        );
     }
 
     #[tokio::test]

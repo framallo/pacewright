@@ -1,7 +1,7 @@
 # pacewright `auth login` — status & pause note (2026-07-15)
 
 **State: PAUSED.** Interactive `auth login` UX is fixed and shipped. The blocker that stopped us is
-that a **chrome-agent-launched** browser trips LinkedIn bot detection — see "Open blocker" below.
+that a **chrome-agent-launched** browser trips acme's bot detection — see "Open blocker" below.
 
 ## Shipped this session (all TDD, clippy `-D warnings` clean)
 
@@ -21,7 +21,7 @@ Four fixes to make `pcw auth login <account>` sane and non-destructive:
 4. **Login opens HOME, not the login form.** Opening `/login` shows a sign-in form even when already
    signed in. Login now opens the account's **home** — derived from the check's first `step { goto }`
    (`RecipeMeta.home_url`, falls back to `login-url`). Signed in → you see the app; signed out → the
-   app redirects you to sign in. linkedin→`/feed`, riverside→`/dashboard`, youtube→`studio.youtube.com`.
+   app redirects you to sign in. acme→`/feed`, globex→`/dashboard`, initech→`/studio`.
    (`adapter-recipe/src/registry.rs::first_goto_url`; `auth.rs::login` prefers `home_url`.)
 
 Interactive flow (`cli/src/auth_cmd.rs`): `login` opens the window, prints "press Return once you're
@@ -32,15 +32,15 @@ tests green.
 
 ## Open blocker — why we paused
 
-`auth login prevetted-linkedin` now works and Federico signed in cleanly. But a `linkedin/profile`
-scrape of a guest (Anton Pleshivtsev) **hit `linkedin.com/authwall` and revoked `li_at`** — verified:
-the profile's `Default/Cookies` had no `li_at` afterward and recheck flipped to signed out. So the
+`auth login acme-account` now works and Federico signed in cleanly. But an `acme/profile`
+scrape of a guest **hit acme's authwall and revoked the session cookie** — verified:
+the profile's `Default/Cookies` had no session cookie afterward and recheck flipped to signed out. So the
 **chrome-agent-LAUNCHED** browser is still flagged even when signed in + headed + `--stealth`. Same
-root cause as Google blocking sign-in on the automation browser for `prevetted-youtube`.
+root cause as an identity provider blocking sign-in on the automation browser for `initech-account`.
 
-See memory `linkedin-scrape-burns-session.md`.
+See memory `acme-scrape-burns-session.md`.
 
-## Next step when resumed — CDP-attach (same as prevetted-youtube)
+## Next step when resumed — CDP-attach (same as initech-account)
 
 Drive a REAL Chrome instead of launching one:
 1. Launch a normal Chrome with a dedicated `--user-data-dir` + `--remote-debugging-port=9222`.
@@ -54,7 +54,7 @@ of the launched persistent profile. Design TBD.
 Re-login, then scrape ONE guest he's actually connected to and watch whether the session survives.
 
 ## Still queued behind this (unchanged)
-- Delete the self-mention LinkedIn test post (`linkedin/delete_post` ready; needs the post URL from
+- Delete the self-mention acme test post (`acme/delete_post` ready; needs the post URL from
   the feed — Posts API finder is 403).
 - Re-scrape Anton's URN + connection degree (blocked by the same authwall).
 - Track B: paced guest URN scrape (blocked).

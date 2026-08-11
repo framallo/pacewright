@@ -15,10 +15,15 @@ use crate::client;
 /// Render the `accounts` array from an `AuthList`/`AuthRecheck` response as a table.
 fn print_table(accounts: &[Value]) {
     if accounts.is_empty() {
-        println!("no accounts — add a login recipe under ~/.pacewright/recipes/accounts/<name>.kdl");
+        println!(
+            "no accounts — add a login recipe under ~/.pacewright/recipes/accounts/<name>.kdl"
+        );
         return;
     }
-    println!("{:<24}  {:<10}  {:<20}  RECIPES", "ACCOUNT", "SESSION", "LAST CHECKED");
+    println!(
+        "{:<24}  {:<10}  {:<20}  RECIPES",
+        "ACCOUNT", "SESSION", "LAST CHECKED"
+    );
     for a in accounts {
         let name = a["account"].as_str().unwrap_or("?");
         let session = match a["signed_in"].as_bool() {
@@ -31,9 +36,15 @@ fn print_table(accounts: &[Value]) {
             Some(ms) => ms_ago(ms),
             None => "never".to_string(),
         };
-        let recipes = a["recipes"].as_array().map(|r| {
-            r.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
-        }).unwrap_or_default();
+        let recipes = a["recipes"]
+            .as_array()
+            .map(|r| {
+                r.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         println!("{name:<24}  {session:<10}  {checked:<20}  {recipes}");
     }
 }
@@ -93,7 +104,12 @@ pub async fn login(sock: &Path, account: Option<String>, all: bool) -> Result<()
         let opened: Vec<String> = match resp {
             Response::Ok(v) => v["opened"]
                 .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default(),
             Response::Error { message } => anyhow::bail!("{message}"),
         };
@@ -110,14 +126,26 @@ pub async fn login(sock: &Path, account: Option<String>, all: bool) -> Result<()
         return Ok(());
     }
     let account = account.unwrap();
-    let resp = client::call(sock, Request::AuthLogin { account: account.clone() }).await?;
+    let resp = client::call(
+        sock,
+        Request::AuthLogin {
+            account: account.clone(),
+        },
+    )
+    .await?;
     match resp {
         Response::Ok(_) => {
             println!("opened a login window for `{account}` — sign in by hand (take your time; 2FA/checkpoint is fine).");
             println!("nothing will drive the window while you sign in.");
             wait_for_return("press Return once you're signed in… ")?;
             eprintln!("checking the session…");
-            let re = client::call(sock, Request::AuthRecheck { account: Some(account) }).await?;
+            let re = client::call(
+                sock,
+                Request::AuthRecheck {
+                    account: Some(account),
+                },
+            )
+            .await?;
             print_table(&accounts_of(&re)?);
             Ok(())
         }

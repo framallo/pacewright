@@ -1,19 +1,19 @@
 # Pipeline runs and verified steps
 
-*Status: proposed, 2026-07-22. Supersedes the orchestration half of `RIVERSIDE_PIPELINE_PLAN.md`.*
+*Status: proposed, 2026-07-22. Supersedes the orchestration half of `GLOBEX_PIPELINE_PLAN.md`.*
 
 ## Goal
 
 Run a whole multi-step publishing pipeline as one durable, resumable, paced unit, and return
 the real output URLs, without pacewright learning anything about podcasts.
 
-Driving case: given a Riverside project id, title, description, publish date, and episode number,
-produce the YouTube long URL, the shorts URLs, and the Spotify URL, having confirmed each against
+Driving case: given a globex project id, title, description, publish date, and episode number,
+produce the long-form video URL, the shorts URLs, and the Spotify URL, having confirmed each against
 the platform rather than against the browser recipe's own report.
 
 ## Constraints
 
-1. **The engine stays generic.** No podcast, Riverside, or YouTube concepts in `core`. Per-step
+1. **The engine stays generic.** No podcast, globex, or platform concepts in `core`. Per-step
    logic lives in recipes. A pipeline is a declaration that references recipes by name.
 2. **Runs are automatic.** No approval gates; a run does not pause for a human.
 3. **Every step is validated before the next one starts.** A step is not done because it returned;
@@ -28,8 +28,8 @@ reaches `Succeeded` and receives nothing from it. Tasks persist a `result`, but 
 parent's result into a child's params. So a chain cannot pass a video id forward, and cannot report
 URLs at the end.
 
-Worse, `Succeeded` is not trustworthy today. Two recorded incidents: `riverside/share_spotify`
-reported success while leaving a blank Spotify draft, and `riverside/publish_clips` reported success
+Worse, `Succeeded` is not trustworthy today. Two recorded incidents: `globex/share_spotify`
+reported success while leaving a blank Spotify draft, and `globex/publish_clips` reported success
 while publishing zero shorts. A dependency chain gated on `Succeeded` cascades straight through a
 silent no-op and produces a confident, wrong report. Validation is therefore not a final step; it is
 the edge between steps.
@@ -123,7 +123,7 @@ A new KDL document type, living alongside recipes. Generic: it names steps, deps
 
 ```kdl
 pipeline "podcast/episode" {
-    description "Riverside project -> published episode with verified URLs"
+    description "globex project -> published episode with verified URLs"
     pace min="90s" max="5m"
 
     var "project_id"     required=#true
@@ -132,22 +132,22 @@ pipeline "podcast/episode" {
     var "description"    default=""
     var "publish_date"   default=""
 
-    step "render_clips" recipe="riverside/render_clips" {
+    step "render_clips" recipe="globex/render_clips" {
         params { project_id "{{ vars.project_id }}" }
         attempts 3
-        verify recipe="riverside/verify_exports" {
+        verify recipe="globex/verify_exports" {
             params { project_id "{{ vars.project_id }}" min_clips "1" }
         }
     }
 
-    step "publish_long" recipe="riverside/share_youtube" after="render_clips" {
+    step "publish_long" recipe="globex/share_video" after="render_clips" {
         params {
             project_id "{{ vars.project_id }}"
             title      "EP{{ vars.episode_number }} {{ vars.title }}"
             do_publish "true"
         }
         attempts 2
-        verify recipe="youtube/verify_video" {
+        verify recipe="globex/verify_video" {
             params {
                 video_id       "{{ steps.publish_long.result.publish.video_id }}"
                 expect_privacy "unlisted"
@@ -163,7 +163,7 @@ pipeline "podcast/episode" {
     }
 
     output {
-        youtube_url "{{ steps.publish_long.verify.result.url }}"
+        video_url "{{ steps.publish_long.verify.result.url }}"
         shorts_urls "{{ steps.publish_shorts.verify.result.urls }}"
         spotify_url "{{ steps.share_spotify.verify.result.url }}"
     }
@@ -192,12 +192,12 @@ platform APIs, not the DOM, so they are independent of what the browser recipe b
 
 | Verify | Checks |
 |---|---|
-| `youtube/verify_video` | video id exists, privacy status, title, on the expected channel |
-| `youtube/verify_shorts` | each expected short exists and is Unlisted; count matches |
+| `globex/verify_video` | video id exists, privacy status, title, on the expected channel |
+| `globex/verify_shorts` | each expected short exists and is Unlisted; count matches |
 | `spotify/verify_episode` | episode exists, has non-empty description and art, correct publish date |
-| `riverside/verify_exports` | the expected export tiles exist and are not still exporting |
+| `globex/verify_exports` | the expected export tiles exist and are not still exporting |
 
-YouTube already has OAuth wired (`pacewright oauth`), so `youtube/verify_*` can be an API adapter
+globex already has OAuth wired (`pacewright oauth`), so `globex/verify_*` can be an API adapter
 action rather than a browser recipe.
 
 ## Build order
@@ -205,10 +205,10 @@ action rather than a browser recipe.
 1. **Engine.** `run_id`/`step_name` columns, result-reference resolution, verified-step semantics,
    dedup resume, paced eligibility, `run`/`runs`/`show` CLI. Testable end to end with
    `adapter-dummy`, no browser.
-2. **Verify recipes**, starting with `youtube/verify_video` and `youtube/verify_shorts`. Run them
+2. **Verify recipes**, starting with `globex/verify_video` and `globex/verify_shorts`. Run them
    against recent episodes immediately: they will show whether past "succeeded" runs actually worked.
 3. **The `podcast/episode` pipeline**, wiring the recipes that already exist.
-4. **Harden `riverside/share_spotify`**, the one step still unverified, now with a real verify behind it.
+4. **Harden `globex/share_spotify`**, the one step still unverified, now with a real verify behind it.
 
 Phase 2 has value on its own even if the rest slips: it answers "is the current state of the channel
 what we think it is."
@@ -237,7 +237,7 @@ what we think it is."
 read pacewright's SQLite. Today the only channel is one-way per step: pacewright renders `{{ … }}`
 into params, chrome-agent runs, and returns one result JSON. That is enough to pass a value from
 step N to step N+1, but not for a recipe to accumulate or consult the run's wider state, and it is
-why authoring `youtube/verify_video` stalled.
+   why authoring `globex/verify_video` stalled.
 
 **The proposal.** Give every run a JSON dataset that steps and recipes share.
 
@@ -253,7 +253,7 @@ why authoring `youtube/verify_video` stalled.
   "vars":  { "episode_number": "172", "title": "Jane Doe on X" },
   "steps": {
     "publish_long": { "publish": { "video_id": "abc123" } },
-    "publish_long.verify": { "url": "https://youtu.be/abc123", "verified": true }
+    "publish_long.verify": { "url": "https://globex.example/v/abc123", "verified": true }
   }
 }
 ```
@@ -281,7 +281,7 @@ and what to contribute.
 - Does chrome-agent have a *read* step for a JSON file, or does the dataset need to arrive as a
   rendered var? (`output` covers writing; reading is unconfirmed.)
 - Confirm captures are addressable as `{{ key }}` in later steps of the same recipe. `validate()`
-  checking that every `{{ … }}` resolves implies yes; worth proving with `linkedin/whoami`.
+  checking that every `{{ … }}` resolves implies yes; worth proving with `acme/whoami`.
 - Concurrency: today a run's steps are sequential via `depends_on`. If parallel steps ever land,
   the merge in (4) needs to be per-step-key, never a whole-file overwrite.
 
@@ -302,7 +302,7 @@ same recipe. So chaining `api` steps and referring to earlier captures works.
    `Value::get(&str)` on an array returns `None`. So `items.0.status.privacyStatus` is always null.
    Verifying privacy or title needs array indexing.
 
-`expect-status` does not help: YouTube's `videos.list` returns **200 with an empty `items`** for an
+`expect-status` does not help: the platform's list endpoint returns **200 with an empty `items`** for an
 unknown id, not 404. An absent video is indistinguishable from a present one by status alone.
 
 `eval` can express the rule, but it requires a browser page, which defeats the token-only design
@@ -310,7 +310,7 @@ that makes these checks cheap and reliable.
 
 ### The missing capability is generic
 
-Not "a YouTube adapter" — an **assert step** in chrome-agent, which knows nothing about any platform:
+Not "a platform-specific adapter" — an **assert step** in chrome-agent, which knows nothing about any platform:
 
 ```kdl
 step {
@@ -337,9 +337,9 @@ pacewright side, and pacewright stays entirely generic as required.
 
 1. `assert` step + numeric path segments in chrome-agent; rebuild, `pacewright recipe reload`.
 2. Restart the daemon: the running one dates from Jul 19 and answers `no_adapter`.
-3. `youtube/verify_video`, `youtube/verify_shorts`, `spotify/verify_episode`,
-   `riverside/verify_exports` as KDL.
+3. `globex/verify_video`, `globex/verify_shorts`, `spotify/verify_episode`,
+   `globex/verify_exports` as KDL.
 4. `claude/adjudicate` for the two fallbacks in `podcast/episode`.
 
-YouTube OAuth is no longer a blocker: the token from `~/.youtube-cli-token-prevetted-channel.json`
-was imported into the secret store (scope `…/auth/youtube`, refresh token present, refreshes on use).
+Platform OAuth is no longer a blocker: the token from the legacy `~/.media-cli-token.json`
+was imported into the secret store (refresh token present, refreshes on use).

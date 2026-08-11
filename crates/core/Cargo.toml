@@ -20,6 +20,7 @@ croner.workspace = true
 tracing.workspace = true
 tokio = { workspace = true }
 futures-util.workspace = true
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 pacewright-adapter-dummy = { path = "../adapter-dummy" }

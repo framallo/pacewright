@@ -16,7 +16,12 @@ pub struct RunCtx {
 pub trait Adapter: Send + Sync {
     fn name(&self) -> &str;
     fn actions(&self) -> Vec<ActionSpec>;
-    async fn execute(&self, ctx: &RunCtx, action: &str, params: Value) -> Result<Value, AdapterError>;
+    async fn execute(
+        &self,
+        ctx: &RunCtx,
+        action: &str,
+        params: Value,
+    ) -> Result<Value, AdapterError>;
 
     /// Which daily-limit keys the given action spends. Default: read from `actions()`.
     fn limit_keys_for(&self, action: &str) -> Vec<String> {
@@ -34,10 +39,18 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
-    pub fn new() -> Self { Self::default() }
-    pub fn register(&mut self, a: Arc<dyn Adapter>) { self.map.insert(a.name().to_string(), a); }
-    pub fn get(&self, name: &str) -> Option<Arc<dyn Adapter>> { self.map.get(name).cloned() }
-    pub fn all(&self) -> Vec<Arc<dyn Adapter>> { self.map.values().cloned().collect() }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn register(&mut self, a: Arc<dyn Adapter>) {
+        self.map.insert(a.name().to_string(), a);
+    }
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Adapter>> {
+        self.map.get(name).cloned()
+    }
+    pub fn all(&self) -> Vec<Arc<dyn Adapter>> {
+        self.map.values().cloned().collect()
+    }
 }
 
 #[cfg(test)]
@@ -47,11 +60,23 @@ mod tests {
     struct FakeAdapter;
     #[async_trait]
     impl Adapter for FakeAdapter {
-        fn name(&self) -> &str { "fake" }
-        fn actions(&self) -> Vec<ActionSpec> {
-            vec![ActionSpec { name: "go".into(), limit_keys: vec!["fake.go".into()], params_schema: Value::Null, description: "".into() }]
+        fn name(&self) -> &str {
+            "fake"
         }
-        async fn execute(&self, _ctx: &RunCtx, _action: &str, _params: Value) -> Result<Value, AdapterError> {
+        fn actions(&self) -> Vec<ActionSpec> {
+            vec![ActionSpec {
+                name: "go".into(),
+                limit_keys: vec!["fake.go".into()],
+                params_schema: Value::Null,
+                description: "".into(),
+            }]
+        }
+        async fn execute(
+            &self,
+            _ctx: &RunCtx,
+            _action: &str,
+            _params: Value,
+        ) -> Result<Value, AdapterError> {
             Ok(Value::Null)
         }
     }
@@ -64,7 +89,13 @@ mod tests {
         assert_eq!(a.name(), "fake");
         assert_eq!(a.limit_keys_for("go"), vec!["fake.go".to_string()]);
         assert!(a.limit_keys_for("missing").is_empty());
-        let ctx = RunCtx { task_id: "t1".into(), browser: Arc::new(crate::browser::NullBrowser) };
-        assert_eq!(a.execute(&ctx, "go", Value::Null).await.unwrap(), Value::Null);
+        let ctx = RunCtx {
+            task_id: "t1".into(),
+            browser: Arc::new(crate::browser::NullBrowser),
+        };
+        assert_eq!(
+            a.execute(&ctx, "go", Value::Null).await.unwrap(),
+            Value::Null
+        );
     }
 }

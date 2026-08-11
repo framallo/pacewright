@@ -5,7 +5,7 @@
 
   This is the substrate for every browser task: one real, non-headless Google Chrome, with sites
   separated by named tabs rather than by browser profiles. pacewright never launches it — letting
-  chrome-agent launch a browser is a bot signal that gets LinkedIn's `li_at` revoked and makes
+  chrome-agent launch a browser is a bot signal that gets a social network's `li_at` revoked and makes
   Google refuse sign-in outright.
 
   Install:
@@ -13,13 +13,13 @@
       > ~/Library/LaunchAgents/com.paperclip.pacewright-chrome.plist
     launchctl load ~/Library/LaunchAgents/com.paperclip.pacewright-chrome.plist
 
-  Then sign into LinkedIn / Google / Riverside by hand, once, in that window. The profile persists,
+  Then sign into each site (a social network, Google, a media platform) by hand, once, in that window. The profile persists,
   so the sessions survive restarts.
 
   LaunchAgents (not LaunchDaemons): the window must be visible, which needs a logged-in GUI session.
 
   ProcessType Interactive, and deliberately NOT Background: macOS throttles Background processes,
-  and Chrome already throttles its own non-foreground tabs — which is what would stall a Riverside
+  and Chrome already throttles its own non-foreground tabs — which is what would stall a media-platform
   render. Do not "optimize" this to Background.
 -->
 <plist version="1.0">
@@ -36,7 +36,7 @@
         <string>--user-data-dir=__HOME__/.pacewright/chrome-profile</string>
         <string>--no-first-run</string>
         <string>--no-default-browser-check</string>
-        <!-- Restores the tabs pacewright named (linkedin/youtube/riverside) rather than nagging
+        <!-- Restores the tabs pacewright named (acme/globex) rather than nagging
              after a KeepAlive restart. -->
         <string>--restore-last-session</string>
         <string>about:blank</string>

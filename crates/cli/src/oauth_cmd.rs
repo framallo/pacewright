@@ -7,17 +7,12 @@
 //! unit-testable without a network/browser, so it stays deliberately small and leans on the tested
 //! core helpers.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use pacewright_core::oauth::{self, TokenResponse};
 use pacewright_core::secrets::SecretStore;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-
-/// LinkedIn: OIDC sign-in (`openid profile email`) + posting on the member's behalf.
-const LINKEDIN_SCOPE: &str = "openid profile email w_member_social";
-/// Providers we know how to `status`-scan even before they're configured.
-const KNOWN_PROVIDERS: [&str; 2] = ["linkedin", "youtube"];
 
 fn secrets_path(home: &Path) -> PathBuf {
     home.join("secrets.json")
@@ -28,27 +23,49 @@ fn secrets_path(home: &Path) -> PathBuf {
 /// Client id/secret resolve in order: CLI flag → already stored → interactive prompt (the secret is
 /// read without echo). Then opens the consent screen, catches the redirect on the loopback callback
 /// (`{base}/{provider}/callback`, base defaulting to `http://localhost:8765`), swaps the code for
-/// tokens, resolves the author URN (LinkedIn `/v2/userinfo`), and persists it all 0600.
+/// tokens, and (when a userinfo endpoint is configured) resolves the author/principal URN, then persists it all 0600.
+#[allow(clippy::too_many_arguments)]
 pub async fn login(
     home: PathBuf,
     provider: String,
     client_id: Option<String>,
     client_secret: Option<String>,
     callback_base: Option<String>,
+    authorize_url: Option<String>,
+    token_url: Option<String>,
+    scope: Option<String>,
+    userinfo_url: Option<String>,
+    urn_template: Option<String>,
+    id_field: Option<String>,
 ) -> Result<()> {
     let path = secrets_path(&home);
     let mut store = SecretStore::load(&path)?;
 
-    let (scope, authorize_base, token_url) = match provider.as_str() {
-        "linkedin" => (LINKEDIN_SCOPE, oauth::LINKEDIN_AUTHORIZE, oauth::LINKEDIN_TOKEN),
-        other => bail!("unknown provider `{other}` (supported: linkedin)"),
-    };
+    // Resolve OAuth endpoints + scope: flag wins, else stored, else error (required) / None (optional).
+    let stored = store.get(&provider);
+    let authorize_base = authorize_url
+        .or_else(|| stored.and_then(|r| r.authorize_url.clone()))
+        .ok_or_else(|| anyhow!("provider `{provider}` needs --authorize-url on first login"))?;
+    let token_endpoint = token_url
+        .or_else(|| stored.and_then(|r| r.token_url.clone()))
+        .ok_or_else(|| anyhow!("provider `{provider}` needs --token-url on first login"))?;
+    let scope = scope
+        .or_else(|| stored.and_then(|r| r.scope.clone()))
+        .ok_or_else(|| anyhow!("provider `{provider}` needs --scope on first login"))?;
+    let userinfo = userinfo_url.or_else(|| stored.and_then(|r| r.userinfo_url.clone()));
+    let urn_template = urn_template.or_else(|| stored.and_then(|r| r.urn_template.clone()));
+    let id_field = id_field
+        .or_else(|| stored.and_then(|r| r.id_field.clone()))
+        .unwrap_or_else(|| "sub".to_string());
 
     // Resolve credentials. Flags always win. Otherwise, if both are already stored, offer to keep
     // them or re-enter; if nothing is stored, prompt for both.
-    let stored = store.get(&provider);
-    let stored_id = stored.map(|r| r.client_id.clone()).filter(|s| !s.is_empty());
-    let stored_secret = stored.map(|r| r.client_secret.clone()).filter(|s| !s.is_empty());
+    let stored_id = stored
+        .map(|r| r.client_id.clone())
+        .filter(|s| !s.is_empty());
+    let stored_secret = stored
+        .map(|r| r.client_secret.clone())
+        .filter(|s| !s.is_empty());
     let (id, secret) = if client_id.is_some() || client_secret.is_some() {
         // A flag was passed — take it, falling back to the stored value for whichever flag is absent.
         (
@@ -56,7 +73,9 @@ pub async fn login(
             client_secret.or(stored_secret).unwrap_or_default(),
         )
     } else if let (Some(sid), Some(ssec)) = (stored_id, stored_secret) {
-        if confirm(&format!("Stored {provider} client id: {sid}. Change credentials? [y/N] "))? {
+        if confirm(&format!(
+            "Stored {provider} client id: {sid}. Change credentials? [y/N] "
+        ))? {
             (
                 prompt_line(&format!("{provider} client id: "))?,
                 prompt_secret(&format!("{provider} client secret: "))?,
@@ -75,6 +94,15 @@ pub async fn login(
     }
     // Persist the app credentials now, before the browser dance, so they survive an aborted consent.
     store.set_app(&provider, id.clone(), secret.clone());
+    store.set_endpoints(
+        &provider,
+        authorize_base.clone(),
+        token_endpoint.clone(),
+        scope.clone(),
+        userinfo.clone(),
+        Some(id_field.clone()),
+        urn_template.clone(),
+    );
     store.save().context("saving app credentials")?;
 
     // Provider-namespaced loopback redirect; the listener binds the port parsed back out of it.
@@ -84,7 +112,7 @@ pub async fn login(
 
     // A fresh state nonce guards the callback against CSRF; uuid is already a cli dep.
     let state = uuid::Uuid::new_v4().to_string();
-    let url = oauth::authorize_url(authorize_base, &id, &redirect_uri, scope, &state);
+    let url = oauth::authorize_url(&authorize_base, &id, &redirect_uri, &scope, &state);
 
     // Bind BEFORE opening the browser so the redirect can't beat us to the socket.
     let listener = TcpListener::bind(("127.0.0.1", port))
@@ -103,7 +131,7 @@ pub async fn login(
 
     let http = reqwest::Client::new();
     let token: TokenResponse = http
-        .post(token_url)
+        .post(&token_endpoint)
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", &cb.code),
@@ -129,14 +157,10 @@ pub async fn login(
         token.scope.clone(),
     )?;
 
-    // LinkedIn: resolve the author URN once from the OIDC userinfo `sub`.
-    if provider == "linkedin" {
-        #[derive(serde::Deserialize)]
-        struct UserInfo {
-            sub: String,
-        }
-        let info: UserInfo = http
-            .get(oauth::LINKEDIN_USERINFO)
+    // If a userinfo endpoint is configured, resolve the author/principal URN from it.
+    if let Some(userinfo_url) = &userinfo {
+        let info: serde_json::Value = http
+            .get(userinfo_url)
             .bearer_auth(&token.access_token)
             .send()
             .await
@@ -146,13 +170,23 @@ pub async fn login(
             .json()
             .await
             .context("parsing userinfo")?;
-        let urn = oauth::person_urn(&info.sub);
+        let id = info
+            .get(&id_field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("userinfo response has no string field `{id_field}`"))?;
+        let urn = match &urn_template {
+            Some(t) => oauth::apply_urn_template(t, id),
+            None => id.to_string(),
+        };
         store.set_author_urn(&provider, &urn)?;
         println!("Author URN: {urn}");
     }
 
     store.save()?;
-    println!("✅ `{provider}` authorized — token stored at {}", path.display());
+    println!(
+        "✅ `{provider}` authorized — token stored at {}",
+        path.display()
+    );
     Ok(())
 }
 
@@ -222,9 +256,15 @@ fn prompt_secret(prompt: &str) -> Result<String> {
 
 /// Accept exactly one connection, parse the request line, reply with a friendly HTML page.
 async fn accept_callback(listener: &TcpListener) -> Result<oauth::Callback> {
-    let (mut stream, _) = listener.accept().await.context("accepting callback connection")?;
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .context("accepting callback connection")?;
     let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await.context("reading callback request")?;
+    let n = stream
+        .read(&mut buf)
+        .await
+        .context("reading callback request")?;
     let text = String::from_utf8_lossy(&buf[..n]);
     let request_line = text.lines().next().unwrap_or("");
     let result = oauth::parse_callback(request_line);
@@ -252,23 +292,31 @@ async fn accept_callback(listener: &TcpListener) -> Result<oauth::Callback> {
 pub async fn status(home: PathBuf) -> Result<()> {
     let store = SecretStore::load(secrets_path(&home))?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    for p in KNOWN_PROVIDERS {
-        match store.get(p) {
-            None => println!("{p:<10} not configured"),
-            Some(r) => {
-                let app = if r.client_id.is_empty() { "no app" } else { "app set" };
-                let tok = match (r.access_token.is_some(), store.valid_access_token(p, now_ms, 300_000)) {
-                    (false, _) => "no token",
-                    (true, Some(_)) => "token valid",
-                    (true, None) => "token expired",
-                };
-                println!(
-                    "{p:<10} {app} · {tok} · scope: {} · urn: {}",
-                    r.scope.as_deref().unwrap_or("-"),
-                    r.author_urn.as_deref().unwrap_or("-"),
-                );
-            }
-        }
+    let providers = store.providers();
+    if providers.is_empty() {
+        println!("no providers configured — run `pacewright oauth login <provider> --authorize-url … --token-url … --scope …`");
+        return Ok(());
+    }
+    for p in providers {
+        let Some(r) = store.get(p) else { continue };
+        let app = if r.client_id.is_empty() {
+            "no app"
+        } else {
+            "app set"
+        };
+        let tok = match (
+            r.access_token.is_some(),
+            store.valid_access_token(p, now_ms, 300_000),
+        ) {
+            (false, _) => "no token",
+            (true, Some(_)) => "token valid",
+            (true, None) => "token expired",
+        };
+        println!(
+            "{p:<10} {app} · {tok} · scope: {} · urn: {}",
+            r.scope.as_deref().unwrap_or("-"),
+            r.author_urn.as_deref().unwrap_or("-"),
+        );
     }
     Ok(())
 }

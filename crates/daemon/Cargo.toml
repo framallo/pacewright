@@ -16,6 +16,7 @@ path = "src/main.rs"
 pacewright-core = { path = "../core" }
 pacewright-proto = { path = "../proto" }
 pacewright-adapter-dummy = { path = "../adapter-dummy" }
+pacewright-adapter-agent = { path = "../adapter-agent" }
 pacewright-adapter-recipe = { path = "../adapter-recipe" }
 pacewright-browser = { path = "../browser" }
 tokio.workspace = true
@@ -26,6 +27,7 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 axum.workspace = true
 futures-util.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

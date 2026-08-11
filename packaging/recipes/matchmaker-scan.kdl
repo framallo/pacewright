@@ -1,0 +1,13 @@
+// matchmaker/scan — scan one MatchMaker "Find Show" category for uncontacted shows and return
+// their paths. Read-only feeder for the outreach/matchmaker pipeline: the pipeline fans each path
+// out to matchmaker/pitch, paced + deduped against the all-time ledger (scope matchmaker.pitch).
+// Runs on the attached :9222 Chrome logged into MatchMaker. JS uses single quotes; escaped \" only
+// where a selector needs them; backslashes doubled for KDL. Returns {count, shows:[{path}]}.
+recipe "matchmaker/scan" {
+    description "Scan one MatchMaker category for show paths (read-only). Returns {count, shows:[{path}]}."
+    limit-key "matchmaker.scan"
+    foreground #true
+    var "category" required=#true doc="MatchMaker category, e.g. Technology or Business (URL-encoded for spaces)."
+    step { goto "https://www.matchmaker.fm/search/shows?categories={{ category }}" }
+    step { eval "scan" js="(async()=>{ const s=ms=>new Promise(r=>setTimeout(r,ms)); await s(2600); if(/\\/(login|signin)\\b/.test(location.pathname)) throw new Error('MATCHMAKER NOT LOGGED IN'); for(let i=0;i<8;i++){ window.scrollBy(0,1600); await s(1100); } const paths=[...new Set([...document.querySelectorAll('a[href*=\"/show/\"]')].map(a=>a.getAttribute('href')).filter(h=>/^\\/show\\/[a-z0-9-]+$/.test(h)))]; return { count: paths.length, shows: paths.map(p=>({ path: p })) }; })()" }
+}

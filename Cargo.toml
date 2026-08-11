@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/proto", "crates/daemon", "crates/cli", "crates/adapter-dummy", "crates/browser", "crates/adapter-recipe", "crates/mcp"]
+members = ["crates/core", "crates/proto", "crates/daemon", "crates/cli", "crates/adapter-dummy", "crates/browser", "crates/adapter-recipe", "crates/adapter-agent", "crates/mcp"]
 
 [workspace.package]
 edition = "2021"
@@ -29,3 +29,6 @@ tracing-subscriber = "0.3"
 futures-util = "0.3"
 axum = { version = "0.7", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+parking_lot = "0.12"
+sha2 = "0.10"
+base64 = "0.22"

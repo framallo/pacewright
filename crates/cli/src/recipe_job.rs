@@ -222,9 +222,9 @@ mod tests {
         RecipeRegistry::load_dir(&dir)
     }
 
-    const RECIPE: &str = r#"recipe "linkedin/scrape_profile" {
-        limit-key "linkedin.profile_scrape"
-        var "url" from="linkedin" required=#true
+    const RECIPE: &str = r#"recipe "acme/scrape_profile" {
+        limit-key "acme.profile_scrape"
+        var "url" from="acme" required=#true
         var "vault"
         var "slug"
     }"#;
@@ -232,11 +232,11 @@ mod tests {
     #[test]
     fn parses_flat_frontmatter() {
         let fm = parse_frontmatter(
-            "---\ntype: guest\nrecipe: linkedin/scrape_profile\nlinkedin: \"https://x/in/j\"\nslug: jane\n---\nbody\n",
+            "---\ntype: guest\nrecipe: acme/scrape_profile\nacme: \"https://x/in/j\"\nslug: jane\n---\nbody\n",
         )
         .unwrap();
-        assert_eq!(fm.get("recipe").unwrap(), "linkedin/scrape_profile");
-        assert_eq!(fm.get("linkedin").unwrap(), "https://x/in/j");
+        assert_eq!(fm.get("recipe").unwrap(), "acme/scrape_profile");
+        assert_eq!(fm.get("acme").unwrap(), "https://x/in/j");
         assert_eq!(fm.get("slug").unwrap(), "jane");
     }
 
@@ -251,13 +251,13 @@ mod tests {
         let reg = registry_with(RECIPE);
         let note = scratch_note(
             "jane-doe.md",
-            "---\nrecipe: linkedin/scrape_profile\nlinkedin: https://www.linkedin.com/in/jane/\n---\n",
+            "---\nrecipe: acme/scrape_profile\nacme: https://www.acme.example/in/jane/\n---\n",
         );
         let job = build_job(&note, &reg, Some(Path::new("/vault"))).unwrap();
-        assert_eq!(job.adapter, "linkedin");
+        assert_eq!(job.adapter, "acme");
         assert_eq!(job.action, "scrape_profile");
-        // `linkedin` frontmatter → the recipe's `url` var (via `from`)
-        assert_eq!(job.params["url"], "https://www.linkedin.com/in/jane/");
+        // `acme` frontmatter → the recipe's `url` var (via `from`)
+        assert_eq!(job.params["url"], "https://www.acme.example/in/jane/");
         // `vault` context injected because the recipe declares it
         assert_eq!(job.params["vault"], "/vault");
         // `slug` defaulted from the note filename
@@ -274,7 +274,7 @@ mod tests {
         let reg = registry_with(RECIPE);
         let note = scratch_note(
             "note.md",
-            "---\nrecipe: linkedin/scrape_profile\nlinkedin: https://x/in/j\nslug: custom-slug\n---\n",
+            "---\nrecipe: acme/scrape_profile\nacme: https://x/in/j\nslug: custom-slug\n---\n",
         );
         let job = build_job(&note, &reg, None).unwrap();
         assert_eq!(job.params["slug"], "custom-slug");
@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn missing_required_var_is_an_error() {
         let reg = registry_with(RECIPE);
-        // no `linkedin:` field → the required `url` var is unbindable
-        let note = scratch_note("bad.md", "---\nrecipe: linkedin/scrape_profile\n---\n");
+        // no `acme:` field → the required `url` var is unbindable
+        let note = scratch_note("bad.md", "---\nrecipe: acme/scrape_profile\n---\n");
         let err = build_job(&note, &reg, None).unwrap_err();
         assert!(err.to_string().contains("requires var `url`"), "got: {err}");
         std::fs::remove_dir_all(note.parent().unwrap()).ok();
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn unknown_recipe_is_an_error() {
         let reg = registry_with(RECIPE);
-        let note = scratch_note("x.md", "---\nrecipe: nope/missing\nlinkedin: u\n---\n");
+        let note = scratch_note("x.md", "---\nrecipe: nope/missing\nacme: u\n---\n");
         let err = build_job(&note, &reg, None).unwrap_err();
         assert!(err.to_string().contains("no recipe"), "got: {err}");
         std::fs::remove_dir_all(note.parent().unwrap()).ok();
@@ -314,7 +314,7 @@ mod tests {
         let reg = registry_with(RECIPE);
         let note = scratch_note(
             "j.md",
-            "---\nrecipe: linkedin/scrape_profile\nlinkedin: https://x/in/j\n---\n",
+            "---\nrecipe: acme/scrape_profile\nacme: https://x/in/j\n---\n",
         );
         let job = build_job(&note, &reg, None).unwrap();
         let req = job.into_add_request();

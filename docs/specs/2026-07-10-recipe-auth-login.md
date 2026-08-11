@@ -2,9 +2,9 @@
 
 Status: **design** (2026-07-10). Builds on the recipe engine (`2026-07-08`), the declarative
 scheduler (`2026-07-09`), and the web dashboard (`2026-07-09`). Motivated by a concrete failure:
-running `riverside/generate_magic_clips` through pacewright 403'd because `chrome-agent
---copy-cookies` copies a **static snapshot** of the everyday Chrome profile, and Riverside's access
-token has a **~9.5-minute TTL** — the snapshot is stale by the time the recipe runs. Google/YouTube
+running `globex/generate_magic_clips` through pacewright 403'd because `chrome-agent
+--copy-cookies` copies a **static snapshot** of the everyday Chrome profile, and globex's access
+token has a **~9.5-minute TTL** — the snapshot is stale by the time the recipe runs. Another provider
 was worse: signed out entirely. Recipes need a **durable, self-refreshing logged-in session** they
 can reuse, plus a way for the operator to **establish and inspect** those sessions.
 
@@ -14,7 +14,7 @@ can reuse, plus a way for the operator to **establish and inspect** those sessio
 
 Login procedures live as their own recipes under **`~/.pacewright/recipes/accounts/<account>.kdl`**.
 Each is the login for exactly one **account** (the account name = the file stem, e.g.
-`accounts/prevetted-riverside.kdl` → account `prevetted-riverside`). An account recipe declares:
+`accounts/prevetted-globex.kdl` → account `prevetted-globex`). An account recipe declares:
 
 An account recipe is a **normal recipe whose steps ARE the signed-in check**, plus flat
 pacewright-consumed nodes (`login-url`, optional `login-field`). chrome-agent runs it like any
@@ -22,18 +22,18 @@ recipe and **ignores** the extra nodes (forward-compat, `_ => {}`), so **chrome-
 changes** — the whole feature is pacewright-side.
 
 ```kdl
-recipe "accounts/prevetted-riverside" {
-    description "Login for the prevetted.fm Riverside account."
-    login-url "https://riverside.com/login"        // where the human signs in (pacewright-consumed)
+recipe "accounts/prevetted-globex" {
+    description "Login for the prevetted.fm globex account."
+    login-url "https://globex.com/login"        // where the human signs in (pacewright-consumed)
 
     // The recipe's steps ARE the signed-in check, run headless in the account profile. NOTE:
     // chrome-agent `expect` is a TRIPWIRE — it FAILS (on-fail class) when its condition is TRUE.
     // So the check trips on the SIGNED-OUT signal: visiting /dashboard while signed out redirects to
     // /login; signed in it stays on /dashboard, /login never matches, expect passes → recipe succeeds.
-    step { goto "https://riverside.com/dashboard" }
+    step { goto "https://globex.com/dashboard" }
     step {
         expect on-fail="terminal" message="signed out" {
-            settled-url-matches #"riverside\.com/login"#
+            settled-url-matches #"globex\.com/login"#
         }
     }
 
@@ -43,15 +43,15 @@ recipe "accounts/prevetted-riverside" {
 }
 ```
 
-The account name is the recipe name after the `accounts/` prefix (`accounts/prevetted-riverside` →
-account `prevetted-riverside`, profile `prevetted-riverside`). Account recipes are **not** registered
+The account name is the recipe name after the `accounts/` prefix (`accounts/prevetted-globex` →
+account `prevetted-globex`, profile `prevetted-globex`). Account recipes are **not** registered
 as runnable task adapters — the registry routes them to the auth subsystem instead.
 
 A normal recipe **references** its account by evolving the existing `auth` flag:
 
 ```kdl
-recipe "riverside/generate_magic_clips" {
-    auth account="prevetted-riverside"   // was: auth #true
+recipe "globex/generate_magic_clips" {
+    auth account="prevetted-globex"   // was: auth #true
     ...
 }
 ```
@@ -67,7 +67,7 @@ to allow a login procedure") and lets one login serve many recipes.
 ## 2. Session storage — a persistent per-account Chrome profile
 
 Each account maps to a **persistent chrome-agent browser profile named after it**
-(`--browser prevetted-riverside`; cookies in `~/.chrome-agent/browsers/prevetted-riverside/`).
+(`--browser prevetted-globex`; cookies in `~/.chrome-agent/browsers/prevetted-globex/`).
 
 - `pcw auth login <account>` opens that profile **headed** at `login.url`; the operator signs in by
   hand; cookies persist in the profile.

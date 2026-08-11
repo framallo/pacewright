@@ -78,9 +78,7 @@ pub fn parse_source(spec: &str) -> Result<RepoSource> {
 /// parses as KDL but has no top-level `recipe "<name>"` node (skip it, don't fail the
 /// whole install). `Err` means it isn't valid KDL at all.
 pub fn recipe_name_from_kdl(text: &str) -> Result<Option<String>> {
-    let doc: kdl::KdlDocument = text
-        .parse()
-        .map_err(|e| anyhow!("not valid KDL: {e}"))?;
+    let doc: kdl::KdlDocument = text.parse().map_err(|e| anyhow!("not valid KDL: {e}"))?;
     for node in doc.nodes() {
         if node.name().value() == "recipe" {
             let name = node
@@ -210,19 +208,35 @@ pub fn add(spec: &str) -> Result<()> {
 
 /// Everything after the clone: discover, validate, copy, record. Split out from `add`
 /// so it's testable against a local directory without any network/git.
-pub fn install_from_dir(src: &RepoSource, cloned_root: &Path, sha: &str, recipes_dir: &Path) -> Result<()> {
+pub fn install_from_dir(
+    src: &RepoSource,
+    cloned_root: &Path,
+    sha: &str,
+    recipes_dir: &Path,
+) -> Result<()> {
     let search_root = match &src.subdir {
         Some(s) => cloned_root.join(s),
         None => cloned_root.to_path_buf(),
     };
     if !search_root.exists() {
-        bail!("subdir `{}` not found in {}", src.subdir.as_deref().unwrap_or(""), src.url());
+        bail!(
+            "subdir `{}` not found in {}",
+            src.subdir.as_deref().unwrap_or(""),
+            src.url()
+        );
     }
 
     let mut kdl_files = Vec::new();
     find_kdl(&search_root, &mut kdl_files)?;
     if kdl_files.is_empty() {
-        bail!("no .kdl recipes found in {}{}", src.url(), src.subdir.as_deref().map(|s| format!(" (#{s})")).unwrap_or_default());
+        bail!(
+            "no .kdl recipes found in {}{}",
+            src.url(),
+            src.subdir
+                .as_deref()
+                .map(|s| format!(" (#{s})"))
+                .unwrap_or_default()
+        );
     }
 
     // Validate; collect (name, source-relative-path, bytes).
@@ -235,15 +249,23 @@ pub fn install_from_dir(src: &RepoSource, cloned_root: &Path, sha: &str, recipes
                 let rel = f.strip_prefix(&search_root).unwrap_or(f).to_path_buf();
                 valid.push((name, rel, text));
             }
-            Ok(None) => { skipped += 1; }
+            Ok(None) => {
+                skipped += 1;
+            }
             Err(e) => {
-                eprintln!("  skip {}: {e}", f.file_name().unwrap_or_default().to_string_lossy());
+                eprintln!(
+                    "  skip {}: {e}",
+                    f.file_name().unwrap_or_default().to_string_lossy()
+                );
                 skipped += 1;
             }
         }
     }
     if valid.is_empty() {
-        bail!("found {} .kdl file(s) but none are valid recipes", kdl_files.len());
+        bail!(
+            "found {} .kdl file(s) but none are valid recipes",
+            kdl_files.len()
+        );
     }
 
     // Warn on names already installed by a *different* source.
@@ -282,7 +304,12 @@ pub fn install_from_dir(src: &RepoSource, cloned_root: &Path, sha: &str, recipes
     });
     save_manifest(recipes_dir, &manifest)?;
 
-    println!("Installed {} recipe(s) from {} @ {}", valid.len(), src.url(), &sha[..sha.len().min(12)]);
+    println!(
+        "Installed {} recipe(s) from {} @ {}",
+        valid.len(),
+        src.url(),
+        &sha[..sha.len().min(12)]
+    );
     for (name, rel, _) in &valid {
         println!("  {name}  ({})", rel.display());
     }
@@ -302,7 +329,11 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
     for s in &manifest.sources {
-        let r = s.git_ref.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+        let r = s
+            .git_ref
+            .as_deref()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
         println!("{}{}  @ {}", s.url, r, &s.sha[..s.sha.len().min(12)]);
         for name in &s.recipes {
             println!("  {name}");
@@ -325,7 +356,12 @@ mod tests {
 
     #[test]
     fn parses_owner_repo_forms() {
-        let want = RepoSource { owner: "o".into(), repo: "r".into(), git_ref: None, subdir: None };
+        let want = RepoSource {
+            owner: "o".into(),
+            repo: "r".into(),
+            git_ref: None,
+            subdir: None,
+        };
         assert_eq!(parse_source("o/r").unwrap(), want);
         assert_eq!(parse_source("github.com/o/r").unwrap(), want);
         assert_eq!(parse_source("https://github.com/o/r").unwrap(), want);
@@ -335,15 +371,24 @@ mod tests {
 
     #[test]
     fn parses_ref_and_subdir() {
-        let s = parse_source("o/r@v1.2#recipes/linkedin").unwrap();
+        let s = parse_source("o/r@v1.2#recipes/acme").unwrap();
         assert_eq!(s.owner, "o");
         assert_eq!(s.repo, "r");
         assert_eq!(s.git_ref.as_deref(), Some("v1.2"));
-        assert_eq!(s.subdir.as_deref(), Some("recipes/linkedin"));
+        assert_eq!(s.subdir.as_deref(), Some("recipes/acme"));
         // ref on a full URL too
-        assert_eq!(parse_source("https://github.com/o/r@main").unwrap().git_ref.as_deref(), Some("main"));
+        assert_eq!(
+            parse_source("https://github.com/o/r@main")
+                .unwrap()
+                .git_ref
+                .as_deref(),
+            Some("main")
+        );
         // subdir only
-        assert_eq!(parse_source("o/r#sub").unwrap().subdir.as_deref(), Some("sub"));
+        assert_eq!(
+            parse_source("o/r#sub").unwrap().subdir.as_deref(),
+            Some("sub")
+        );
     }
 
     #[test]
@@ -362,8 +407,11 @@ mod tests {
 
     #[test]
     fn extracts_recipe_name() {
-        let kdl = "recipe \"linkedin/scrape_profile\" {\n  description \"x\"\n}\n";
-        assert_eq!(recipe_name_from_kdl(kdl).unwrap().as_deref(), Some("linkedin/scrape_profile"));
+        let kdl = "recipe \"acme/scrape_profile\" {\n  description \"x\"\n}\n";
+        assert_eq!(
+            recipe_name_from_kdl(kdl).unwrap().as_deref(),
+            Some("acme/scrape_profile")
+        );
     }
 
     #[test]
@@ -389,15 +437,15 @@ mod tests {
         p
     }
 
-    const VALID_RECIPE: &str = "recipe \"linkedin/scrape_profile\" {\n  description \"x\"\n}\n";
+    const VALID_RECIPE: &str = "recipe \"acme/scrape_profile\" {\n  description \"x\"\n}\n";
 
     #[test]
     fn install_from_dir_copies_validates_and_records() {
         // A fake clone: one valid recipe (nested), one non-recipe kdl, one junk file.
         let clone = scratch();
         let _cg = TempGuard(clone.clone());
-        std::fs::create_dir_all(clone.join("recipes/linkedin")).unwrap();
-        std::fs::write(clone.join("recipes/linkedin/scrape_profile.kdl"), VALID_RECIPE).unwrap();
+        std::fs::create_dir_all(clone.join("recipes/acme")).unwrap();
+        std::fs::write(clone.join("recipes/acme/scrape_profile.kdl"), VALID_RECIPE).unwrap();
         std::fs::write(clone.join("notes.kdl"), "something \"else\" { a 1 }\n").unwrap();
         std::fs::write(clone.join("README.md"), "hi").unwrap();
 
@@ -407,8 +455,12 @@ mod tests {
         install_from_dir(&src, &clone, "deadbeefcafefeed", &recipes_dir).unwrap();
 
         // Copied under <recipes_dir>/acme__recipes/, preserving the source-relative path.
-        let dest = recipes_dir.join("acme__recipes/recipes/linkedin/scrape_profile.kdl");
-        assert!(dest.exists(), "recipe should be copied to {}", dest.display());
+        let dest = recipes_dir.join("acme__recipes/recipes/acme/scrape_profile.kdl");
+        assert!(
+            dest.exists(),
+            "recipe should be copied to {}",
+            dest.display()
+        );
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), VALID_RECIPE);
         // The non-recipe kdl is not installed.
         assert!(!recipes_dir.join("acme__recipes/notes.kdl").exists());
@@ -420,7 +472,7 @@ mod tests {
         assert_eq!(e.url, "https://github.com/acme/recipes");
         assert_eq!(e.sha, "deadbeefcafefeed");
         assert_eq!(e.dir, "acme__recipes");
-        assert_eq!(e.recipes, vec!["linkedin/scrape_profile".to_string()]);
+        assert_eq!(e.recipes, vec!["acme/scrape_profile".to_string()]);
     }
 
     #[test]
@@ -437,7 +489,10 @@ mod tests {
         std::fs::write(recipes_dir.join("acme__recipes/stale.kdl"), VALID_RECIPE).unwrap();
         install_from_dir(&src, &clone, "sha2", &recipes_dir).unwrap();
 
-        assert!(!recipes_dir.join("acme__recipes/stale.kdl").exists(), "stale file should be pruned");
+        assert!(
+            !recipes_dir.join("acme__recipes/stale.kdl").exists(),
+            "stale file should be pruned"
+        );
         // Single source entry, updated to the new SHA (not duplicated).
         let m = load_manifest(&recipes_dir).unwrap();
         assert_eq!(m.sources.len(), 1);
@@ -454,7 +509,10 @@ mod tests {
         let src = parse_source("acme/recipes").unwrap();
 
         let err = install_from_dir(&src, &clone, "sha", &recipes_dir).unwrap_err();
-        assert!(err.to_string().contains("none are valid recipes"), "got: {err}");
+        assert!(
+            err.to_string().contains("none are valid recipes"),
+            "got: {err}"
+        );
         // Nothing recorded when the install fails.
         assert!(load_manifest(&recipes_dir).unwrap().sources.is_empty());
     }
@@ -501,13 +559,20 @@ mod tests {
         let _g = TempGuard(tmp.clone());
         std::fs::remove_dir_all(&tmp).unwrap(); // git clone wants a non-existent dest
         let sha = shallow_clone(&src, &tmp).unwrap();
-        assert_eq!(sha.len(), 40, "HEAD should pin to a full 40-char SHA, got {sha:?}");
+        assert_eq!(
+            sha.len(),
+            40,
+            "HEAD should pin to a full 40-char SHA, got {sha:?}"
+        );
 
         // No recipes in that repo → discovery bails cleanly rather than panicking.
         let recipes_dir = scratch();
         let _rg = TempGuard(recipes_dir.clone());
         let err = install_from_dir(&src, &tmp, &sha, &recipes_dir).unwrap_err();
-        assert!(err.to_string().contains("no .kdl recipes found"), "got: {err}");
+        assert!(
+            err.to_string().contains("no .kdl recipes found"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -518,12 +583,15 @@ mod tests {
                 git_ref: Some("main".into()),
                 sha: "abc123".into(),
                 dir: "o__r".into(),
-                recipes: vec!["linkedin/scrape_profile".into()],
+                recipes: vec!["acme/scrape_profile".into()],
             }],
         };
         let s = toml::to_string_pretty(&m).unwrap();
         let back: Manifest = toml::from_str(&s).unwrap();
         assert_eq!(back.sources.len(), 1);
-        assert_eq!(back.sources[0].recipes, vec!["linkedin/scrape_profile".to_string()]);
+        assert_eq!(
+            back.sources[0].recipes,
+            vec!["acme/scrape_profile".to_string()]
+        );
     }
 }

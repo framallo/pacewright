@@ -10,7 +10,7 @@
 //! gone: there is no throwaway profile left to snapshot cookies into.
 //!
 //! Letting chrome-agent *launch* the browser is what broke auth — a CDP-launched browser is a bot
-//! signal, so LinkedIn walled the profile and revoked `li_at`, and Google refused sign-in outright.
+//! signal, so Acme walled the profile and revoked `li_at`, and Google refused sign-in outright.
 //! See `docs/plans/2026-07-16-single-chrome-attach.md`.
 //!
 //! This is the pragmatic first implementation of the seam. A native impl over a
@@ -23,7 +23,7 @@ use serde_json::Value;
 
 /// chrome-agent's browsers and pages are *named* and global to the machine. Left at
 /// the defaults, every consumer shares one browser and one page called `default` —
-/// so an unrelated tool (the Riverside/podcast tooling on this box does exactly
+/// so an unrelated tool (the Globex/podcast tooling on this box does exactly
 /// this) can navigate the page between our `goto` and our `eval`, and we would
 /// silently scrape the wrong site and report success. pacewright therefore pins its
 /// own `--browser` and `--page` names and never touches `default`.
@@ -32,7 +32,9 @@ pub const DEFAULT_PAGE_NAME: &str = "pacewright";
 
 /// Where the always-on Chrome listens. Re-exported from core so the two callers of chrome-agent
 /// cannot drift onto different endpoints.
-pub use pacewright_core::browser::{default_connect_endpoint, explain_connect_failure, DEFAULT_CHROME_CONNECT};
+pub use pacewright_core::browser::{
+    default_connect_endpoint, explain_connect_failure, DEFAULT_CHROME_CONNECT,
+};
 
 /// Every verb **attaches** to the operator's always-on, non-headless Chrome (started by launchd
 /// on `--remote-debugging-port`, never by chrome-agent). There is no session-establishing verb
@@ -159,7 +161,11 @@ fn stale_page_target(out: &Result<String, BrowserError>) -> bool {
         Ok(stdout) => last_json(stdout)
             .ok()
             .filter(|v| v.get("ok").and_then(Value::as_bool) == Some(false))
-            .and_then(|v| v.get("error").and_then(Value::as_str).map(is_stale_page_target))
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(Value::as_str)
+                    .map(is_stale_page_target)
+            })
             .unwrap_or(false),
     }
 }
@@ -312,7 +318,10 @@ mod tests {
 
     #[test]
     fn browser_and_page_names_are_overridable() {
-        let g = CliBrowser::new().browser_name("b1").page_name("p1").global_args();
+        let g = CliBrowser::new()
+            .browser_name("b1")
+            .page_name("p1")
+            .global_args();
         let pos = |flag: &str| g.iter().position(|a| a == flag).unwrap();
         assert_eq!(g[pos("--browser") + 1], "b1");
         assert_eq!(g[pos("--page") + 1], "p1");
@@ -321,15 +330,25 @@ mod tests {
     /// Every verb attaches to the always-on Chrome. There is no longer a "session-establishing"
     /// verb: `goto` used to carry `--copy-cookies` to snapshot the operator's cookies into a
     /// throwaway profile, but the attached profile IS the live session, so goto and eval are
-    /// identical. Launching is what got LinkedIn's `li_at` revoked.
+    /// identical. Launching is what got Acme's `li_at` revoked.
     #[test]
     fn every_verb_attaches_and_carries_no_session_flags() {
         let b = CliBrowser::new().timeout_secs(5);
         let g = b.global_args();
-        let pos = |f: &str| g.iter().position(|a| a == f).unwrap_or_else(|| panic!("{f} absent: {g:?}"));
+        let pos = |f: &str| {
+            g.iter()
+                .position(|a| a == f)
+                .unwrap_or_else(|| panic!("{f} absent: {g:?}"))
+        };
         assert_eq!(g[pos("--connect") + 1], DEFAULT_CHROME_CONNECT);
-        assert!(!g.contains(&"--copy-cookies".to_string()), "nothing to copy when attached: {g:?}");
-        assert!(!g.contains(&"--headed".to_string()), "attached Chrome is visible already: {g:?}");
+        assert!(
+            !g.contains(&"--copy-cookies".to_string()),
+            "nothing to copy when attached: {g:?}"
+        );
+        assert!(
+            !g.contains(&"--headed".to_string()),
+            "attached Chrome is visible already: {g:?}"
+        );
         // --json and --timeout are always present, and precede the subcommand.
         assert_eq!(g[0], "--json");
         assert_eq!((g[1].as_str(), g[2].as_str()), ("--timeout", "5"));
@@ -339,8 +358,13 @@ mod tests {
     /// so stealth stays on by default.
     #[test]
     fn stealth_is_on_by_default_and_can_be_disabled() {
-        assert!(CliBrowser::new().global_args().contains(&"--stealth".to_string()));
-        assert!(!CliBrowser::new().stealth(false).global_args().contains(&"--stealth".to_string()));
+        assert!(CliBrowser::new()
+            .global_args()
+            .contains(&"--stealth".to_string()));
+        assert!(!CliBrowser::new()
+            .stealth(false)
+            .global_args()
+            .contains(&"--stealth".to_string()));
     }
 
     #[tokio::test]

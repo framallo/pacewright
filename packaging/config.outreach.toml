@@ -1,0 +1,47 @@
+# ~/.pacewright/config.toml — pacing/limits + the attached Chrome. Keys not listed are unrestricted.
+
+# The always-on Chrome pacewright ATTACHES to (started by the pacewright-chrome launchd job). Must
+# match its --remote-debugging-port. pacewright never launches a browser itself.
+[browser]
+connect = "http://127.0.0.1:9222"
+
+# --- Outreach fleet caps (migrated from the per-script inline caps/gaps) -----------------------
+
+# MatchMaker guest pitching: 100/day, ~55-80s apart, only inside waking hours (was CAP=100 GAP=55
+# +jitter in matchmaker-pitch-run.sh). The all-time ledger (scope matchmaker.pitch) prevents re-pitch.
+[limits."matchmaker.pitch"]
+daily_cap = 100
+min_gap   = "55s"
+jitter    = 0.35
+active    = "07:00-22:00"
+
+# The read-only category scan is light; just keep a small gap between category pages.
+[limits."matchmaker.scan"]
+min_gap = "3s"
+
+# LinkedIn invitation sweep: a few runs a day at most, well spaced (recipe caps 250 internally).
+[limits."linkedin.invitations"]
+daily_cap = 4
+min_gap   = "30m"
+
+# Every headless `claude -p` round (LinkedIn comments, X engage, book-promo) spends this one key, so
+# a shared daily cap + gap is a safety net on top of the fixed cron slots. Active window keeps a
+# stuck retry from firing overnight.
+[limits."claude_cli.run"]
+daily_cap = 8
+min_gap   = "20m"
+active    = "06:00-23:00"
+
+# For the deterministic LinkedIn-comment / X pipelines once their scan/act recipes are built.
+[limits."linkedin.comment"]
+daily_cap = 50
+min_gap   = "75s"
+jitter    = 0.35
+active    = "07:00-22:00"
+
+# The example dummy key, kept for the engine's tests/examples.
+[limits."dummy.capped"]
+daily_cap = 3
+min_gap   = "8m"
+jitter    = 0.5
+active    = "09:00-18:00"

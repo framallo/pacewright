@@ -32,7 +32,11 @@ pub async fn snapshot(srv: &Server) -> Value {
     let status = rpc_value(srv, Request::Status).await;
     let tasks = rpc_value(
         srv,
-        Request::List { status: None, adapter: None, limit: Some(100) },
+        Request::List {
+            status: None,
+            adapter: None,
+            limit: Some(100),
+        },
     )
     .await;
     let schedules = rpc_value(srv, Request::ScheduleList).await;
@@ -79,7 +83,9 @@ async fn push_snapshots(mut socket: WebSocket, srv: Arc<Server>) {
     loop {
         interval.tick().await; // fires immediately on the first iteration, then every 1 s
         let snap = snapshot(&srv).await;
-        let Ok(txt) = serde_json::to_string(&snap) else { continue };
+        let Ok(txt) = serde_json::to_string(&snap) else {
+            continue;
+        };
         if socket.send(Message::Text(txt)).await.is_err() {
             break; // client disconnected
         }
@@ -136,7 +142,8 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_reflects_an_applied_schedule() {
-        let srv = test_server_with_schedule("[[task]]\nid = \"t1\"\nrecipe = \"dummy/echo\"\n").await;
+        let srv =
+            test_server_with_schedule("[[task]]\nid = \"t1\"\nrecipe = \"dummy/echo\"\n").await;
         handle_request(&srv, Request::ScheduleApply { prune: false }).await;
         let snap = snapshot(&srv).await;
         assert_eq!(snap["schedules"][0]["id"], "t1");

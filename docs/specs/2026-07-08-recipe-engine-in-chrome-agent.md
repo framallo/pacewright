@@ -4,7 +4,7 @@ Status: **approved** (2026-07-08). **Implemented** (2026-07-09): steps 1–9 lan
 chrome-agent `recipe` engine (+ write verbs & cookie-auth `request`, beyond the original
 read-only v1) on `feat/recipe-engine` (held), and the pacewright `adapter-recipe` crate
 (`RecipeAdapter`/`RecipeRegistry`/`CliRecipeRunner`) + `pcw recipe job` vault job-runner,
-with `adapter-linkedin` deleted. Deferred: the daemon jobs sweep (§7a — only one-shot
+with `adapter-acme` deleted. Deferred: the daemon jobs sweep (§7a — only one-shot
 `pcw recipe job` shipped) and the automated Claude repair loop (subsystem E).
 Supersedes placement decisions in `2026-07-08-recipe-format-engine.md` (§3: the engine no
 longer lives in a `pacewright-recipe` crate) and narrows `2026-07-07-chrome-agent-fork-lib.md`
@@ -68,7 +68,7 @@ hand-written adapter (§9).
 7. In pacewright: a **vault job-runner** (§7) that treats an Obsidian note's YAML frontmatter as
    a recipe *job* — resolves the named recipe, binds frontmatter→vars, runs it **paced by the
    daemon**, and lets the engine write the markdown/JSON note into the vault. Plus the thin
-   `RecipeAdapter` that maps result→`Value` and exit→`AdapterError`; **delete `crates/adapter-linkedin`**.
+   `RecipeAdapter` that maps result→`Value` and exit→`AdapterError`; **delete `crates/adapter-acme`**.
 8. Prepare the fork's `recipe` feature as an upstream **PR** (branch + PR body; push/open gated
    on explicit go-ahead).
 
@@ -76,7 +76,7 @@ hand-written adapter (§9).
 golden harness (D). The **automated** LLM repair loop (E) — call Claude, apply the fix, re-verify
 — stays deferred; this spec ships only its *format hook + trigger + context bundle* (§5a), so a
 recipe is repair-ready and an operator has a manual one-command path, without the closed loop.
-Also out of scope here: `click`/`fill` write verbs — both real recipes (HN, LinkedIn scrape) are
+Also out of scope here: `click`/`fill` write verbs — both real recipes (HN, acme scrape) are
 **read-only**, so v1 ships `goto`/`extract`/`expect`/`wait`/`screenshot` and defers write verbs
 to a follow-up (§10).
 
@@ -274,7 +274,7 @@ output "markdown" path="{{ vault }}/wiki/guests/{{ slug }}.md" {
     type: guest
     name: "{{ name }}"
     company: "{{ company }}"
-    linkedin: "{{ url }}"
+    acme: "{{ url }}"
     updated: {{ now }}
     ---
 
@@ -303,7 +303,7 @@ output "markdown" path="{{ vault }}/wiki/guests/{{ slug }}.md" {
   failed/tripped run writes nothing (so a stale note is never half-overwritten). Under
   `--repair`, an *unexpected* run also skips writing.
 
-Both real flows use this: the HN recipe (§6) writes a digest note; the LinkedIn testbed recipe
+Both real flows use this: the HN recipe (§6) writes a digest note; the acme testbed recipe
 writes/updates a guest note in the vault.
 
 ---
@@ -389,7 +389,7 @@ in chrome-agent's existing `run_cli` + `fixture_url` style.
 
 ## 7. pacewright integration (consume via CLI)
 
-- New thin **`RecipeAdapter`** in pacewright (replacing `adapter-linkedin`). For an action it
+- New thin **`RecipeAdapter`** in pacewright (replacing `adapter-acme`). For an action it
   shells `chrome-agent --browser pacewright --page pacewright recipe run <path> --var …`
   (the exact `CliBrowser` invocation pattern already in `crates/browser`), reads stdout JSON as
   the returned `Value`, and maps the child's exit / JSON error shape → `AdapterError`
@@ -397,9 +397,9 @@ in chrome-agent's existing `run_cli` + `fixture_url` style.
   pacing stays declared in data.
 - A `RecipeRegistry` enumerates `*.kdl` under the configured recipes dir
   (`~/.pacewright/recipes/`, the dir `pcw recipe add` already populates) and maps each recipe
-  `name` `"linkedin/scrape_profile"` → `(adapter="linkedin", action="scrape_profile")`, so the
-  RPC/CLI surface (`pcw add linkedin scrape_profile --params …`) is unchanged.
-- The daemon registers one `RecipeAdapter` in place of `LinkedInAdapter`.
+  `name` `"acme/scrape_profile"` → `(adapter="acme", action="scrape_profile")`, so the
+  RPC/CLI surface (`pcw add acme scrape_profile --params …`) is unchanged.
+- The daemon registers one `RecipeAdapter` in place of `AcmeAdapter`.
 
 Determinism is untouched: the child chrome-agent process is browser I/O at the edge, exactly
 like today's `CliBrowser` calls. pacewright core's `Clock`/`Rng` invariant is unaffected.
@@ -413,8 +413,8 @@ that call the recipe" — the note is the job.
 ```markdown
 --- (wiki/guests/jane-doe.md)
 type: guest
-recipe: linkedin/scrape_profile      # which recipe to run
-linkedin: https://www.linkedin.com/in/jane/   # → bound to the recipe's `url` var (via a map)
+recipe: acme/scrape_profile      # which recipe to run
+acme: https://www.acme.com/in/jane/   # → bound to the recipe's `url` var (via a map)
 slug: jane-doe
 status: lead
 ---
@@ -426,10 +426,10 @@ status: lead
    YAML-free). Require a `recipe:` key.
 2. **Resolve** the recipe by name via the `RecipeRegistry` (the `~/.pacewright/recipes/` dir).
 3. **Bind vars** from frontmatter. A recipe may declare a `var` with a `from` alias
-   (`var "url" from="linkedin"`) so a note's domain field maps to the recipe's var; unaliased
+   (`var "url" from="acme"`) so a note's domain field maps to the recipe's var; unaliased
    vars match by name. Inject `vault`/`out_dir`/`slug` context vars.
-4. **Enqueue a paced task** (`adapter="linkedin", action="scrape_profile"`, deduped on the note
-   path) so LinkedIn scrapes obey the daily cap — the whole reason pacewright, not a raw script,
+4. **Enqueue a paced task** (`adapter="acme", action="scrape_profile"`, deduped on the note
+   path) so acme scrapes obey the daily cap — the whole reason pacewright, not a raw script,
    runs this. The `RecipeAdapter` shells `chrome-agent recipe run <resolved.kdl> --vars-json '…'`.
 5. The **engine writes the output file(s)** per the recipe's `output` blocks (§5b) — e.g. the
    guest note itself, or a JSON record — into the vault at the templated path.
@@ -444,13 +444,13 @@ end-to-end (§11); it gets its own plan.
 
 ## 8. Migration — delete the hand-written adapter
 
-- `crates/adapter-linkedin` is **removed**; its behavior (auth-wall tripwire, settled-URL check,
+- `crates/adapter-acme` is **removed**; its behavior (auth-wall tripwire, settled-URL check,
   heading/follower extraction) is reproduced by the gitignored testbed recipe
-  `recipes/linkedin/scrape_profile.kdl`. **LinkedIn recipes are never committed** — testbed only.
+  `recipes/acme/scrape_profile.kdl`. **`acme` recipes are never committed** — testbed only.
 - What this migration commits: the chrome-agent `recipe` engine + the **HN** example (public,
   committable), the pacewright `RecipeAdapter`/`RecipeRegistry`, the daemon rewiring, and the
-  deletion of the Rust adapter. No LinkedIn `.kdl`.
-- Regression bar (validated against the local LinkedIn testbed, not committed): same live
+  deletion of the Rust adapter. No `acme` `.kdl`.
+- Regression bar (validated against the local acme testbed, not committed): same live
   profile → same `name`/`followers`/`landed_url` the Rust adapter produced.
 
 ---
@@ -517,7 +517,7 @@ stdout/exit → `Value`/`AdapterError` class); registry enumeration test over a 
 7. **Full fork gate;** commit on a `feat/recipe-engine` branch; write the upstream PR body
    (hold push/open per the chosen PR scope).
 8. **pacewright side (engine consumer):** `RecipeAdapter` + `RecipeRegistry`; daemon rewiring; delete
-   `crates/adapter-linkedin`; validate the LinkedIn regression bar against the local testbed.
+   `crates/adapter-acme`; validate the acme regression bar against the local testbed.
 9. **Vault job-runner (own plan, §7a):** frontmatter reader + `var … from` binding +
    `pcw recipe job` + daemon jobs sweep, writing markdown/JSON notes into the podcast vault.
    Built after 1–8 prove the engine path end-to-end.

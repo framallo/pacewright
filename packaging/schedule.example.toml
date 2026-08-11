@@ -24,9 +24,9 @@ params = { url = "https://news.ycombinator.com/", out_dir = "~/vault/digests" }
 
 [[task]]
 id     = "scrape-jane"
-recipe = "linkedin/scrape_profile"
+recipe = "acme/scrape_profile"
 at     = "2026-07-10T09:00:00"             # one-shot
-params = { url = "https://www.linkedin.com/in/jane/" }
+params = { url = "https://www.example.com/in/jane/" }
 
 [[task]]
 id      = "spotify-covers"

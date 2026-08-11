@@ -11,10 +11,10 @@ verified live; **auth half blocked on Federico at the keyboard**. Phase 6 not st
 pacewright gives every *account* its own chrome-agent-**launched** browser
 (`runner.rs:153`, `auth.rs:CliLoginLauncher`). Launching Chrome over CDP is a bot signal:
 
-- **LinkedIn** walls a launched profile on profile scrapes and revokes `li_at`, logging
-  the session out. This is the bug that motivates the refactor.
-- **Google/YouTube** refuses sign-in on a launched browser outright ("this browser or app
-  may not be secure"), which is why `pcw auth login prevetted-youtube` hangs at
+- **acme** walls a launched profile on profile scrapes and revokes its session cookie,
+  logging the session out. This is the bug that motivates the refactor.
+- **Some identity providers refuse sign-in on a launched browser** outright ("this browser or app
+  may not be secure"), which is why `pcw auth login initech-account` hangs at
   "logging in…" and why the CDP-**attach** workaround exists outside the auth system.
 
 The `--headed` patch at `runner.rs:177` treats the symptom (headless is *also* a bot
@@ -38,7 +38,7 @@ separated by **named tabs**, not by browser profiles.
 | bot surface | launched Chromium | a real Chrome a human signs into |
 
 This is not speculative. `~/.chrome-agent/sessions.json` already contains a working
-precedent — the `yt-attach` entry, `pid: null` with a ws endpoint on 9222 and named
+precedent — the `initech-attach` entry, `pid: null` with a ws endpoint on 9222 and named
 pages. The refactor generalizes that one entry into the only path.
 
 ## Verified assumptions
@@ -49,11 +49,11 @@ pages. The refactor generalizes that one entry into the only path.
 - endpoint live; UA reports `Chrome/150.0.0.0`, **not** `HeadlessChrome` — the
   fingerprint that matters. ✅
 - `--connect http://127.0.0.1:9222` attaches. ✅
-- **three named pages (`linkedin`/`youtube`/`riverside`) coexist as three real tabs in one
-  browser, and navigating one does not clobber another** — re-reading the `linkedin` tab
+- **three named pages (`acme`/`initech`/`globex`) coexist as three real tabs in one
+  browser, and navigating one does not clobber another** — re-reading the `acme` tab
   after driving the other two still returned `Example Domain`. This is the isolation
   property the whole refactor rests on. ✅
-- `gc` reaped the dead launched `prevetted-linkedin` and left the attached session alive
+- `gc` reaped the dead launched `acme-account` and left the attached session alive
   (`remaining: 3`). The "external `--connect` sessions are never touched" claim is now
   **verified, not just documented**. ✅
 
@@ -62,7 +62,7 @@ Behaviours probed live because the whole design depends on them:
 - **`--connect` does NOT silently fall back to launching.** With no cached session and a dead
   endpoint it fails in-band (`{"ok":false,"error":"Could not resolve CDP WebSocket…"}`) on a
   **zero exit**. This was the scariest possible failure mode — a silent launch would have
-  reintroduced the LinkedIn bug invisibly whenever Chrome was down. It does not happen. ✅
+  reintroduced the acme bug invisibly whenever Chrome was down. It does not happen. ✅
 - **A cached session record beats the `--connect` flag.** Pointing `--connect` at a dead port
   while a live record existed for that browser name silently reused the cached endpoint. So
   changing `browser.connect` does not take effect while a stale record exists — a config-doesn't-
@@ -81,24 +81,24 @@ Two structural findings from the spike:
    `sessions.json` bookkeeping key (the endpoint identifies the browser), but it still
    must not be `default`.
 2. **`sessions.json` records `headless: true` for attached sessions** even though the
-   Chrome is visibly headed (`yt-attach` shows the same). Cosmetic chrome-agent
+   Chrome is visibly headed (`initech-attach` shows the same). Cosmetic chrome-agent
    bookkeeping — `pcw chrome status` must not trust that field.
 
-**Auth half: VERIFIED 2026-07-17 — the last risk is closed.** Federico signed into Google and
-LinkedIn by hand in the attached Chrome; then, driven through `--connect`:
+**Auth half: VERIFIED 2026-07-17 — the last risk is closed.** Federico signed into both
+providers by hand in the attached Chrome; then, driven through `--connect`:
 
-- **YouTube Studio** loaded signed in (`Channel dashboard - YouTube Studio`). Google **accepts**
+- **initech's studio dashboard** loaded signed in. The identity provider **accepts**
   sign-in on a `--remote-debugging-port` Chrome — the single biggest risk in the whole plan. ✅
-- **LinkedIn** loaded the feed signed in, then loaded a **profile** (`Vasu Raj Jain | LinkedIn`,
-  the historically session-burning op), and a feed reload right after was **still signed in** —
-  `li_at` survived. This is the exact failure the refactor exists to fix, and attach fixes it. ✅
+- **acme** loaded the feed signed in, then loaded a **profile** (the historically
+  session-burning op), and a feed reload right after was **still signed in** —
+  the session cookie survived. This is the exact failure the refactor exists to fix, and attach fixes it. ✅
 
 Nothing about the design is unproven now. The one operational wrinkle found (below) is about tab
 bookkeeping, not auth.
 
 **Operational finding — stale page targets don't self-heal.** The browser-level GUID self-heals
 across a Chrome restart (verified 2026-07-16), but a *page*-level stale target does not: when the
-`linkedin` tab's cached `targetId` was dead (tab closed since it was cached), chrome-agent errored
+`acme` tab's cached `targetId` was dead (tab closed since it was cached), chrome-agent errored
 `Target … not found in /json/list` instead of recreating the tab. Pruning the page from
 `sessions.json` fixed it. **This will bite in production** — if the operator closes a site's tab,
 the next scheduled task for it fails until the record is pruned. The daemon should treat that error
@@ -108,14 +108,14 @@ blocking, but it turns a closed tab into a silent task failure.
 ## Accepted trade-offs
 
 **Foreground contention — smaller than it looked.** One Chrome means one foreground tab, and
-Chrome throttles background tabs, which is what stalls a Riverside render. But pacewright's
+Chrome throttles background tabs, which is what stalls a globex render. But pacewright's
 dispatch loop is already strictly serial (verified, and now pinned by
 `foreground_serialization_is_load_bearing`), so no two recipes can contend for the foreground and
 **no mutex is needed**. All that was required was `foreground #true` → `--activate` on the one
 recipe that must be watched. The regression is real only if the dispatch loop is ever made
 concurrent — which the pin catches.
 
-**One account per site, permanently.** Two LinkedIn accounts is possible today (two
+**One account per site, permanently.** Two acme accounts is possible today (two
 profiles) and becomes impossible. Federico runs one account per site, so this is
 accepted, not overlooked.
 
@@ -134,7 +134,7 @@ the new model, watch it fail, then change the builder.**
 ### Phase 0 — Spike: prove the attach path ✅ FULLY PASSED
 
 Both halves done. Mechanical half 2026-07-16 (attach works, named tabs isolate, `gc` is safe);
-auth half 2026-07-17 (YouTube signed in, LinkedIn profile load with `li_at` surviving — see
+auth half 2026-07-17 (initech signed in, acme profile load with the session cookie surviving — see
 Verified assumptions). The gate is met, so Phase 6 is unblocked.
 
 ### Phase 1 — Chrome supervision + preflight ✅ (except `pcw chrome status`)
@@ -142,7 +142,7 @@ Verified assumptions). The gate is met, so Phase 6 is unblocked.
 - ✅ launchd plist `packaging/com.paperclip.pacewright-chrome.plist` — `KeepAlive`, `RunAtLoad`,
   port 9222, dedicated `--user-data-dir`, `ProcessType Interactive` (**not** `Background`: macOS
   throttles Background processes and Chrome already throttles non-foreground tabs — together they
-  would stall exactly the Riverside renders Phase 4 is about). **Installed and loaded**; KeepAlive
+  would stall exactly the globex renders Phase 4 is about). **Installed and loaded**; KeepAlive
   revival verified.
 - ✅ `Config.browser_connect` from `[browser] connect` (`core/src/config.rs`), replacing
   `browser_idle_timeout_ms`. The retired `idle_timeout` key is ignored rather than fatal, so an
@@ -185,9 +185,9 @@ the attached Chrome with `--activate` and leaves the window up for the human. Th
 are unchanged — only the launcher's args change, so `auth.rs`'s existing tests keep
 their shape.
 
-This is the fix. LinkedIn login stops burning its own session because nothing launches a
-browser anymore; YouTube's special-case workaround folds back into `auth login` and the
-skill's "⚠ Google accounts can't use `auth_login`" caveat is retired.
+This is the fix. acme login stops burning its own session because nothing launches a
+browser anymore; the identity-provider special-case workaround folds back into `auth login` and the
+skill's "⚠ some providers can't use `auth_login`" caveat is retired.
 
 ### Phase 4 — Foreground ✅ (no mutex — the premise was wrong)
 
@@ -202,7 +202,7 @@ and the last-activated tab may belong to another site:
 - ✅ `foreground #true` recipe flag → `RecipeMeta.foreground` (`registry.rs`), default **off**
   (raising a window steals focus on the operator's Mac; scrapes and API polls must not).
 - ✅ `CliRecipeRunner` passes `--activate` only for foreground recipes.
-- ✅ Applied to `riverside/render_clips` — the one recipe that needs it. Verified by parsing the
+- ✅ Applied to `globex/render_clips` — the one recipe that needs it. Verified by parsing the
   real installed recipe: `render_clips foreground=true`, `publish_clips`/`share_spotify` false.
   ⚠️ That `.kdl` is **generated**, and its generator lives only in ephemeral job scratch
   (`~/.claude/jobs/f4ebd47e/tmp/gen_recipes.py`). Both were updated, but the generator will not
@@ -221,7 +221,7 @@ and the last-activated tab may belong to another site:
 
 Removed `spawn_browser_reaper`, `DEFAULT_BROWSER_IDLE_TIMEOUT_MS`, `BROWSER_REAP_EVERY`, and
 `browser.idle_timeout`. Against an attached session the reaper is a guaranteed no-op (verified:
-`gc` reaped the dead launched `prevetted-linkedin` and left the attached session alive), and the
+`gc` reaped the dead launched `acme-account` and left the attached session alive), and the
 Chrome is now supervised by launchd, so reaping was not pacewright's job any more.
 
 **It was also silently broken.** It passed `--json` *after* the `gc` subcommand, but `--json` is a
@@ -232,15 +232,15 @@ the HEAD commit) and said nothing about it. Deleting dead code, not working code
 ### Phase 6 — Migrate recipes + docs 🔶 IN PROGRESS
 
 - ✅ **Recipes de-generated → static with parameters** (Federico's directive 2026-07-17). The
-  riverside recipes were emitted by `gen_recipes.py`, which lived only in ephemeral job scratch —
-  a regen would silently drop `foreground #true` and stall renders. Root cause: `youtube_export`
+  globex recipes were emitted by `gen_recipes.py`, which lived only in ephemeral job scratch —
+  a regen would silently drop `foreground #true` and stall renders. Root cause: `media_export`
   was a compiled chrome-agent step verb that **no longer exists** (`recipe check` →
   `unknown step verb`), so the generator inlined the JS. That inlined form is now the canonical
   **static, hand-maintained** file. Done: rewrote the "edit the generator, not this file" headers
   to name the two `{{ url }}`/`{{ guest }}` parameters; synced repo staging
-  (`recipes/riverside/{render,publish}_clips.kdl`, which still held the dead `youtube_export`
+  (`recipes/globex/{render,publish}_clips.kdl`, which still held the dead `media_export`
   verb) to the working form; retired the generator to `*.RETIRED` with a README so a stray run
-  can't clobber. All six riverside recipes pass `chrome-agent recipe check`; `render_clips` parses
+  can't clobber. All six globex recipes pass `chrome-agent recipe check`; `render_clips` parses
   `foreground=true`, the others false.
   ⚠️ The true distribution channel is the external awesome-recipes repo (`.gitignore` calls
   `recipes/` "distributed data"); it is **not reachable from here** and still needs the same
@@ -248,7 +248,7 @@ the HEAD commit) and said nothing about it. Deleting dead code, not working code
 - ⬜ account recipes keep their names; `accounts/*` still needs a daemon restart (`server.rs:24`).
 - ⬜ `pcw auth recheck` for all three accounts against the attached Chrome, end to end.
 - ⬜ retire the three launched profiles from `sessions.json` (move aside, don't delete).
-- ⬜ update the `pacewright` skill: drop the Google `auth_login` caveat, document the single
+- ⬜ update the `pacewright` skill: drop the identity-provider `auth_login` caveat, document the single
   Chrome + tab-per-site model and the launchd job.
 
 ## Open question for Phase 1

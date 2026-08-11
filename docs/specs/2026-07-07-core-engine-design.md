@@ -2,15 +2,15 @@
 
 **Date:** 2026-07-07
 **Status:** Design approved, pending spec review
-**Scope:** Milestone 1 only — the platform-agnostic task engine, proven against a DummyAdapter. Real platform adapters (LinkedIn/Riverside/YouTube), the MCP server, the Claude skill, and the Tauri GUI are later milestones, specified separately.
+**Scope:** Milestone 1 only — the platform-agnostic task engine, proven against a DummyAdapter. Real platform adapters (`acme`/`globex` and others), the MCP server, the Claude skill, and the Tauri GUI are later milestones, specified separately.
 
 ---
 
 ## 1. Purpose
 
-`pacewright` is a Rust tool that **queues, schedules, and runs browser-automation tasks** across platforms (LinkedIn first; Twitter/YouTube/Riverside later), replacing today's scattered `pd_*` launchd daemon scripts and eventually **replacing Postiz** as the publishing scheduler.
+`pacewright` is a Rust tool that **queues, schedules, and runs browser-automation tasks** across platforms (`acme` first; other social, video, and media platforms such as `globex` later), replacing today's scattered `pd_*` launchd daemon scripts and eventually **replacing Postiz** as the publishing scheduler.
 
-The name is a play on **Playwright**: a *wright* (craftsman) of **pace**. It encodes the technical thesis — a **real-CDP, human-paced** browser worker, deliberately *not* Playwright (see §9), because for authenticated LinkedIn automation the safest substrate is the real logged-in Chrome profile driven over CDP, with human pacing and human-like input.
+The name is a play on **Playwright**: a *wright* (craftsman) of **pace**. It encodes the technical thesis — a **real-CDP, human-paced** browser worker, deliberately *not* Playwright (see §9), because for authenticated automation of a social network the safest substrate is the real logged-in Chrome profile driven over CDP, with human pacing and human-like input.
 
 Milestone 1 delivers the **engine**: a long-running daemon that owns a task queue, a scheduler, a human-pacing/daily-limit enforcer, a runner, and durable task tracking — with a **DummyAdapter** that exercises all of it with zero browser involvement.
 
@@ -41,8 +41,8 @@ Milestone 1 delivers the **engine**: a long-running daemon that owns a task queu
              │  ┌────────┐   ┌───────────┐  │
    clients   │  │Scheduler│──▶│  Runner   │──┼──▶ Adapters
  ───socket──▶│  │+ Limits │   │(executes) │  │    └ DummyAdapter (M1)
-  (JSON-RPC) │  └────┬────┘   └─────┬─────┘  │      (linkedin/riverside/
-             │       │              │        │       youtube — later)
+  (JSON-RPC) │  └────┬────┘   └─────┬─────┘  │      (acme/globex/
+             │       │              │        │       … — later)
              │       ▼              ▼        │
              │   ┌─────────────────────┐    │
              │   │   Store (SQLite/WAL) │    │
@@ -66,7 +66,7 @@ Milestone 1 delivers the **engine**: a long-running daemon that owns a task queu
 | `pacewright-daemon` | Long-running process; socket server; adapter registry; wires core together | core, proto |
 | `pacewright-cli` | `pacewright`/`pcw` binary: `add`, `list`, `get`, `cancel`, `run-now`, `pause`, `resume`, `limits`, `status`, `tui` | proto |
 | `pacewright-adapter-dummy` | Reference `Adapter` impl with fake data + simulated latency/failure | core |
-| *(later)* `pacewright-adapter-linkedin`, `-riverside`, `-youtube`, `pacewright-mcp`, Tauri app | | |
+| *(later)* `pacewright-adapter-acme`, `-globex`, `pacewright-mcp`, Tauri app | | |
 
 **Key boundary:** adapters know nothing about scheduling/limits/persistence — they implement `execute(action, params) -> Result`. The engine knows nothing about any platform — it schedules, enforces limits, persists, tracks, and calls the trait. This boundary is exactly what lets the DummyAdapter fully prove the engine.
 
@@ -79,7 +79,7 @@ Milestone 1 delivers the **engine**: a long-running daemon that owns a task queu
 | Field | Type | Purpose |
 |---|---|---|
 | `id` | TEXT (UUID) | primary key |
-| `adapter` | TEXT | e.g. `dummy`, later `linkedin-profile` |
+| `adapter` | TEXT | e.g. `dummy`, later `acme-profile` |
 | `action` | TEXT | e.g. `echo`, later `post` |
 | `params` | TEXT (JSON) | action payload |
 | `status` | TEXT | see §4 lifecycle |
@@ -115,7 +115,7 @@ Terminal tasks (`succeeded`, `failed`, `canceled`) are **never auto-deleted** in
 
 | Field | Purpose |
 |---|---|
-| `limit_key` | e.g. `dummy.capped`, later `linkedin.post` |
+| `limit_key` | e.g. `dummy.capped`, later `acme.post` |
 | `window_date` | local date (YYYY-MM-DD) the counter applies to |
 | `count` | actions spent in the window |
 | `last_spent_at` | epoch ms of last spend (for min-gap) |
@@ -174,10 +174,10 @@ jitter    = 0.5              # ±50%
 active    = "09:00-18:00"    # local
 
 # Later, real keys:
-# [limits."linkedin.post"]        daily_cap = 3   min_gap = "45m" ...
-# [limits."linkedin.comment"]     daily_cap = 15  min_gap = "8m"  ...
-# [limits."linkedin.profile_scrape"] daily_cap = 40 min_gap = "20s" ...
-# [limits."youtube.upload"]       daily_cap = 5   min_gap = "30m" ...
+# [limits."acme.post"]        daily_cap = 3   min_gap = "45m" ...
+# [limits."acme.comment"]     daily_cap = 15  min_gap = "8m"  ...
+# [limits."acme.profile_scrape"] daily_cap = 40 min_gap = "20s" ...
+# [limits."globex.publish"]   daily_cap = 5   min_gap = "30m" ...
 ```
 
 **Defer, don't drop:** a task that fails any check is never lost — it becomes `deferred` with a computed `next_eligible_at` and a recorded reason. The scheduler re-considers it when eligible.
@@ -262,17 +262,17 @@ Types defined once in `pacewright-proto`; reused by CLI, TUI, and later MCP + Ta
 
 Recorded here so M1's engine boundaries anticipate it. Grounded in 2026 research on automation detection.
 
-**Thesis:** for an *authenticated LinkedIn UI session*, the safest substrate is **real-profile CDP via chrome-agent**, not Playwright. Playwright is itself a CDP client but launches a fresh Chromium with `navigator.webdriver=true` and the detectable `Runtime.enable` handshake, and presents an unproven fingerprint. chrome-agent's connect-to-real-Chrome (`--copy-cookies`) inherits a coherent, already-trusted fingerprint + session — which is precisely what LinkedIn keys on. Empirically, direct-CDP tools (nodriver-style) outperform patched Playwright against protocol-level gates; but for LinkedIn the decisive factors are fingerprint *consistency*, behavioral pacing/volume, session/IP/timezone stability, and content dedup — not the protocol per se.
+**Thesis:** for an *authenticated social-network UI session*, the safest substrate is **real-profile CDP via chrome-agent**, not Playwright. Playwright is itself a CDP client but launches a fresh Chromium with `navigator.webdriver=true` and the detectable `Runtime.enable` handshake, and presents an unproven fingerprint. chrome-agent's connect-to-real-Chrome (`--copy-cookies`) inherits a coherent, already-trusted fingerprint + session — which is precisely what such a site keys on. Empirically, direct-CDP tools (nodriver-style) outperform patched Playwright against protocol-level gates; but for such sites the decisive factors are fingerprint *consistency*, behavioral pacing/volume, session/IP/timezone stability, and content dedup — not the protocol per se.
 
 **Requirements for the "extend chrome-agent" workstream (M2):**
 1. Audit chrome-agent for the `Runtime.enable` leak, `--enable-automation`, and `navigator.webdriver`; confirm `--stealth` neutralizes them, else patch (isolated-world contexts, nodriver-style).
-2. Use **real CDP input events** (`Input.dispatch*`) for clicks/typing — not JS synthetic events (more detectable; break LinkedIn `@`-mention autocomplete).
+2. Use **real CDP input events** (`Input.dispatch*`) for clicks/typing — not JS synthetic events (more detectable; break a site's `@`-mention autocomplete).
 3. **Human mouse movement:** Bézier/curved trajectories, variable velocity, slight overshoot-and-correct, idle micro-moves — never teleport-to-coordinate.
-4. Keep the session pinned to the real profile + stable (residential) IP + stable timezone; never a throwaway Chromium for LinkedIn.
+4. Keep the session pinned to the real profile + stable (residential) IP + stable timezone; never a throwaway Chromium for the target site.
 5. Extend chrome-agent viewport (removes the ~469px avatar-capture cap).
 6. Behavioral volume/pacing is already handled by the M1 limits engine (§5).
 
-**Sources:** rebrowser.net (Runtime.enable fix), Castle.io (LinkedIn fingerprint teardown; CDP-signal decay), ianlpaterson.com 2026 anti-detect benchmark, scrapfly.io (Playwright stealth), linkednav.com (LinkedIn detection mechanics).
+**Sources:** rebrowser.net (Runtime.enable fix), Castle.io (social-network fingerprint teardown; CDP-signal decay), ianlpaterson.com 2026 anti-detect benchmark, scrapfly.io (Playwright stealth), linkednav.com (social-network detection mechanics).
 
 ---
 
@@ -299,10 +299,10 @@ The DummyAdapter + injected `Clock`/`Rng` make M1 fully testable with no browser
 |---|---|---|
 | **M1** | **Core engine + DummyAdapter + CLI + minimal TUI + launchd** *(this spec)* | `pacewright-core`, `-proto`, `-daemon`, `-cli`, `-adapter-dummy` |
 | M2 | Extend chrome-agent (viewport, real input, mouse movement, `Runtime.enable` audit) + browser handle in `RunCtx` | chrome-agent fork |
-| M3 | LinkedIn **profile** adapter (scrape, avatar) — port linkedin_scraper to Rust | `pacewright-adapter-linkedin` |
-| M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter | `-adapter-linkedin(-pages)` |
-| M5 | Riverside adapter (extract raw, export magic clips, → Spotify, → YouTube unlisted) | `-adapter-riverside` |
-| M6 | YouTube adapter + daily limits | `-adapter-youtube` |
+| M3 | `acme` **profile** adapter (scrape, avatar) — port the profile scraper to Rust | `pacewright-adapter-acme` |
+| M4 | `acme` **post / edit-mentions / reply-comments** + **pages** adapter | `-adapter-acme(-pages)` |
+| M5 | `globex` adapter (extract raw, export magic clips, → Spotify) | `-adapter-globex` |
+| M6 | Additional platform / API adapters + per-platform daily limits | `-adapter-*` |
 | M7 | MCP server + Claude skill | `pacewright-mcp` + skill |
 | M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz | Tauri app |
 

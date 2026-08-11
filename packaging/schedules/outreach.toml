@@ -1,0 +1,58 @@
+# Outreach fleet — the launchd bash scripts, migrated to declarative pacewright schedules.
+# Toggle any entry at runtime with `pcw schedule enable/disable <id>` (wins over the file default).
+#
+# Mapping to the retired scripts (see channels/pacewright-outreach-requirements-2026-08-10.md):
+#   matchmaker-pitch-run.sh  -> matchmaker-guesting  (deterministic scan->fanout pitch pipeline, R5)
+#   linkedin-comment-run.sh  -> linkedin-comment-{morning,afternoon}  (claude -p round, daemon-capped)
+#   x-engage-run.sh          -> x-engage-{morning,afternoon}          (claude -p round, daemon-capped)
+#   book-promo-run.sh        -> book-promo-weekly                     (claude -p, drafts only)
+#   (linkedin invitations)   -> linkedin-invitations                 (scheduled recipe)
+# x-harvest-run.sh is intentionally NOT here yet (a CSV-accumulating crawl; needs a recipe result
+# sink pacewright doesn't have — see the handoff note). It still runs as its launchd crawl.
+
+# --- MatchMaker guest pitching: deterministic scan->fanout pipeline, daily 09:00 --------------
+[[task]]
+id     = "matchmaker-guesting"
+recipe = "pipeline/start"
+every  = "0 9 * * *"
+params = { pipeline = "outreach/matchmaker", run_prefix = "mm" }
+
+# --- LinkedIn commenting: paced claude -p round, 2x/weekday (07:50 + 12:10) -------------------
+[[task]]
+id     = "linkedin-comment-morning"
+recipe = "claude_cli/run"
+every  = "50 7 * * 1-5"
+params = { prompt_file = "~/Sync/Business/Growth/brands/density-labs/automation/prompt-morning.md", model = "claude-opus-4-8", add_dir = "~/Sync/Business/Growth/brands/density-labs", cap_secs = 2100 }
+
+[[task]]
+id     = "linkedin-comment-afternoon"
+recipe = "claude_cli/run"
+every  = "10 12 * * 1-5"
+params = { prompt_file = "~/Sync/Business/Growth/brands/density-labs/automation/prompt-afternoon.md", model = "claude-opus-4-8", add_dir = "~/Sync/Business/Growth/brands/density-labs", cap_secs = 2100 }
+
+# --- X / Twitter engagement: paced claude -p round, 2x/weekday (08:20 + 13:40) ----------------
+[[task]]
+id     = "x-engage-morning"
+recipe = "claude_cli/run"
+every  = "20 8 * * 1-5"
+params = { prompt_file = "~/Sync/Business/Growth/brands/density-labs/automation/prompt-x.md", model = "claude-opus-4-8", add_dir = "~/Sync/Business/Growth/brands/density-labs", cap_secs = 2100 }
+
+[[task]]
+id     = "x-engage-afternoon"
+recipe = "claude_cli/run"
+every  = "40 13 * * 1-5"
+params = { prompt_file = "~/Sync/Business/Growth/brands/density-labs/automation/prompt-x.md", model = "claude-opus-4-8", add_dir = "~/Sync/Business/Growth/brands/density-labs", cap_secs = 2100 }
+
+# --- LinkedIn invitation manager: accept connects / ignore newsletters, daily 08:30 -----------
+[[task]]
+id     = "linkedin-invitations"
+recipe = "linkedin/invitations"
+every  = "30 8 * * *"
+params = { cap = "250" }
+
+# --- Ramallo book promo: weekly draft engine (drafts only, never sends), Mon 08:20 ------------
+[[task]]
+id     = "book-promo-weekly"
+recipe = "claude_cli/run"
+every  = "20 8 * * 1"
+params = { prompt_file = "~/Sync/Business/Growth/brands/ramallo/automation/prompt-weekly.md", model = "claude-opus-4-8", add_dir = ["~/Sync/Business/Growth/brands/ramallo", "~/Sync/Business/Growth", "~/work/isla-de-la-libertad-text", "~/work/density-labs-books"], cap_secs = 1800 }

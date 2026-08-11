@@ -51,7 +51,10 @@ fn effective_vars(def: &PipelineDef, vars: &Value) -> Result<Value, RunError> {
 
 /// Expand a pipeline into the tasks that implement it. Pure: touches no store.
 pub fn expand(
-    def: &PipelineDef, run_id: &str, vars: &Value, now_ms: i64,
+    def: &PipelineDef,
+    run_id: &str,
+    vars: &Value,
+    now_ms: i64,
 ) -> Result<Vec<Task>, RunError> {
     let vars = effective_vars(def, vars)?;
 
@@ -64,6 +67,9 @@ pub fn expand(
     vt.dedup_key = Some(format!("{run_id}:{VARS_STEP}"));
     vt.status = TaskStatus::Succeeded;
     vt.finished_at = Some(now_ms);
+    // Stash the pipeline's output templates on the terminal vars sentinel so `show` can collapse
+    // the run into a final report later, without re-reading the pipeline file.
+    vt.result = Some(serde_json::json!({ "output": def.output.clone() }));
     out.push(vt);
 
     // step name -> the task id a DEPENDENT must wait on (the verify, when present).
@@ -79,7 +85,17 @@ pub fn expand(
         t.step_name = Some(s.name.clone());
         t.dedup_key = Some(format!("{run_id}:{}", s.name));
         t.max_attempts = s.attempts.max(1);
-        t.pace_ms = if def.pace_min_ms > 0 { Some(def.pace_min_ms) } else { None };
+        t.pace_ms = if def.pace_min_ms > 0 {
+            Some(def.pace_min_ms)
+        } else {
+            None
+        };
+        // If a fanout declares this step as its producer, stash the spec on the task so the runner
+        // can materialize the paced/deduped act tasks when this step succeeds — without re-reading
+        // the pipeline file. (Multiple fanouts off one producer aren't supported; take the first.)
+        if let Some(f) = def.fanouts.iter().find(|f| f.after == s.name) {
+            t.fanout = Some(serde_json::to_value(f).expect("FanoutDef serializes"));
+        }
         if let Some(dep) = s.after.first() {
             t.depends_on = gate.get(dep).cloned();
             t.status = TaskStatus::Blocked;
@@ -133,7 +149,11 @@ pub fn expand(
 /// recreated, so re-running after a mid-pipeline failure continues from the failed step
 /// and redoes nothing that already worked.
 pub fn start(
-    store: &Store, def: &PipelineDef, run_id: &str, vars: &Value, now_ms: i64,
+    store: &Store,
+    def: &PipelineDef,
+    run_id: &str,
+    vars: &Value,
+    now_ms: i64,
 ) -> Result<Vec<Task>, RunError> {
     let planned = expand(def, run_id, vars, now_ms)?;
     let mut inserted = Vec::new();
@@ -154,7 +174,11 @@ pub fn retry_failed(store: &Store, run_id: &str, now_ms: i64) -> Result<usize, R
     let mut n = 0;
     for mut t in store.tasks_in_run(run_id)? {
         if t.status == TaskStatus::Failed {
-            t.status = if t.depends_on.is_some() { TaskStatus::Blocked } else { TaskStatus::Pending };
+            t.status = if t.depends_on.is_some() {
+                TaskStatus::Blocked
+            } else {
+                TaskStatus::Pending
+            };
             t.attempts = 0;
             t.last_error = None;
             t.finished_at = None;
@@ -183,7 +207,10 @@ pipeline "demo" {
 "#;
 
     fn by<'a>(tasks: &'a [Task], n: &str) -> &'a Task {
-        tasks.iter().find(|t| t.step_name.as_deref() == Some(n)).unwrap()
+        tasks
+            .iter()
+            .find(|t| t.step_name.as_deref() == Some(n))
+            .unwrap()
     }
 
     #[test]
@@ -203,7 +230,10 @@ pipeline "demo" {
         assert_eq!(first.run_id.as_deref(), Some("run1"));
         assert_eq!(first.dedup_key.as_deref(), Some("run1:first"));
         assert_eq!(verify.dedup_key.as_deref(), Some("run1:first.verify"));
-        assert_eq!(verify.max_attempts, 1, "a check should not be retried by default");
+        assert_eq!(
+            verify.max_attempts, 1,
+            "a check should not be retried by default"
+        );
     }
 
     #[test]
@@ -215,7 +245,10 @@ pipeline "demo" {
         let def = parse_pipeline(src).unwrap();
         let tasks = expand(&def, "r", &json!({}), 0).unwrap();
         assert_eq!(tasks.len(), 3, "__vars, a, b");
-        assert_eq!(by(&tasks, "b").depends_on.as_deref(), Some(by(&tasks, "a").id.as_str()));
+        assert_eq!(
+            by(&tasks, "b").depends_on.as_deref(),
+            Some(by(&tasks, "a").id.as_str())
+        );
     }
 
     #[test]
@@ -270,7 +303,11 @@ pipeline "demo" {
 
         let again = start(&store, &def, "r1", &json!({}), 0).unwrap();
         assert!(again.is_empty(), "nothing may be recreated");
-        assert_eq!(store.tasks_in_run("r1").unwrap().len(), 3, "no duplicate rows");
+        assert_eq!(
+            store.tasks_in_run("r1").unwrap().len(),
+            3,
+            "no duplicate rows"
+        );
         assert_eq!(
             store
                 .tasks_in_run("r1")
@@ -308,20 +345,69 @@ pipeline "demo" {
 
         assert_eq!(retry_failed(&store, "r2", 10).unwrap(), 1);
         let after = store.tasks_in_run("r2").unwrap();
-        let a = after.iter().find(|t| t.step_name.as_deref() == Some("a")).unwrap();
-        let b = after.iter().find(|t| t.step_name.as_deref() == Some("b")).unwrap();
-        assert_eq!(a.status, TaskStatus::Succeeded, "succeeded work is never redone");
+        let a = after
+            .iter()
+            .find(|t| t.step_name.as_deref() == Some("a"))
+            .unwrap();
+        let b = after
+            .iter()
+            .find(|t| t.step_name.as_deref() == Some("b"))
+            .unwrap();
+        assert_eq!(
+            a.status,
+            TaskStatus::Succeeded,
+            "succeeded work is never redone"
+        );
         assert_eq!(b.status, TaskStatus::Blocked);
         assert_eq!(b.attempts, 0);
+    }
+
+    #[test]
+    fn resolve_output_fills_in_from_results() {
+        let src = r#"pipeline "d" {
+            step "a" recipe="dummy/echo" { }
+            output {
+                got "{{ steps.a.result.id }}"
+                note "{{ vars.n }}"
+            }
+        }"#;
+        let def = parse_pipeline(src).unwrap();
+        let mut tasks = expand(&def, "r", &json!({"n": "hi"}), 0).unwrap();
+        // Before `a` produces a result its key is omitted; the vars-backed key already resolves.
+        let early = resolve_output(&tasks).unwrap();
+        assert_eq!(early.get("note").unwrap(), "hi");
+        assert!(
+            early.get("got").is_none(),
+            "an unresolved step ref is omitted until produced"
+        );
+        // Give `a` a result -> the full report resolves.
+        for t in tasks.iter_mut() {
+            if t.step_name.as_deref() == Some("a") {
+                t.result = Some(json!({"id": "X9"}));
+            }
+        }
+        let full = resolve_output(&tasks).unwrap();
+        assert_eq!(full.get("got").unwrap(), "X9");
+        assert_eq!(full.get("note").unwrap(), "hi");
+    }
+
+    #[test]
+    fn resolve_output_is_none_without_an_output_block() {
+        let src = r#"pipeline "d" { step "a" recipe="dummy/echo" { } }"#;
+        let def = parse_pipeline(src).unwrap();
+        let tasks = expand(&def, "r", &json!({}), 0).unwrap();
+        assert!(resolve_output(&tasks).is_none());
     }
 }
 
 /// The pacewright home dir. Read once by callers, never inside helpers, so tests never
 /// have to mutate process-global env (which destabilizes parallel tests).
 pub fn home_dir() -> std::path::PathBuf {
-    std::env::var("PACEWRIGHT_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".pacewright")
-    })
+    std::env::var("PACEWRIGHT_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".pacewright")
+        })
 }
 
 /// Where a run's shared dataset lives. Recipes execute in a separate process and cannot
@@ -335,14 +421,19 @@ pub fn dataset_path(home: &std::path::Path, run_id: &str) -> std::path::PathBuf 
 /// dispatch. Making the file authoritative would reintroduce the "did this actually
 /// happen" ambiguity that verification exists to remove.
 pub fn write_dataset(
-    home: &std::path::Path, run_id: &str, vars: &Value, results: &HashMap<String, Value>,
+    home: &std::path::Path,
+    run_id: &str,
+    vars: &Value,
+    results: &HashMap<String, Value>,
 ) -> std::io::Result<std::path::PathBuf> {
     let path = dataset_path(home, run_id);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let steps: Map<String, Value> =
-        results.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let steps: Map<String, Value> = results
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let doc = serde_json::json!({
         "run_id": run_id,
         "vars": vars,
@@ -350,6 +441,142 @@ pub fn write_dataset(
     });
     std::fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
     Ok(path)
+}
+
+/// Collapse a run's declared `output` block into a final report. The output templates were stashed
+/// on the vars sentinel at expansion; here they are resolved key-by-key against the run's
+/// accumulated (and verified) results. A key whose references cannot yet resolve is omitted, so the
+/// report fills in as the run progresses. Returns None when the pipeline declared no output.
+/// Generic: it understands only `{{ steps.*.result.* }}` / `{{ steps.*.verify.result.* }}` / `{{ vars.* }}`.
+pub fn resolve_output(tasks: &[Task]) -> Option<Value> {
+    let mut vars = Value::Object(Map::new());
+    let mut results: HashMap<String, Value> = HashMap::new();
+    let mut template: Option<Value> = None;
+    for t in tasks {
+        match t.step_name.as_deref() {
+            Some(VARS_STEP) => {
+                vars = t.params.clone();
+                template = t.result.as_ref().and_then(|r| r.get("output").cloned());
+            }
+            Some(name) => {
+                if let Some(res) = t.result.clone() {
+                    results.insert(name.to_string(), res);
+                }
+            }
+            None => {}
+        }
+    }
+    let template = template?;
+    let obj = template.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut out = Map::new();
+    for (k, v) in obj {
+        if let Ok(resolved) = crate::refs::resolve(v, &vars, &results) {
+            out.insert(k.clone(), resolved);
+        }
+    }
+    Some(Value::Object(out))
+}
+
+/// The pipeline file for `name`: `<home>/recipes/pipelines/<name>.kdl`, with `/` in the name
+/// flattened to `-` (so `linkedin/comment` -> `linkedin-comment.kdl`). The single source of this
+/// path convention, shared by the daemon's RunStart handler and the pipeline launcher.
+pub fn pipeline_path(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+    home.join("recipes/pipelines")
+        .join(format!("{}.kdl", name.replace('/', "-")))
+}
+
+/// Dig a dotted path into a JSON value; an empty path returns the value itself.
+fn dig_path(root: &Value, path: &str) -> Value {
+    if path.trim().is_empty() {
+        return root.clone();
+    }
+    let mut cur = root;
+    for p in path.split('.') {
+        match cur.get(p) {
+            Some(v) => cur = v,
+            None => return Value::Null,
+        }
+    }
+    cur.clone()
+}
+
+/// Turn a succeeded fanout-producer task into paced, deduped act tasks (R5 + R7) — the declarative
+/// replacement for the bash "paced `while read` loop calling the act recipe once per queued item".
+/// Clock-free (`now_ms` passed in); reads the store only to skip already-touched targets (the
+/// all-time ledger) and already-queued siblings. A missing/invalid spec or a non-array result fans
+/// out nothing rather than erroring, so a producer with no usable output is a clean no-op.
+///
+/// Each act task is INDEPENDENT (no `run_id`): its params are already fully resolved here with the
+/// item bound, so it must not be re-resolved at dispatch against the run's (item-less) vars. Pacing
+/// and the daily cap come from the act recipe's `limit-key` via the limits engine, exactly as the
+/// per-script gap+cap did. A preflight throw pauses the scope (R9) so the batch doesn't repeat it.
+pub fn materialize_fanout(
+    store: &Store,
+    producer: &Task,
+    now_ms: i64,
+) -> rusqlite::Result<Vec<Task>> {
+    let Some(spec_val) = producer.fanout.clone() else {
+        return Ok(Vec::new());
+    };
+    let Ok(spec) = serde_json::from_value::<crate::pipeline::FanoutDef>(spec_val) else {
+        return Ok(Vec::new());
+    };
+    let result = producer.result.clone().unwrap_or(Value::Null);
+    let items = dig_path(&result, &spec.items);
+    let Some(items) = items.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    // Bind the run's vars so per-item templates can reference `{{ vars.<pipeline-var> }}` too.
+    let mut base_vars = Value::Object(Default::default());
+    if let Some(rid) = &producer.run_id {
+        for sib in store.tasks_in_run(rid)? {
+            if sib.step_name.as_deref() == Some(VARS_STEP) {
+                base_vars = sib.params.clone();
+            }
+        }
+    }
+    let (adapter, action) = split_recipe(&spec.recipe);
+    let no_results: HashMap<String, Value> = HashMap::new();
+    let mut out = Vec::new();
+    for item in items {
+        let mut vars = base_vars.clone();
+        if let Some(o) = vars.as_object_mut() {
+            o.insert(spec.as_var.clone(), item.clone());
+        }
+        let id = match crate::refs::resolve(&Value::String(spec.id.clone()), &vars, &no_results) {
+            Ok(Value::String(s)) => s,
+            Ok(other) => other.to_string(),
+            Err(_) => continue, // an item missing the id field is skipped, not fatal
+        };
+        if id.trim().is_empty() {
+            continue;
+        }
+        // All-time ledger: never act on the same target twice (R7).
+        if store.is_touched(&spec.scope, &id)? {
+            continue;
+        }
+        // Active-task dedup on the LEDGER identity, so a still-queued attempt from a prior run is
+        // reused, not duplicated; a terminal-failed prior attempt is inactive, so it re-queues.
+        let dedup = format!("touch:{}:{}", spec.scope, id);
+        if store.find_active_by_dedup(&dedup)?.is_some() {
+            continue;
+        }
+        let params = match crate::refs::resolve(&spec.params, &vars, &no_results) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut t = Task::new_now(adapter.clone(), action.clone(), params, now_ms);
+        t.dedup_key = Some(dedup);
+        t.touch_scope = Some(spec.scope.clone());
+        t.touch_id = Some(id);
+        t.pause_scope_on_failure = true;
+        out.push(t);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -364,12 +591,16 @@ mod dataset_tests {
             "publish_long".to_string(),
             json!({"publish": {"video_id": "abc123"}}),
         )]);
-        let path = write_dataset(&tmp, "ep172", &json!({"episode_number": "172"}), &results).unwrap();
+        let path =
+            write_dataset(&tmp, "ep172", &json!({"episode_number": "172"}), &results).unwrap();
 
         let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(doc["run_id"], "ep172");
         assert_eq!(doc["vars"]["episode_number"], "172");
-        assert_eq!(doc["steps"]["publish_long"]["publish"]["video_id"], "abc123");
+        assert_eq!(
+            doc["steps"]["publish_long"]["publish"]["video_id"],
+            "abc123"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -18,14 +18,18 @@ async fn drives_a_real_page() {
 
     let nav = b.goto("https://example.com").await.expect("goto failed");
     assert_eq!(nav.title, "Example Domain");
-    assert!(nav.url.starts_with("https://example.com"), "landed at {}", nav.url);
+    assert!(
+        nav.url.starts_with("https://example.com"),
+        "landed at {}",
+        nav.url
+    );
 
     let title = b.eval("document.title").await.expect("eval failed");
     assert_eq!(title, serde_json::json!("Example Domain"));
 }
 
 /// A `JSON.stringify`'d object arrives as a JSON *string* under `result` — the
-/// exact shape the LinkedIn adapter's `unwrap_eval_json` re-parses.
+/// exact shape the Acme adapter's `unwrap_eval_json` re-parses.
 #[tokio::test]
 #[ignore]
 async fn stringified_object_round_trips_as_a_json_string() {
@@ -37,7 +41,9 @@ async fn stringified_object_round_trips_as_a_json_string() {
         .await
         .expect("eval failed");
 
-    let s = raw.as_str().expect("expected a JSON string, got a structured value");
+    let s = raw
+        .as_str()
+        .expect("expected a JSON string, got a structured value");
     let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
     assert_eq!(parsed["h1"], "Example Domain");
 }
@@ -48,5 +54,8 @@ async fn stringified_object_round_trips_as_a_json_string() {
 async fn missing_binary_reports_unavailable() {
     let b = CliBrowser::new().bin("definitely-not-chrome-agent-xyz");
     let err = b.goto("https://example.com").await.unwrap_err();
-    assert!(matches!(err, pacewright_core::browser::BrowserError::Unavailable(_)), "got {err:?}");
+    assert!(
+        matches!(err, pacewright_core::browser::BrowserError::Unavailable(_)),
+        "got {err:?}"
+    );
 }

@@ -6,7 +6,7 @@
 //! by a shallow KDL walk (no chrome-agent process required at boot):
 //!
 //! - its **name** `"<adapter>/<action>"` → the `(adapter, action)` the RPC surface uses
-//!   (`pcw add linkedin scrape_profile`), so the existing CLI is unchanged;
+//!   (`pcw add acme scrape_profile`), so the existing CLI is unchanged;
 //! - its **`limit-key`s** → declared pacing, enforced by the engine, not the adapter;
 //! - its **`var`s** (name, optional `from` alias, required/default) → so the vault
 //!   job-runner can bind a note's frontmatter fields to the recipe's vars.
@@ -24,7 +24,7 @@ pub struct RecipeVar {
     /// The recipe's own var name (what `--vars-json` is keyed by).
     pub name: String,
     /// Optional source-field alias: a job note's `<from>` frontmatter field binds to
-    /// this var (`var "url" from="linkedin"` ← note's `linkedin:` field).
+    /// this var (`var "url" from="acme"` ← note's `acme:` field).
     pub from: Option<String>,
     pub required: bool,
     pub has_default: bool,
@@ -62,7 +62,7 @@ pub struct RecipeMeta {
     /// `None` with `auth=true` = the legacy `auth #true` (shared `pacewright` profile + copy).
     pub account: Option<String>,
     /// `foreground #true` — the recipe needs its tab **in front** while it runs, not merely open.
-    /// Chrome throttles background tabs (timers, rAF), which is what stalls a Riverside render.
+    /// Chrome throttles background tabs (timers, rAF), which is what stalls a heavy render.
     ///
     /// Only matters now that every site shares one attached Chrome, where exactly one tab can be
     /// foreground; the old model gave each account its own window. Default off: raising a window
@@ -346,30 +346,28 @@ fn find_kdl(dir: &Path, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
 
-    const LINKEDIN: &str = r#"recipe "linkedin/scrape_profile" {
+    const ACME: &str = r#"recipe "acme/scrape_profile" {
         description "scrape a profile"
-        limit-key "linkedin.profile_scrape"
-        var "url" from="linkedin" required=#true doc="profile URL"
+        limit-key "acme.profile_scrape"
+        var "url" from="acme" required=#true doc="profile URL"
         var "vault"
         var "slug" default="unknown"
     }"#;
 
     #[test]
     fn parses_routing_metadata() {
-        let m = parse_meta(LINKEDIN, Path::new("/r/x.kdl"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(m.name, "linkedin/scrape_profile");
-        assert_eq!(m.adapter, "linkedin");
+        let m = parse_meta(ACME, Path::new("/r/x.kdl")).unwrap().unwrap();
+        assert_eq!(m.name, "acme/scrape_profile");
+        assert_eq!(m.adapter, "acme");
         assert_eq!(m.action, "scrape_profile");
-        assert_eq!(m.limit_keys, vec!["linkedin.profile_scrape".to_string()]);
+        assert_eq!(m.limit_keys, vec!["acme.profile_scrape".to_string()]);
         assert_eq!(m.description.as_deref(), Some("scrape a profile"));
         assert_eq!(m.vars.len(), 3);
         let url = &m.vars[0];
         assert_eq!(url.name, "url");
-        assert_eq!(url.from.as_deref(), Some("linkedin"));
+        assert_eq!(url.from.as_deref(), Some("acme"));
         assert!(url.required);
-        assert_eq!(url.source_field(), "linkedin");
+        assert_eq!(url.source_field(), "acme");
         // an unaliased var maps by its own name
         assert_eq!(m.vars[1].source_field(), "vault");
         assert!(m.vars[2].has_default && !m.vars[2].required);
@@ -382,59 +380,65 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "pcw-acct-test-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(dir.join("accounts")).unwrap();
         // an account (login) recipe + a normal recipe bound to it
         std::fs::write(
-            dir.join("accounts/prevetted-riverside.kdl"),
-            "recipe \"accounts/prevetted-riverside\" { login-url \"https://riverside.com/login\"\n step { goto \"https://riverside.com/dashboard\" } }",
+            dir.join("accounts/globex-account.kdl"),
+            "recipe \"accounts/globex-account\" { login-url \"https://globex.example/login\"\n step { goto \"https://globex.example/dashboard\" } }",
         )
         .unwrap();
         std::fs::write(
             dir.join("rv.kdl"),
-            "recipe \"riverside/generate_magic_clips\" { auth account=\"prevetted-riverside\"\n var \"project_id\" required=#true }",
+            "recipe \"globex/generate_clips\" { auth account=\"globex-account\"\n var \"project_id\" required=#true }",
         )
         .unwrap();
         let reg = RecipeRegistry::load_dir(&dir);
 
         // the account recipe is NOT a task adapter
         assert!(!reg.adapters().contains(&"accounts".to_string()));
-        assert!(reg.adapters().contains(&"riverside".to_string()));
+        assert!(reg.adapters().contains(&"globex".to_string()));
         // it IS discoverable as an account, with its login url
         let accounts = reg.accounts();
         assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].account_name().as_deref(), Some("prevetted-riverside"));
-        assert_eq!(accounts[0].login_url.as_deref(), Some("https://riverside.com/login"));
+        assert_eq!(
+            accounts[0].account_name().as_deref(),
+            Some("globex-account")
+        );
+        assert_eq!(
+            accounts[0].login_url.as_deref(),
+            Some("https://globex.example/login")
+        );
         // `home_url` = the check's first `goto` (the authenticated landing). Login opens THIS so a
         // signed-in operator sees the app instead of a pointless login form; signed out, the app
         // redirects them to sign in anyway.
-        assert_eq!(accounts[0].home_url.as_deref(), Some("https://riverside.com/dashboard"));
-        assert!(reg.account("prevetted-riverside").is_some());
+        assert_eq!(
+            accounts[0].home_url.as_deref(),
+            Some("https://globex.example/dashboard")
+        );
+        assert!(reg.account("globex-account").is_some());
         // the normal recipe is bound to the account
-        let rv = reg.get("riverside", "generate_magic_clips").unwrap();
-        assert!(rv.auth && rv.account.as_deref() == Some("prevetted-riverside"));
-        let bound = reg.recipes_for_account("prevetted-riverside");
+        let rv = reg.get("globex", "generate_clips").unwrap();
+        assert!(rv.auth && rv.account.as_deref() == Some("globex-account"));
+        let bound = reg.recipes_for_account("globex-account");
         assert_eq!(bound.len(), 1);
-        assert_eq!(bound[0].name, "riverside/generate_magic_clips");
+        assert_eq!(bound[0].name, "globex/generate_clips");
     }
 
     #[test]
     fn auth_node_marks_a_recipe_as_needing_a_session() {
-        let authed = parse_meta(
-            r#"recipe "linkedin/dm" { auth #true }"#,
-            Path::new("/r/a.kdl"),
-        )
-        .unwrap()
-        .unwrap();
+        let authed = parse_meta(r#"recipe "acme/dm" { auth #true }"#, Path::new("/r/a.kdl"))
+            .unwrap()
+            .unwrap();
         assert!(authed.auth);
         // explicit opt-out stays public
-        let public = parse_meta(
-            r#"recipe "news/hn" { auth #false }"#,
-            Path::new("/r/p.kdl"),
-        )
-        .unwrap()
-        .unwrap();
+        let public = parse_meta(r#"recipe "news/hn" { auth #false }"#, Path::new("/r/p.kdl"))
+            .unwrap()
+            .unwrap();
         assert!(!public.auth);
     }
 
@@ -475,8 +479,8 @@ mod tests {
     #[test]
     fn load_dir_enumerates_and_routes() {
         let dir = scratch();
-        std::fs::create_dir_all(dir.join("linkedin")).unwrap();
-        std::fs::write(dir.join("linkedin/scrape.kdl"), LINKEDIN).unwrap();
+        std::fs::create_dir_all(dir.join("acme")).unwrap();
+        std::fs::write(dir.join("acme/scrape.kdl"), ACME).unwrap();
         std::fs::write(
             dir.join("hn.kdl"),
             r#"recipe "news/hackernews" { limit-key "news.hn" }"#,
@@ -487,11 +491,11 @@ mod tests {
 
         let reg = RecipeRegistry::load_dir(&dir);
         assert_eq!(reg.len(), 2);
-        assert_eq!(reg.adapters(), vec!["linkedin", "news"]);
-        assert!(reg.get("linkedin", "scrape_profile").is_some());
+        assert_eq!(reg.adapters(), vec!["acme", "news"]);
+        assert!(reg.get("acme", "scrape_profile").is_some());
         assert!(reg.get("news", "hackernews").is_some());
-        assert!(reg.get("linkedin", "nope").is_none());
-        assert_eq!(reg.actions_for("linkedin").len(), 1);
+        assert!(reg.get("acme", "nope").is_none());
+        assert_eq!(reg.actions_for("acme").len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -512,9 +516,9 @@ mod foreground_tests {
     #[test]
     fn parses_foreground_flag() {
         // `foreground #true` — the recipe needs its tab actually in FRONT while it runs. Chrome
-        // throttles background tabs, which is what stalls a Riverside render.
+        // throttles background tabs, which is what stalls a heavy render.
         let m = parse_meta(
-            "recipe \"riverside/render_clips\" { foreground #true }",
+            "recipe \"globex/heavy_job\" { foreground #true }",
             Path::new("/r/rv.kdl"),
         )
         .unwrap()
@@ -526,13 +530,13 @@ mod foreground_tests {
     fn foreground_defaults_off_and_can_be_explicit() {
         // Absent → off. Raising a window steals focus on the operator's real Mac, so a recipe must
         // ASK for it; most (API polls, scrapes) never should.
-        let off = parse_meta("recipe \"linkedin/whoami\" { }", Path::new("/r/li.kdl"))
+        let off = parse_meta("recipe \"acme/whoami\" { }", Path::new("/r/li.kdl"))
             .unwrap()
             .unwrap();
         assert!(!off.foreground);
         // `foreground #false` → explicitly off.
         let explicit = parse_meta(
-            "recipe \"linkedin/whoami\" { foreground #false }",
+            "recipe \"acme/whoami\" { foreground #false }",
             Path::new("/r/li.kdl"),
         )
         .unwrap()

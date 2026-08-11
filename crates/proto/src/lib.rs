@@ -120,6 +120,15 @@ pub enum Request {
     /// Reload the recipe registry from disk and rebuild the engine's adapter set, so recipes
     /// added/changed since boot become runnable without restarting the daemon.
     RecipeReload,
+    /// A structured daily summary: what ran, what's queued, what failed (with errors), and what is
+    /// waiting on a human (paused scopes to resume, failures to fix).
+    Digest,
+    /// The escalation outbox: issues the notifier raised (terminal failures / paused scopes) for
+    /// Claude/a human to triage. `drain` deletes each after reading (a one-shot pull).
+    Escalations {
+        #[serde(default)]
+        drain: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

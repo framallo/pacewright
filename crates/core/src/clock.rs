@@ -15,12 +15,20 @@ impl Clock for SystemClock {
 #[derive(Clone)]
 pub struct TestClock(Arc<AtomicI64>);
 impl TestClock {
-    pub fn new(start_ms: i64) -> Self { Self(Arc::new(AtomicI64::new(start_ms))) }
-    pub fn advance(&self, delta_ms: i64) { self.0.fetch_add(delta_ms, Ordering::SeqCst); }
-    pub fn set(&self, ms: i64) { self.0.store(ms, Ordering::SeqCst); }
+    pub fn new(start_ms: i64) -> Self {
+        Self(Arc::new(AtomicI64::new(start_ms)))
+    }
+    pub fn advance(&self, delta_ms: i64) {
+        self.0.fetch_add(delta_ms, Ordering::SeqCst);
+    }
+    pub fn set(&self, ms: i64) {
+        self.0.store(ms, Ordering::SeqCst);
+    }
 }
 impl Clock for TestClock {
-    fn now_ms(&self) -> i64 { self.0.load(Ordering::SeqCst) }
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]

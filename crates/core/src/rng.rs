@@ -9,7 +9,9 @@ pub trait Rng: Send + Sync {
 
 pub struct SeededRng(Mutex<StdRng>);
 impl SeededRng {
-    pub fn new(seed: u64) -> Self { Self(Mutex::new(StdRng::seed_from_u64(seed))) }
+    pub fn new(seed: u64) -> Self {
+        Self(Mutex::new(StdRng::seed_from_u64(seed)))
+    }
 }
 impl Rng for SeededRng {
     fn jitter(&self, base_ms: i64, factor: f64) -> i64 {
@@ -21,10 +23,14 @@ impl Rng for SeededRng {
 /// Deterministic: always returns exactly `value_ms` regardless of input.
 pub struct TestRng(pub i64);
 impl TestRng {
-    pub fn fixed(value_ms: i64) -> Self { Self(value_ms) }
+    pub fn fixed(value_ms: i64) -> Self {
+        Self(value_ms)
+    }
 }
 impl Rng for TestRng {
-    fn jitter(&self, _base_ms: i64, _factor: f64) -> i64 { self.0 }
+    fn jitter(&self, _base_ms: i64, _factor: f64) -> i64 {
+        self.0
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,36 @@
+// outreach/matchmaker — the declarative replacement for matchmaker-pitch-run.sh.
+//
+// SCAN a handful of categories -> FAN OUT one paced, deduped matchmaker/pitch per fresh show.
+// Pacing + the 100/day cap come from the `matchmaker.pitch` limit-key (set in config.toml); the
+// all-time ledger (scope `matchmaker.pitch`) is what "never re-pitch a show" now means, replacing
+// mm-pitched-all.log. Each pitch auto-pauses the scope on a preflight throw (logged out) and
+// escalates — so a bad session halts the batch instead of burning through 100 shows.
+//
+// Scheduled daily via a `pipeline/start` task (schedules/outreach.toml). Re-firing within a day is
+// idempotent: the scan steps dedup on (run_id, step) and the pitch tasks dedup on the ledger id.
+pipeline "outreach/matchmaker" {
+    description "Scan MatchMaker categories and pitch Federico as a guest on each fresh show (gated do_send)."
+    pace min="55s" max="80s"
+
+    step "scan_tech"  recipe="matchmaker/scan" { params { category "Technology" } }
+    step "scan_biz"   recipe="matchmaker/scan" { params { category "Business" } }
+    step "scan_entre" recipe="matchmaker/scan" { params { category "Entrepreneurship" } }
+    step "scan_ai"    recipe="matchmaker/scan" { params { category "Artificial%20Intelligence" } }
+    step "scan_start" recipe="matchmaker/scan" { params { category "Startups" } }
+
+    fanout after="scan_tech"  recipe="matchmaker/pitch" items="shows" as="item" scope="matchmaker.pitch" id="{{ vars.item.path }}" {
+        params { show_path "{{ vars.item.path }}" ; do_send "true" }
+    }
+    fanout after="scan_biz"   recipe="matchmaker/pitch" items="shows" as="item" scope="matchmaker.pitch" id="{{ vars.item.path }}" {
+        params { show_path "{{ vars.item.path }}" ; do_send "true" }
+    }
+    fanout after="scan_entre" recipe="matchmaker/pitch" items="shows" as="item" scope="matchmaker.pitch" id="{{ vars.item.path }}" {
+        params { show_path "{{ vars.item.path }}" ; do_send "true" }
+    }
+    fanout after="scan_ai"    recipe="matchmaker/pitch" items="shows" as="item" scope="matchmaker.pitch" id="{{ vars.item.path }}" {
+        params { show_path "{{ vars.item.path }}" ; do_send "true" }
+    }
+    fanout after="scan_start" recipe="matchmaker/pitch" items="shows" as="item" scope="matchmaker.pitch" id="{{ vars.item.path }}" {
+        params { show_path "{{ vars.item.path }}" ; do_send "true" }
+    }
+}
