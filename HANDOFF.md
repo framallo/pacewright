@@ -1,5 +1,49 @@
 # pacewright — handoff
 
+## ⛔ START HERE — non-browser jobs + JSON datastore + Claude Max/Pro OAuth (2026-08-10)
+
+Follow-on to the outreach fleet migration below. The engine gained a JSON datastore and non-browser
+REST/data adapters, the jobs that were deferred there (x-harvest, plus new podcast sourcing/hooks) are
+now declarative pipelines, and the agent adapters run on the Claude Max/Pro subscription. **245+ tests
+pass, clippy `-D warnings` clean.** Not committed.
+
+### JSON datastore + data/http adapters
+- **JSON datastore (`core::datastore`)** — per-dataset JSON files at `~/.pacewright/data/<name>.json`
+  (an array of objects), appended with all-time dedup on a key field. "Save data as JSON, not CSV" —
+  the result-sink the CSV-accumulating crawls needed, minus the CSV. Read via RPCs `DataList`/`DataShow`,
+  CLI `pcw data list` / `pcw data show <name> [--limit N]`, MCP `data_list`/`data_show`.
+- **`data/append`** (`{dataset, items: array|object, key?}`) and **`data/read`**
+  (`{dataset, limit?, chunk_size?}`) — `chunk_size` returns `{chunks:[{index,items}]}`, ready to fan out.
+- **`http/request`** — non-browser REST (`{method, url, headers, query, body|json, secret={env,as}}`
+  where `as` = `bearer` | `header:X` | `query:X` | `body:X`), injecting a secret from env at call time
+  (never stored). limit-key `http.request`.
+- `schedule::partition` now also accepts the `data` + `http` built-ins (full set:
+  `dummy`/`agent`/`claude`/`claude_cli`/`pipeline`/`data`/`http`).
+
+### The non-browser jobs (finished the fleet)
+- **x-harvest** — now migrated (supersedes the "NOT migrated" note in the section below):
+  `outreach/x-harvest` pipeline (recipe `x/harvest` → `data/append` into the `x/pool-ai` + `x/pool-lib`
+  JSON datasets, deduped).
+- **podcast sourcing** — `outreach/podcast-sourcing` pipeline (`http/request` Apollo REST →
+  `data/append` `podcast/hosts`; needs `APOLLO_API_KEY`; disabled by default).
+- **podcast hooks (R13)** — `outreach/podcast-hooks` pipeline (`data/read` chunk → fanout → `claude_cli`).
+
+### Claude Max/Pro OAuth — agent adapters on the subscription
+- **`crates/adapter-agent/src/anthropic_oauth.rs`** — PKCE login to claude.ai, token exchange/refresh
+  against `api.anthropic.com/v1/oauth/token`, SecretStore-backed with auto-refresh at call time. The
+  `AnthropicCompleter` uses the subscription (Bearer + `anthropic-beta: oauth-2025-04-20` + a Claude
+  Code system-identity block) before falling back to `ANTHROPIC_API_KEY`. `claude_cli/run` strips
+  `ANTHROPIC_API_KEY` from its subprocess so it uses the Max/Pro login too.
+- **Auth precedence:** `ANTHROPIC_OAUTH_TOKEN` env > stored Max login (auto-refreshed) > `ANTHROPIC_API_KEY`.
+- CLI `pcw anthropic login [--paste] | status | logout` (a local OAuth flow — browser + secret store,
+  no daemon socket). RPCs `AnthropicStatus` + `LedgerStats` feed the dashboard.
+- MCP tools added this session: `escalations`, `data_list`, `data_show`, `ledger_stats`, `anthropic_status`
+  (26 tools total).
+
+### Cutover
+`packaging/cutover-outreach.sh` (reversible, `--undo`) now verifies the daemon **and** `pcw anthropic
+status`, applies the schedules, and retires the 6 migrated launchd plists.
+
 ## ⛔ START HERE — outreach fleet migration (2026-08-10)
 
 Built to `channels/pacewright-outreach-requirements-2026-08-10.md`. The engine gained the pieces the

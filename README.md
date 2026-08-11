@@ -4,7 +4,7 @@ A **wright** (craftsman) of **pace** — a Rust tool that **queues, schedules, a
 
 pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](https://postiz.com)) with one background service you drive from a CLI, a live TUI, an MCP server, or a desktop app. It is built to automate social, media, and content platforms through their UIs without tripping bot-detection — the safety comes from driving a real, logged-in browser over CDP and from a scheduler that enforces daily caps, minimum gaps, active-hours windows, and jitter.
 
-> **Status: engine + recipe automation + declarative scheduler + web dashboard complete.** The core engine (queue, scheduler, pacing/limits, runner, durable tracking), the **KDL recipe engine** (declarative browser automation, run as paced tasks via `adapter-recipe`), the **declarative scheduler** (enable-able recurrent tasks in `~/.pacewright/schedules/*.toml`), and a **local web dashboard** (Feed / Schedule / Limits, live over WebSocket) are done and tested (`clippy -D warnings` clean). Driven interchangeably from the CLI, the TUI, or the browser. Real platform adapters ship as recipes.
+> **Status: engine + recipe automation + declarative scheduler + web dashboard complete.** The core engine (queue, scheduler, pacing/limits, runner, durable tracking), the **KDL recipe engine** (declarative browser automation, run as paced tasks via `adapter-recipe`), the **declarative scheduler** (enable-able recurrent tasks in `~/.pacewright/schedules/*.toml`), and a **local web dashboard** (Feed / Schedule / Limits, live over WebSocket) are done and tested (`clippy -D warnings` clean). It also runs **multi-step pipelines with fan-out** over an all-time dedup ledger, non-browser **built-in adapters** (`agent`/`claude_cli`/`http`/`data`), a **JSON datastore** for task output, and signs into a **Claude Max/Pro subscription** for its Claude calls. Driven interchangeably from the CLI, the TUI, or the browser. Real platform adapters ship as recipes.
 
 ---
 
@@ -91,13 +91,19 @@ pacewright tui             # live dashboard (id · adapter · action · status �
 | `recipe add/list/reload/job` | install recipes from GitHub, list them, hot-reload the daemon, run a vault job note |
 | `schedule check/list/apply/enable/disable` | manage the declarative schedule of recurrent tasks |
 | `auth status/login/recheck` | establish & inspect the logged-in sessions account recipes need |
+| `run <pipeline> --run-id ID [--params JSON] [--retry-failed]` / `runs` / `show <run-id>` | start/resume a pipeline run (idempotent — succeeded steps are never redone), list runs, show one run's steps |
+| `data list` / `data show <name> [--limit N]` | inspect the JSON datasets task output is saved into |
+| `digest` | today's structured summary — what ran / is queued / failed / is waiting on a human |
+| `escalations [--drain]` | read the escalation outbox (terminal failures + auto-paused scopes) |
+| `anthropic login [--paste] / status / logout` | sign the daemon into a Claude Max/Pro subscription for Claude calls |
 | `tui` | live dashboard (Feed / Schedule / Limits / Accounts panes — `tab` to cycle) |
 
 ## Drive it from Claude (MCP)
 
 `pacewright-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes the daemon's
-whole surface as 20 tools (`add_task`, `list_tasks`, `get_task`, `status`, `pause`/`resume`,
-`set_limit`, the `schedule_*` and `auth_*` RPCs, `recipe_reload`, …). It bridges each `tools/call`
+whole surface as 26 tools (`add_task`, `list_tasks`, `get_task`, `status`, `pause`/`resume`,
+`set_limit`, `digest`, `escalations`, `data_list`/`data_show`, `ledger_stats`, `anthropic_status`, the
+`schedule_*` and `auth_*` RPCs, `recipe_reload`, …). It bridges each `tools/call`
 to `~/.pacewright/pw.sock` — so **the daemon must be running** for tool calls to return data
 (handshake and `tools/list` work without it).
 
@@ -158,6 +164,45 @@ pcw schedule apply --prune        # also cancel live tasks whose entries were de
 ```
 
 Enabling/disabling is a first-class runtime toggle (persisted, overriding the file's declared default) — the same thing the TUI's **Schedule** pane does with the space bar. The reconciler is desired-state: it queues only the effectively-enabled entries, updates changed ones in place, and (`--prune`) cancels removed ones.
+
+## Built-in adapters, pipelines & the JSON datastore
+
+Beyond browser recipes, the daemon ships **built-in adapters** you can queue or schedule directly, with
+no recipe file: `agent/ask` + `agent/adjudicate` (single-turn Anthropic completer, aliased `claude/*`),
+`claude_cli/run` (a full headless `claude -p` round — `prompt`/`prompt_file`, `model`, `add_dir[]`,
+`cap_secs` — under a daemon-owned wall-clock cap + retry), `pipeline/start` (launch a fresh dated
+pipeline run so a scan→act flow recurs on a schedule), `data/append` + `data/read`, and `http/request`
+(non-browser REST that injects a secret from an env var at call time, never storing it).
+
+A **pipeline** runs ordered steps under a run id; succeeded steps are never redone, so re-running the
+id resumes. A **fan-out** block turns a producer step's array result into paced, deduped, per-item act
+tasks, each keyed on an **all-time dedup ledger** (`touched`) so a target is never acted on twice.
+
+```bash
+pcw run outreach/matchmaker --run-id 2026-08-10   # start/resume a pipeline run
+pcw runs                                          # list runs + step rollups
+pcw show 2026-08-10                               # one run's steps, in order
+pcw data list                                     # datasets task output was saved into
+pcw data show x/pool-ai --limit 20                # rows of one dataset
+pcw escalations --drain                           # pull the escalation outbox (failures / paused scopes)
+```
+
+Task output is saved as **JSON, not CSV** — per-dataset files at `~/.pacewright/data/<name>.json` (an
+array of objects), appended with all-time dedup on a key field.
+
+## Sign in to Claude (Max/Pro subscription)
+
+The agent adapters (`agent/*`, `claude_cli/run`) prefer a signed-in **Claude Max/Pro subscription** over
+an API key, so Claude calls draw on the subscription instead of API quota. Sign in once with a local
+PKCE OAuth flow to claude.ai; tokens land in `~/.pacewright/secrets.json` (0600) and auto-refresh.
+
+```bash
+pcw anthropic login          # opens a browser (`--paste` for a headless paste flow)
+pcw anthropic status         # signed-in state + token freshness
+pcw anthropic logout         # clear the stored tokens
+```
+
+Auth precedence: `ANTHROPIC_OAUTH_TOKEN` env > a stored Max/Pro login (auto-refreshed) > `ANTHROPIC_API_KEY`.
 
 ## Log in to authenticated sites
 

@@ -56,3 +56,27 @@ id     = "book-promo-weekly"
 recipe = "claude_cli/run"
 every  = "20 8 * * 1"
 params = { prompt_file = "~/Sync/Business/Growth/brands/ramallo/automation/prompt-weekly.md", model = "claude-opus-4-8", add_dir = ["~/Sync/Business/Growth/brands/ramallo", "~/Sync/Business/Growth", "~/work/isla-de-la-libertad-text", "~/work/density-labs-books"], cap_secs = 1800 }
+
+# --- X follower harvest: browser crawl -> JSON pools (data/append, deduped), daily 08:45 --------
+[[task]]
+id     = "x-harvest"
+recipe = "pipeline/start"
+every  = "45 8 * * *"
+params = { pipeline = "outreach/x-harvest", run_prefix = "xh" }
+
+# --- Podcast host sourcing: Apollo REST -> JSON dataset (no browser), weekly Mon 06:00 ----------
+# Needs APOLLO_API_KEY in the daemon env. Disabled by default until the key is set.
+[[task]]
+id      = "podcast-sourcing"
+recipe  = "pipeline/start"
+every   = "0 6 * * 1"
+enabled = false
+params  = { pipeline = "outreach/podcast-sourcing", run_prefix = "apollo" }
+
+# --- Podcast hooks: chunked claude -p generation over the sourced leads, weekly Mon 07:00 -------
+[[task]]
+id      = "podcast-hooks"
+recipe  = "pipeline/start"
+every   = "0 7 * * 1"
+enabled = false
+params  = { pipeline = "outreach/podcast-hooks", run_prefix = "hooks" }

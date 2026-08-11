@@ -201,7 +201,8 @@ pub fn load_dir(dir: &Path) -> (Vec<ScheduleEntry>, Vec<String>) {
 
 /// Engine-provided adapters that a schedule may reference even though they are not recipes. Kept in
 /// lockstep with the built-ins the daemon registers in `build_adapter_registry`.
-pub const BUILTIN_ADAPTERS: &[&str] = &["dummy", "agent", "claude", "claude_cli", "pipeline"];
+pub const BUILTIN_ADAPTERS: &[&str] =
+    &["dummy", "agent", "claude", "claude_cli", "pipeline", "data", "http"];
 
 /// Partition entries into the **valid** ones (safe to reconcile) and a list of
 /// human-readable errors for the invalid ones. Checks: ids are globally unique, each recipe

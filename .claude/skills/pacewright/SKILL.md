@@ -22,7 +22,7 @@ browser-automation tasks with human pacing** (daily caps, min gaps, active-hours
 it, don't do the automation by hand. A task over its limit is **deferred to the next eligible slot,
 never dropped**.
 
-Prefer the **MCP tools** (`pacewright` server, 20 tools) when they're connected. Fall back to the
+Prefer the **MCP tools** (`pacewright` server, 26 tools) when they're connected. Fall back to the
 `pcw` / `pacewright` CLI (they hit the same daemon socket) when MCP isn't available.
 
 ## First: is the daemon up?
@@ -53,6 +53,62 @@ or copied in). After adding/editing recipe files, **`recipe_reload`** (tool) or 
 makes them runnable **without restarting the daemon** (`pcw recipe add` reloads automatically).
 Caveat: account recipes (`accounts/*`) and a new daemon *binary* still need a restart. Example recipes
 live in the gitignored `recipes/` dir at the repo root (and in the runtime `~/.pacewright/recipes/`).
+
+## Built-in adapters (no recipe needed)
+
+These ship with the daemon and are usable straight from `add_task` / schedules / pipelines:
+
+- **`agent/ask`, `agent/adjudicate`** (aliased `claude/*`) — single-turn Anthropic Messages completer.
+- **`claude_cli/run`** — a full headless `claude -p` round. Params: `prompt` | `prompt_file`, `model`,
+  `add_dir[]`, `cap_secs`. The daemon owns a wall-clock cap + retry-on-fast-fail; it runs on the
+  Claude Max/Pro subscription (it strips `ANTHROPIC_API_KEY` from the subprocess).
+- **`pipeline/start`** — launch a fresh dated pipeline run (`<run_prefix>-YYYYMMDD`). Params
+  `{pipeline, run_prefix?, params?}`. This is how a scan→act pipeline recurs on the schedule.
+- **`data/append`** (`{dataset, items, key?}`) and **`data/read`** (`{dataset, limit?, chunk_size?}`) —
+  the JSON datastore. `chunk_size` returns `{chunks:[{index,items}]}`, ready to fan out.
+- **`http/request`** — non-browser REST. `{method, url, headers?, query?, body?|json?, secret?}` where
+  `secret = {env, as}` and `as` = `bearer` | `header:X` | `query:X` | `body:X` (injected from env at
+  call time, never stored). limit-key `http.request`.
+
+The schedule validator accepts these built-ins (`dummy`/`agent`/`claude`/`claude_cli`/`pipeline`/`data`/`http`).
+
+## Pipelines & fan-out
+
+A **pipeline** is a run of ordered steps under a run id; succeeded steps are never redone (resume by
+re-using the id). Drive it with `pcw run <pipeline> --run-id <id> [--params JSON] [--retry-failed]`,
+list runs with `pcw runs`, inspect one with `pcw show <run-id>`.
+
+**Fan-out** turns a producer step's array result into paced, deduped, per-item act tasks:
+
+    fanout after=<step> recipe=<a/a> items=<path> as=<var> scope=<s> id=<tmpl> { params { … } }
+
+On the producer's success the runner materializes one act task per item, each keyed on the ledger id,
+spending the act recipe's `limit-key` for cap/gap, and marking the **ledger** on its own success.
+
+## Ledger (never act twice)
+
+An all-time dedup ledger (`touched(scope,target_id,…)`) records every target a fan-out act touched.
+Once marked, that target is never re-acted, across all time. Inspect it with the `ledger_stats` tool.
+
+## Datasets — save output as JSON, not CSV
+
+Task output lands in per-dataset JSON files at `~/.pacewright/data/<name>.json` (an array of objects),
+appended with all-time dedup on a key field. Read them: `pcw data list`, `pcw data show <name> [--limit N]`
+(tools `data_list` / `data_show`).
+
+## Escalations — "call Claude when there's an issue"
+
+On a terminal task failure or an auto-paused scope, the daemon writes an escalation to
+`~/.pacewright/escalations/*.json` (with a repair hint) and, if `PACEWRIGHT_CLAUDE_NOTIFY=1`, spawns
+`claude -p`. Read the outbox with `pcw escalations [--drain]` (tool `escalations`); it also surfaces in
+the `digest`'s `waiting_on_human`. Triage with `get_task` + `resume`.
+
+## Claude Max/Pro subscription (for the agent adapters)
+
+`agent/*` and `claude_cli/run` prefer a signed-in Claude Max/Pro subscription over an API key. Sign in
+once: `pcw anthropic login [--paste]` (PKCE OAuth to claude.ai; tokens auto-refresh). Check/clear with
+`pcw anthropic status` / `pcw anthropic logout` (tool `anthropic_status`). Auth precedence:
+`ANTHROPIC_OAUTH_TOKEN` env > stored Max login (auto-refreshed) > `ANTHROPIC_API_KEY`.
 
 ## Accounts / auth
 

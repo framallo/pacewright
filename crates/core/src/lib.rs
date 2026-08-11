@@ -3,6 +3,7 @@ pub mod adapter;
 pub mod browser;
 pub mod clock;
 pub mod config;
+pub mod datastore;
 pub mod engine;
 pub mod limits;
 pub mod model;

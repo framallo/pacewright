@@ -1,0 +1,29 @@
+// outreach/x-harvest — the declarative replacement for x-harvest.sh: scroll a few seed accounts'
+// followers and accumulate the handles into JSON datasets (data/append, deduped all-time) instead of
+// sort -u CSV pools. Scheduled daily via pipeline/start; each run adds that day's fresh handles.
+// Rotate/extend the seeds freely. The daily cap comes from the x.harvest limit-key.
+pipeline "outreach/x-harvest" {
+    description "Harvest follower handles from seed X accounts into JSON pools (deduped)."
+    pace min="4s" max="10s"
+
+    // --- AI pool ---
+    step "ai_karpathy" recipe="x/harvest" { params { seed "karpathy" } }
+    step "save_ai_1" recipe="data/append" after="ai_karpathy" {
+        params { dataset "x/pool-ai" ; items "{{ steps.ai_karpathy.result.handles }}" ; key "handle" }
+    }
+    step "ai_svpino" recipe="x/harvest" after="save_ai_1" { params { seed "svpino" } }
+    step "save_ai_2" recipe="data/append" after="ai_svpino" {
+        params { dataset "x/pool-ai" ; items "{{ steps.ai_svpino.result.handles }}" ; key "handle" }
+    }
+
+    // --- Libertarian pool ---
+    step "lib_mises" recipe="x/harvest" after="save_ai_2" { params { seed "mises" } }
+    step "save_lib_1" recipe="data/append" after="lib_mises" {
+        params { dataset "x/pool-lib" ; items "{{ steps.lib_mises.result.handles }}" ; key "handle" }
+    }
+
+    output {
+        ai_added "{{ steps.save_ai_2.result.total }}"
+        lib_added "{{ steps.save_lib_1.result.total }}"
+    }
+}

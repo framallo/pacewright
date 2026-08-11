@@ -64,6 +64,15 @@ pub fn build_adapter_registry(
         store.clone(),
         clock.clone(),
     )));
+    // Non-browser built-ins: `data/*` persists task output as JSON datasets; `http/request` sources
+    // from a REST API with env-injected secrets. Together they let scan/sourcing/generation jobs run
+    // without Chrome (Apollo, personalize-hooks, gen-*).
+    reg.register(Arc::new(crate::data_adapter::DataAdapter::new(
+        pacewright_core::datastore::Datastore::new(
+            pacewright_core::run::home_dir().join("data"),
+        ),
+    )));
+    reg.register(Arc::new(crate::http_adapter::HttpAdapter::new()));
     for adapter_name in recipe_registry.adapters() {
         if reg.get(&adapter_name).is_some() {
             tracing::warn!("recipe prefix `{adapter_name}` collides with a built-in adapter — skipping the recipe-backed one");
@@ -441,6 +450,65 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
             Request::Escalations { drain } => {
                 let items = crate::notify::list_escalations(drain);
                 Ok(serde_json::json!({ "count": items.len(), "escalations": items }))
+            }
+            Request::DataList => {
+                let ds = pacewright_core::datastore::Datastore::new(
+                    pacewright_core::run::home_dir().join("data"),
+                );
+                let sets: Vec<serde_json::Value> = ds
+                    .list()
+                    .into_iter()
+                    .map(|(name, count)| serde_json::json!({ "name": name, "count": count }))
+                    .collect();
+                Ok(serde_json::json!({ "datasets": sets }))
+            }
+            Request::DataShow { name, limit } => {
+                let ds = pacewright_core::datastore::Datastore::new(
+                    pacewright_core::run::home_dir().join("data"),
+                );
+                let mut rows = ds.read(&name).map_err(|e| e.to_string())?;
+                let count = rows.len();
+                if let Some(l) = limit {
+                    rows.truncate(l.max(0) as usize);
+                }
+                Ok(serde_json::json!({ "name": name, "count": count, "items": rows }))
+            }
+            Request::LedgerStats => {
+                let scopes: Vec<serde_json::Value> = e
+                    .store
+                    .touched_scopes()
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|(scope, count)| serde_json::json!({ "scope": scope, "count": count }))
+                    .collect();
+                Ok(serde_json::json!({ "scopes": scopes }))
+            }
+            Request::AnthropicStatus => {
+                use pacewright_core::secrets::SecretStore;
+                let path = pacewright_core::run::home_dir().join("secrets.json");
+                let now = e.clock.now_ms();
+                let (signed_in, expires_at, state) = match SecretStore::load(&path)
+                    .ok()
+                    .and_then(|s| s.get("anthropic").cloned())
+                {
+                    Some(rec) if rec.access_token.is_some() => {
+                        let exp = rec.expires_at_ms.unwrap_or(0);
+                        let st = if now < exp - 5 * 60 * 1000 {
+                            "valid"
+                        } else if rec.refresh_token.is_some() {
+                            "refreshable"
+                        } else {
+                            "expired"
+                        };
+                        (true, rec.expires_at_ms, st)
+                    }
+                    _ => (false, None, "signed_out"),
+                };
+                Ok(serde_json::json!({
+                    "signed_in": signed_in,
+                    "state": state,
+                    "expires_at_ms": expires_at,
+                }))
             }
             Request::Subscribe => Ok(
                 serde_json::json!({ "note": "subscribe stream not enabled on this request path" }),

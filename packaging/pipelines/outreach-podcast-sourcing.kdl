@@ -1,0 +1,41 @@
+// outreach/podcast-sourcing — the non-browser replacement for apollo{1000,5000}-hosts.sh: page
+// Apollo's people search over REST (http/request, APOLLO_API_KEY injected from the env, never
+// stored) and accumulate the hits into a JSON dataset (data/append, deduped by id). No Chrome.
+//
+// Apollo returns one page per call; run this daily (pipeline/start) and it accumulates, or bump the
+// page steps. Confirm the exact endpoint/field paths against your Apollo plan on the first live run
+// — the shape below matches mixed_people/search. Set APOLLO_API_KEY in the daemon env.
+pipeline "outreach/podcast-sourcing" {
+    description "Source podcast-host leads from Apollo (REST) into a JSON dataset, deduped by id."
+    pace min="2s" max="5s"
+
+    var "titles" default="Host,Founder,CEO" doc="comma person_titles to search"
+
+    step "page1" recipe="http/request" {
+        params {
+            method "POST"
+            url "https://api.apollo.io/v1/mixed_people/search"
+            json "{\"page\":1,\"per_page\":100,\"person_titles\":[\"Host\",\"Podcast Host\"]}"
+            secret "{\"env\":\"APOLLO_API_KEY\",\"as\":\"header:x-api-key\"}"
+        }
+        attempts 3
+    }
+    step "save1" recipe="data/append" after="page1" {
+        params { dataset "podcast/hosts" ; items "{{ steps.page1.result.json.people }}" ; key "id" }
+    }
+
+    step "page2" recipe="http/request" after="save1" {
+        params {
+            method "POST"
+            url "https://api.apollo.io/v1/mixed_people/search"
+            json "{\"page\":2,\"per_page\":100,\"person_titles\":[\"Host\",\"Podcast Host\"]}"
+            secret "{\"env\":\"APOLLO_API_KEY\",\"as\":\"header:x-api-key\"}"
+        }
+        attempts 3
+    }
+    step "save2" recipe="data/append" after="page2" {
+        params { dataset "podcast/hosts" ; items "{{ steps.page2.result.json.people }}" ; key "id" }
+    }
+
+    output { total "{{ steps.save2.result.total }}" }
+}

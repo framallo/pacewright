@@ -28,6 +28,7 @@ chrono.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

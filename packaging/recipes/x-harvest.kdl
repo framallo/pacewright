@@ -1,0 +1,14 @@
+// x/harvest — scroll one X account's followers list and return their handles. Read-only feeder for
+// the outreach/x-harvest pipeline, which appends the handles into a JSON dataset (data/append),
+// deduped — the JSON replacement for x-harvest.sh's `sort -u` CSV pools. Runs on the attached :9222
+// Chrome (logged into X). JS single quotes only; backslashes doubled for KDL. Returns {count, handles:[{handle}]}.
+recipe "x/harvest" {
+    description "Scroll an X account's followers and return their handles (read-only). {count, handles:[{handle}]}."
+    limit-key "x.harvest"
+    auth account="prevetted-x"
+    foreground #true
+    var "seed" required=#true doc="the account whose followers to harvest, e.g. karpathy"
+    var "scrolls" default="40" doc="how many scroll passes"
+    step { goto "https://x.com/{{ seed }}/followers" }
+    step { eval "harvest" js="(async()=>{ const s=ms=>new Promise(r=>setTimeout(r,ms)); await s(3000); if(/\\/(i\\/flow|login)\\b/.test(location.pathname)) throw new Error('X NOT LOGGED IN'); const N=parseInt('{{ scrolls }}',10)||40; const reserved=new Set(['home','explore','notifications','messages','compose','search','settings','i','intent','hashtag','login','signup','tos','privacy','follower_requests']); const seen=new Set(); for(let i=0;i<N;i++){ for(const a of document.querySelectorAll('a[href^=\"/\"]')){ const h=a.getAttribute('href')||''; const m=/^\\/([A-Za-z0-9_]{2,15})$/.exec(h); if(m && !reserved.has(m[1].toLowerCase())) seen.add(m[1]); } window.scrollBy(0,2500); await s(1200+Math.random()*800); } return { count: seen.size, handles: [...seen].map(h=>({ handle: h })) }; })()" }
+}

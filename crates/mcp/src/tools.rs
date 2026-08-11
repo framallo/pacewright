@@ -102,6 +102,13 @@ pub fn build_request(name: &str, args: &Value) -> Result<Request, String> {
         "escalations" => Ok(Request::Escalations {
             drain: args.get("drain").and_then(Value::as_bool).unwrap_or(false),
         }),
+        "data_list" => Ok(Request::DataList),
+        "data_show" => Ok(Request::DataShow {
+            name: req_str(args, "data_show", "name")?,
+            limit: opt_i64(args, "limit"),
+        }),
+        "ledger_stats" => Ok(Request::LedgerStats),
+        "anthropic_status" => Ok(Request::AnthropicStatus),
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -155,6 +162,14 @@ pub fn tool_catalog() -> Value {
           "inputSchema": schema(json!({}), &[]) },
         { "name": "escalations", "description": "The escalation outbox: issues the notifier raised (terminal failures / auto-paused scopes) for triage. `drain:true` deletes each after reading. Use `get_task`/`resume` to act on them.",
           "inputSchema": schema(json!({ "drain": bool_prop("Delete each escalation after reading.") }), &[]) },
+        { "name": "data_list", "description": "List saved JSON datasets (task output) with row counts.",
+          "inputSchema": schema(json!({}), &[]) },
+        { "name": "data_show", "description": "Print a saved dataset's rows. `limit` caps the count.",
+          "inputSchema": schema(json!({ "name": str_prop("Dataset name, e.g. `x/pool-ai`."), "limit": int_prop("Max rows to return.") }), &["name"]) },
+        { "name": "ledger_stats", "description": "All-time dedup ledger: touched-target counts per scope (never-act-twice).",
+          "inputSchema": schema(json!({}), &[]) },
+        { "name": "anthropic_status", "description": "Whether a Claude Max/Pro subscription is signed in and its token freshness.",
+          "inputSchema": schema(json!({}), &[]) },
         { "name": "digest", "description": "Today's structured summary: what ran, what's queued, what failed (with errors), and what is waiting on a human (paused scopes + failure count).",
           "inputSchema": schema(json!({}), &[]) },
         { "name": "list_adapters", "description": "List registered adapters and their actions.",
@@ -243,7 +258,8 @@ mod tests {
             let name = tool["name"].as_str().unwrap();
             // Provide the union of possibly-required args; extras are ignored by build_request.
             let stub = json!({
-                "adapter": "a", "action": "b", "id": "x", "scope": "all", "key": "k", "account": "acct"
+                "adapter": "a", "action": "b", "id": "x", "scope": "all", "key": "k",
+                "account": "acct", "name": "d", "pipeline": "p", "run_id": "r"
             });
             assert!(
                 build_request(name, &stub).is_ok(),

@@ -1,0 +1,23 @@
+// outreach/podcast-hooks — the chunked-generation replacement for personalize-hooks.sh (R13):
+// read the sourced leads in chunks, fan each chunk out to a headless `claude -p` round that writes a
+// per-lead hook, deduped by chunk against the all-time ledger so a re-run resumes where it left off.
+//
+// Composition: data/read (chunk_size) -> fanout over chunks -> claude_cli/run per chunk. Claude
+// writes its output rows to the hooks dataset file (it has the data dir via --add-dir), mirroring
+// how the bash appended to podcast-hooks.csv. Uses the Max/Pro subscription (claude_cli), not API.
+pipeline "outreach/podcast-hooks" {
+    description "Generate per-lead outreach hooks in chunks via claude -p, resumable + deduped."
+    pace min="5s" max="15s"
+
+    step "read" recipe="data/read" {
+        params { dataset "podcast/hosts" ; chunk_size "50" }
+    }
+
+    fanout after="read" recipe="claude_cli/run" items="chunks" as="chunk" scope="podcast.hooks" id="chunk-{{ vars.chunk.index }}" {
+        params {
+            add_dir "~/.pacewright/data"
+            cap_secs "900"
+            prompt "You are writing one-line, specific outreach hooks for podcast hosts. For EACH lead in this JSON chunk, write a single personalized hook (no fluff, references something concrete about them). Append your results as objects {email, hook} to the JSON array file ~/.pacewright/data/podcast/hooks.json (create it as [] if missing; keep existing entries; do not duplicate an email already present). Chunk: {{ vars.chunk.items }}"
+        }
+    }
+}
