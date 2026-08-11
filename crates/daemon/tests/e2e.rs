@@ -149,7 +149,7 @@ impl pacewright_core::adapter::Adapter for ConcurrencyProbe {
 /// each task before claiming the next, so tasks NEVER overlap.
 ///
 /// This matters because every site now shares ONE attached Chrome, in which exactly one tab can be
-/// foreground. `foreground #true` (Riverside renders) is only safe without a lock while this holds.
+/// foreground. `foreground #true` (Globex renders) is only safe without a lock while this holds.
 /// If someone makes the dispatch loop concurrent, this test fails FIRST — read it as: you have just
 /// made two recipes able to fight over the foreground tab, so `foreground` now needs real
 /// serialization. See docs/plans/2026-07-16-single-chrome-attach.md, Phase 4.

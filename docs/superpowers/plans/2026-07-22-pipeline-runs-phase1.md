@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- `pacewright-core` MUST NOT contain podcast, Riverside, YouTube, or Spotify concepts. Step logic lives in recipes.
+- `pacewright-core` MUST NOT contain podcast, globex, or Spotify concepts. Step logic lives in recipes.
 - Runs are automatic. No approval gates, no human pause states.
 - A step is not complete until its `verify` passes. Dependents release on verified completion.
 - Re-running a pipeline MUST NOT re-execute a step that already succeeded.
@@ -1086,5 +1086,5 @@ Still open, deliberately:
 
 ## Phase 2 (next plan, not this one)
 
-`youtube/verify_video`, `youtube/verify_shorts`, `spotify/verify_episode`,
-`riverside/verify_exports` as API-backed recipes, then the `podcast/episode` pipeline KDL.
+`spotify/verify_episode` and `globex/verify_exports` as API-backed recipes (plus the
+per-platform verify recipes the user supplies), then the `podcast/episode` pipeline KDL.

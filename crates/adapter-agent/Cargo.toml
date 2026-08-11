@@ -1,0 +1,19 @@
+[package]
+name = "pacewright-adapter-agent"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+pacewright-core = { path = "../core" }
+serde_json.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+parking_lot.workspace = true

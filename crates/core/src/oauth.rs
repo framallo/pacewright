@@ -2,17 +2,12 @@
 //!
 //! Everything here is IO-free and deterministic so it can be unit-tested without a network or a
 //! browser: building the authorize URL, parsing the loopback redirect the browser lands on, parsing
-//! the token response + computing its absolute expiry, and forming a LinkedIn author URN. The IO
+//! the token response + computing its absolute expiry, and forming an author URN from a template. The IO
 //! glue (opening the browser, the localhost callback listener, the token/userinfo HTTP calls) lives
 //! in the CLI and calls these.
 
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
-
-/// LinkedIn OAuth endpoints (member 3-legged flow).
-pub const LINKEDIN_AUTHORIZE: &str = "https://www.linkedin.com/oauth/v2/authorization";
-pub const LINKEDIN_TOKEN: &str = "https://www.linkedin.com/oauth/v2/accessToken";
-pub const LINKEDIN_USERINFO: &str = "https://api.linkedin.com/v2/userinfo";
 
 /// Percent-encode per RFC 3986 (encode everything except the unreserved set `A-Za-z0-9-._~`).
 pub fn pct_encode(s: &str) -> String {
@@ -35,18 +30,16 @@ pub fn pct_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(v) => {
-                        out.push(v);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(b'%');
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(v) => {
+                    out.push(v);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             b'+' => {
                 out.push(b' ');
                 i += 1;
@@ -132,23 +125,25 @@ impl TokenResponse {
     }
 }
 
-/// Form a LinkedIn author/person URN from the OpenID `sub` claim.
-pub fn person_urn(sub: &str) -> String {
-    format!("urn:li:person:{sub}")
+/// Apply an author/principal URN template to an id, substituting `{id}` (e.g. template
+/// `"urn:li:person:{id}"` + id `"ACoAA123"` -> `"urn:li:person:ACoAA123"`). A template with no
+/// `{id}` placeholder is returned unchanged.
+pub fn apply_urn_template(template: &str, id: &str) -> String {
+    template.replace("{id}", id)
 }
 
 /// The default loopback base (scheme + host + port) the callback listens on. The provider name is
 /// appended as a path segment, so the redirect URI is `{base}/{provider}/callback`.
 pub const DEFAULT_CALLBACK_BASE: &str = "http://localhost:8765";
 
-/// Build a provider-namespaced redirect URI, e.g. `http://localhost:8765/linkedin/callback`. The
+/// Build a provider-namespaced redirect URI, e.g. `http://localhost:8765/acme/callback`. The
 /// path segment lets one loopback port serve multiple providers without collision.
 pub fn callback_uri(base: &str, provider: &str) -> String {
     format!("{}/{}/callback", base.trim_end_matches('/'), provider)
 }
 
 /// Extract the port the loopback listener must bind from a redirect URI
-/// (e.g. `http://localhost:8765/linkedin/callback` → `8765`). Errors if no explicit port is present,
+/// (e.g. `http://localhost:8765/acme/callback` → `8765`). Errors if no explicit port is present,
 /// since a loopback listener has nothing to bind without one.
 pub fn redirect_port(redirect_uri: &str) -> Result<u16> {
     let after_scheme = redirect_uri
@@ -156,10 +151,9 @@ pub fn redirect_port(redirect_uri: &str) -> Result<u16> {
         .map(|(_, rest)| rest)
         .unwrap_or(redirect_uri);
     let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
-    let port_str = authority
-        .rsplit_once(':')
-        .map(|(_, p)| p)
-        .ok_or_else(|| anyhow!("redirect URI needs an explicit port to bind the listener: {redirect_uri:?}"))?;
+    let port_str = authority.rsplit_once(':').map(|(_, p)| p).ok_or_else(|| {
+        anyhow!("redirect URI needs an explicit port to bind the listener: {redirect_uri:?}")
+    })?;
     port_str
         .parse::<u16>()
         .map_err(|_| anyhow!("invalid port in redirect URI: {redirect_uri:?}"))
@@ -186,13 +180,13 @@ mod tests {
     #[test]
     fn authorize_url_encodes_params() {
         let u = authorize_url(
-            LINKEDIN_AUTHORIZE,
+            "https://auth.acme.example/authorize",
             "cid",
             "http://localhost:8765/callback",
             "openid profile w_member_social",
             "nonce123",
         );
-        assert!(u.starts_with("https://www.linkedin.com/oauth/v2/authorization?"));
+        assert!(u.starts_with("https://auth.acme.example/authorize?"));
         assert!(u.contains("response_type=code"));
         assert!(u.contains("client_id=cid"));
         assert!(u.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8765%2Fcallback"));
@@ -235,31 +229,35 @@ mod tests {
     }
 
     #[test]
-    fn person_urn_prefixes_sub() {
-        assert_eq!(person_urn("ACoAA123"), "urn:li:person:ACoAA123");
+    fn apply_urn_template_substitutes_id() {
+        assert_eq!(
+            apply_urn_template("urn:li:person:{id}", "ACoAA123"),
+            "urn:li:person:ACoAA123"
+        );
+        assert_eq!(apply_urn_template("no-placeholder", "x"), "no-placeholder");
     }
 
     #[test]
     fn callback_uri_namespaces_by_provider() {
         assert_eq!(
-            callback_uri("http://localhost:8765", "linkedin"),
-            "http://localhost:8765/linkedin/callback"
+            callback_uri("http://localhost:8765", "acme"),
+            "http://localhost:8765/acme/callback"
         );
         assert_eq!(
-            callback_uri("http://localhost:8765", "youtube"),
-            "http://localhost:8765/youtube/callback"
+            callback_uri("http://localhost:8765", "globex"),
+            "http://localhost:8765/globex/callback"
         );
         // A trailing slash on the base doesn't double up.
         assert_eq!(
-            callback_uri("http://localhost:8765/", "linkedin"),
-            "http://localhost:8765/linkedin/callback"
+            callback_uri("http://localhost:8765/", "acme"),
+            "http://localhost:8765/acme/callback"
         );
     }
 
     #[test]
     fn redirect_port_extracts_from_uri() {
         assert_eq!(
-            redirect_port("http://localhost:8765/linkedin/callback").unwrap(),
+            redirect_port("http://localhost:8765/acme/callback").unwrap(),
             8765
         );
         assert_eq!(redirect_port("http://127.0.0.1:9000/cb").unwrap(), 9000);
@@ -267,6 +265,6 @@ mod tests {
 
     #[test]
     fn redirect_port_errors_without_explicit_port() {
-        assert!(redirect_port("http://localhost/linkedin/callback").is_err());
+        assert!(redirect_port("http://localhost/acme/callback").is_err());
     }
 }

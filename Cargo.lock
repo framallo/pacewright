@@ -1096,6 +1096,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "pacewright-adapter-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "pacewright-core",
+ "parking_lot",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "pacewright-adapter-dummy"
 version = "0.1.0"
 dependencies = [
@@ -1141,6 +1157,7 @@ dependencies = [
  "clap",
  "crossterm",
  "kdl",
+ "pacewright-adapter-agent",
  "pacewright-adapter-recipe",
  "pacewright-core",
  "pacewright-proto",
@@ -1164,6 +1181,7 @@ dependencies = [
  "futures-util",
  "kdl",
  "pacewright-adapter-dummy",
+ "parking_lot",
  "rand 0.8.6",
  "rusqlite",
  "serde",
@@ -1184,6 +1202,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "pacewright-adapter-agent",
  "pacewright-adapter-dummy",
  "pacewright-adapter-recipe",
  "pacewright-browser",
@@ -1663,6 +1682,17 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",

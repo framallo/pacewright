@@ -14,7 +14,7 @@ This is milestone **M2, workstream 1 of 2**. It produces a forked, library-calla
 pacewright's engine (M1) is browser-free by design: `RunCtx` in
 `crates/core/src/adapter.rs` carries a `// M2+: pub browser: BrowserHandle` placeholder,
 and the `DummyAdapter` proves the `Adapter` seam without a browser. M2 makes real
-browser-driving adapters (M3 LinkedIn profile onward) possible.
+browser-driving adapters (M3 `acme` profile onward) possible.
 
 The chosen substrate is **`chrome-agent`** (`github.com/sderosiaux/chrome-agent`, v0.4.3),
 a Rust binary crate: CDP-direct browser automation, "single binary, zero deps," published
@@ -54,7 +54,7 @@ as a crate" without a fork that adds a library facade. The M2 milestone in
   or any daemon wiring — that is workstream 2, a separate spec.
 - Changing the CLI's user-facing behavior. The CLI stays; it is refactored to sit on top of
   the new library, and its existing integration tests are the refactor's regression guard.
-- New platform logic (LinkedIn/Riverside/YouTube specifics) — that lives in pacewright
+- New platform logic (`acme`/`globex` and other platform specifics) — that lives in pacewright
   adapters (M3+), not in chrome-agent.
 
 ---
@@ -194,7 +194,7 @@ release) at the target, unchanged from upstream.
 ### 5.3 CDP input audit — **verify + lock**
 All interaction in `element.rs` already routes through `Input.dispatchMouseEvent` /
 `Input.dispatchKeyEvent` (no JS synthetic events), which is what §9 requires and what makes
-LinkedIn `@`-mention autocomplete work. Deliverable: a test asserting click/fill produce
+a site's `@`-mention autocomplete work. Deliverable: a test asserting click/fill produce
 `Input.dispatch*` CDP traffic and never fall back to `dispatchEvent`-style JS, plus a short
 doc note. No behavior change.
 

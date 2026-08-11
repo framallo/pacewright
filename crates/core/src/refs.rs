@@ -18,7 +18,11 @@ fn next_ref(s: &str) -> Option<(usize, usize, String)> {
     let start = s.find("{{")?;
     let rest = &s[start + 2..];
     let close = rest.find("}}")?;
-    Some((start, start + 2 + close + 2, rest[..close].trim().to_string()))
+    Some((
+        start,
+        start + 2 + close + 2,
+        rest[..close].trim().to_string(),
+    ))
 }
 
 fn dig(root: &Value, path: &[&str]) -> Option<Value> {
@@ -34,6 +38,9 @@ fn lookup(expr: &str, vars: &Value, results: &HashMap<String, Value>) -> Option<
     match parts.as_slice() {
         ["vars", rest @ ..] => dig(vars, rest),
         ["steps", step, "result", rest @ ..] => dig(results.get(*step)?, rest),
+        ["steps", step, "verify", "result", rest @ ..] => {
+            dig(results.get(&format!("{step}.verify"))?, rest)
+        }
         _ => None,
     }
 }
@@ -63,13 +70,17 @@ fn resolve_str(s: &str, vars: &Value, results: &HashMap<String, Value>) -> Resul
 /// Resolve every reference in `params`. An unresolvable reference is an error, never a
 /// literal `{{ … }}` passed through to an adapter.
 pub fn resolve(
-    params: &Value, vars: &Value, results: &HashMap<String, Value>,
+    params: &Value,
+    vars: &Value,
+    results: &HashMap<String, Value>,
 ) -> Result<Value, RefError> {
     Ok(match params {
         Value::String(s) => resolve_str(s, vars, results)?,
-        Value::Array(a) => {
-            Value::Array(a.iter().map(|v| resolve(v, vars, results)).collect::<Result<_, _>>()?)
-        }
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .map(|v| resolve(v, vars, results))
+                .collect::<Result<_, _>>()?,
+        ),
         Value::Object(o) => Value::Object(
             o.iter()
                 .map(|(k, v)| Ok((k.clone(), resolve(v, vars, results)?)))
@@ -127,5 +138,18 @@ mod tests {
         let out = resolve(&params, &json!({"a": "z"}), &HashMap::new()).unwrap();
         assert_eq!(out["outer"]["inner"][0], "z");
         assert_eq!(out["outer"]["inner"][1], 1);
+    }
+
+    #[test]
+    fn resolves_verify_step_results() {
+        // A pipeline's `output` block reports VERIFIED values, e.g. the confirmed URL.
+        let mut r = results();
+        r.insert(
+            "publish_long.verify".to_string(),
+            json!({"url": "https://x/watch?v=abc123"}),
+        );
+        let params = json!({"u": "{{ steps.publish_long.verify.result.url }}"});
+        let out = resolve(&params, &json!({}), &r).unwrap();
+        assert_eq!(out["u"], "https://x/watch?v=abc123");
     }
 }

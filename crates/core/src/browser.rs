@@ -18,7 +18,7 @@ use std::sync::Mutex;
 /// (started by launchd with `--remote-debugging-port`, never by chrome-agent) and separates sites
 /// by named *tabs* rather than by browser profiles.
 ///
-/// Launching is what breaks auth: a CDP-launched browser is a bot signal, so LinkedIn walls the
+/// Launching is what breaks auth: a CDP-launched browser is a bot signal, so Acme walls the
 /// profile and revokes `li_at`, and Google refuses sign-in outright. See
 /// `docs/plans/2026-07-16-single-chrome-attach.md`.
 ///
@@ -58,7 +58,7 @@ pub fn explain_connect_failure(msg: &str) -> Option<String> {
 /// recorded in `~/.chrome-agent/sessions.json` was closed since, so its `targetId` no longer
 /// appears in `/json/list`. Unlike the browser-level GUID (which chrome-agent re-resolves from
 /// `--connect`), a stale page target is NOT self-healed: chrome-agent errors instead of adopting or
-/// recreating the tab. Verified live 2026-07-17: closing the `linkedin` tab made the next task fail
+/// recreating the tab. Verified live 2026-07-17: closing the `acme` tab made the next task fail
 /// with exactly this until the page record was pruned.
 ///
 /// Caller contract: on a match, `prune_stale_page` the offending page and retry once — with the
@@ -73,8 +73,12 @@ pub fn is_stale_page_target(msg: &str) -> bool {
 /// chrome-agent's session store. Overridable via `CHROME_AGENT_HOME` for tests and non-default
 /// installs; defaults to `~/.chrome-agent/sessions.json`.
 pub fn chrome_sessions_path() -> std::path::PathBuf {
-    let home = std::env::var("CHROME_AGENT_HOME")
-        .unwrap_or_else(|_| format!("{}/.chrome-agent", std::env::var("HOME").unwrap_or_default()));
+    let home = std::env::var("CHROME_AGENT_HOME").unwrap_or_else(|_| {
+        format!(
+            "{}/.chrome-agent",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
     std::path::PathBuf::from(home).join("sessions.json")
 }
 
@@ -111,7 +115,7 @@ pub fn prune_stale_page(browser: &str, page: &str) -> bool {
 }
 
 /// What a navigation landed on. Adapters check this to detect auth walls
-/// (LinkedIn bounces unauthenticated sessions to `/authwall` or `/login`).
+/// (Acme bounces unauthenticated sessions to `/authwall` or `/login`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NavInfo {
     pub url: String,
@@ -141,8 +145,12 @@ pub enum BrowserError {
 impl From<BrowserError> for AdapterError {
     fn from(e: BrowserError) -> Self {
         match e {
-            BrowserError::Navigation(_) | BrowserError::Io(_) => AdapterError::Retryable(e.to_string()),
-            BrowserError::Unavailable(_) | BrowserError::Eval(_) => AdapterError::Terminal(e.to_string()),
+            BrowserError::Navigation(_) | BrowserError::Io(_) => {
+                AdapterError::Retryable(e.to_string())
+            }
+            BrowserError::Unavailable(_) | BrowserError::Eval(_) => {
+                AdapterError::Terminal(e.to_string())
+            }
         }
     }
 }
@@ -168,13 +176,19 @@ pub struct NullBrowser;
 #[async_trait]
 impl BrowserHandle for NullBrowser {
     async fn goto(&self, _url: &str) -> Result<NavInfo, BrowserError> {
-        Err(BrowserError::Unavailable("no browser configured for this daemon".into()))
+        Err(BrowserError::Unavailable(
+            "no browser configured for this daemon".into(),
+        ))
     }
     async fn eval(&self, _js: &str) -> Result<serde_json::Value, BrowserError> {
-        Err(BrowserError::Unavailable("no browser configured for this daemon".into()))
+        Err(BrowserError::Unavailable(
+            "no browser configured for this daemon".into(),
+        ))
     }
     async fn screenshot(&self) -> Result<Vec<u8>, BrowserError> {
-        Err(BrowserError::Unavailable("no browser configured for this daemon".into()))
+        Err(BrowserError::Unavailable(
+            "no browser configured for this daemon".into(),
+        ))
     }
 }
 
@@ -190,11 +204,16 @@ pub struct FakeBrowser {
 }
 
 impl FakeBrowser {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Make the next `goto` land here (e.g. an `/authwall` URL).
     pub fn with_nav(self, url: &str, title: &str) -> Self {
-        *self.nav.lock().unwrap() = Some(NavInfo { url: url.into(), title: title.into() });
+        *self.nav.lock().unwrap() = Some(NavInfo {
+            url: url.into(),
+            title: title.into(),
+        });
         self
     }
 
@@ -210,15 +229,22 @@ impl FakeBrowser {
         self
     }
 
-    pub fn calls(&self) -> Vec<String> { self.calls.lock().unwrap().clone() }
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl BrowserHandle for FakeBrowser {
     async fn goto(&self, url: &str) -> Result<NavInfo, BrowserError> {
         self.calls.lock().unwrap().push(format!("goto:{url}"));
-        if let Some(e) = self.fail_goto.lock().unwrap().clone() { return Err(e); }
-        Ok(self.nav.lock().unwrap().clone().unwrap_or(NavInfo { url: url.to_string(), title: String::new() }))
+        if let Some(e) = self.fail_goto.lock().unwrap().clone() {
+            return Err(e);
+        }
+        Ok(self.nav.lock().unwrap().clone().unwrap_or(NavInfo {
+            url: url.to_string(),
+            title: String::new(),
+        }))
     }
     async fn eval(&self, js: &str) -> Result<serde_json::Value, BrowserError> {
         self.calls.lock().unwrap().push(format!("eval:{js}"));
@@ -255,8 +281,14 @@ mod tests {
             .with_eval("document.title", serde_json::json!("Sign In"));
         let nav = b.goto("https://x.test/in/foo").await.unwrap();
         assert_eq!(nav.url, "https://landed.test/authwall");
-        assert_eq!(b.eval("document.title").await.unwrap(), serde_json::json!("Sign In"));
-        assert_eq!(b.calls(), vec!["goto:https://x.test/in/foo", "eval:document.title"]);
+        assert_eq!(
+            b.eval("document.title").await.unwrap(),
+            serde_json::json!("Sign In")
+        );
+        assert_eq!(
+            b.calls(),
+            vec!["goto:https://x.test/in/foo", "eval:document.title"]
+        );
     }
 
     #[tokio::test]
@@ -267,10 +299,22 @@ mod tests {
 
     #[test]
     fn transient_browser_errors_are_retryable_permanent_are_terminal() {
-        assert!(matches!(AdapterError::from(BrowserError::Navigation("t".into())), AdapterError::Retryable(_)));
-        assert!(matches!(AdapterError::from(BrowserError::Io("t".into())), AdapterError::Retryable(_)));
-        assert!(matches!(AdapterError::from(BrowserError::Unavailable("t".into())), AdapterError::Terminal(_)));
-        assert!(matches!(AdapterError::from(BrowserError::Eval("t".into())), AdapterError::Terminal(_)));
+        assert!(matches!(
+            AdapterError::from(BrowserError::Navigation("t".into())),
+            AdapterError::Retryable(_)
+        ));
+        assert!(matches!(
+            AdapterError::from(BrowserError::Io("t".into())),
+            AdapterError::Retryable(_)
+        ));
+        assert!(matches!(
+            AdapterError::from(BrowserError::Unavailable("t".into())),
+            AdapterError::Terminal(_)
+        ));
+        assert!(matches!(
+            AdapterError::from(BrowserError::Eval("t".into())),
+            AdapterError::Terminal(_)
+        ));
     }
 }
 
@@ -287,7 +331,10 @@ mod connect_tests {
         let e = explain_connect_failure(REAL_MSG).expect("must match the real message");
         assert!(e.contains("always-on Chrome is not reachable"));
         assert!(e.contains("launchctl load"), "must give the fix: {e}");
-        assert!(e.contains("browser.connect"), "must point at the config key: {e}");
+        assert!(
+            e.contains("browser.connect"),
+            "must point at the config key: {e}"
+        );
         // the original is preserved for debugging, not swallowed
         assert!(e.contains("Could not resolve CDP WebSocket"));
     }
@@ -298,7 +345,7 @@ mod connect_tests {
         assert_eq!(explain_connect_failure(""), None);
     }
 
-    /// The verbatim stale-page-target message, captured live 2026-07-17 by closing the `linkedin`
+    /// The verbatim stale-page-target message, captured live 2026-07-17 by closing the `acme`
     /// tab and driving it again.
     const STALE_PAGE_MSG: &str = "Failed to connect to page after 8 attempts: Target A7ACAA268173BBBFDFB541DCA50A10E5 not found in /json/list";
 
@@ -306,7 +353,9 @@ mod connect_tests {
     fn detects_the_stale_page_target_error() {
         assert!(is_stale_page_target(STALE_PAGE_MSG));
         // matches the spine even if the attempt count or id changes
-        assert!(is_stale_page_target("Failed to connect to page after 3 attempts: Target ZZZ not found in /json/list"));
+        assert!(is_stale_page_target(
+            "Failed to connect to page after 3 attempts: Target ZZZ not found in /json/list"
+        ));
         // must NOT fire on the browser-level connect failure (that self-heals via --connect)
         assert!(!is_stale_page_target(REAL_MSG));
         assert!(!is_stale_page_target("element not found: n42"));
@@ -334,17 +383,21 @@ mod connect_tests {
     fn prune_removes_only_the_named_page() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = with_sessions(
-            r#"{"browsers":{"pacewright":{"wsEndpoint":"ws://x","pages":{"linkedin":{"targetId":"A"},"youtube":{"targetId":"B"}}},"other":{"pages":{"linkedin":{"targetId":"C"}}}}}"#,
+            r#"{"browsers":{"pacewright":{"wsEndpoint":"ws://x","pages":{"acme":{"targetId":"A"},"globex":{"targetId":"B"}}},"other":{"pages":{"acme":{"targetId":"C"}}}}}"#,
         );
         std::env::set_var("CHROME_AGENT_HOME", &dir);
-        assert!(prune_stale_page("pacewright", "linkedin"));
+        assert!(prune_stale_page("pacewright", "acme"));
         let after: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("sessions.json")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(dir.join("sessions.json")).unwrap())
+                .unwrap();
         let pages = &after["browsers"]["pacewright"]["pages"];
-        assert!(pages.get("linkedin").is_none(), "pruned the stale page");
-        assert!(pages.get("youtube").is_some(), "left the sibling page intact");
+        assert!(pages.get("acme").is_none(), "pruned the stale page");
+        assert!(
+            pages.get("globex").is_some(),
+            "left the sibling page intact"
+        );
         // never touches another browser's same-named page
-        assert!(after["browsers"]["other"]["pages"]["linkedin"].is_object());
+        assert!(after["browsers"]["other"]["pages"]["acme"].is_object());
         std::env::remove_var("CHROME_AGENT_HOME");
     }
 
@@ -352,15 +405,19 @@ mod connect_tests {
     fn prune_is_a_noop_when_absent_or_missing() {
         let _g = ENV_LOCK.lock().unwrap();
         // missing page → false, file untouched
-        let dir = with_sessions(r#"{"browsers":{"pacewright":{"pages":{"youtube":{"targetId":"B"}}}}}"#);
+        let dir =
+            with_sessions(r#"{"browsers":{"pacewright":{"pages":{"globex":{"targetId":"B"}}}}}"#);
         std::env::set_var("CHROME_AGENT_HOME", &dir);
-        assert!(!prune_stale_page("pacewright", "linkedin"), "absent page → no-op");
-        assert!(!prune_stale_page("nonexistent-browser", "linkedin"));
+        assert!(
+            !prune_stale_page("pacewright", "acme"),
+            "absent page → no-op"
+        );
+        assert!(!prune_stale_page("nonexistent-browser", "acme"));
         // missing file → false, never panics
         let empty = std::env::temp_dir().join(format!("pcw-prune-missing-{}", std::process::id()));
         std::fs::create_dir_all(&empty).unwrap();
         std::env::set_var("CHROME_AGENT_HOME", &empty);
-        assert!(!prune_stale_page("pacewright", "linkedin"));
+        assert!(!prune_stale_page("pacewright", "acme"));
         std::env::remove_var("CHROME_AGENT_HOME");
     }
 }

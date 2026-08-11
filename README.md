@@ -2,7 +2,7 @@
 
 A **wright** (craftsman) of **pace** — a Rust tool that **queues, schedules, and runs browser-automation tasks** with human-like pacing and per-platform daily limits.
 
-pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](https://postiz.com)) with one background service you drive from a CLI, a live TUI, an MCP server, or a desktop app. It is built to automate LinkedIn, Riverside, and YouTube through their UIs without tripping bot-detection — the safety comes from driving a real, logged-in browser over CDP and from a scheduler that enforces daily caps, minimum gaps, active-hours windows, and jitter.
+pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](https://postiz.com)) with one background service you drive from a CLI, a live TUI, an MCP server, or a desktop app. It is built to automate social, media, and content platforms through their UIs without tripping bot-detection — the safety comes from driving a real, logged-in browser over CDP and from a scheduler that enforces daily caps, minimum gaps, active-hours windows, and jitter.
 
 > **Status: engine + recipe automation + declarative scheduler + web dashboard complete.** The core engine (queue, scheduler, pacing/limits, runner, durable tracking), the **KDL recipe engine** (declarative browser automation, run as paced tasks via `adapter-recipe`), the **declarative scheduler** (enable-able recurrent tasks in `~/.pacewright/schedules/*.toml`), and a **local web dashboard** (Feed / Schedule / Limits, live over WebSocket) are done and tested (`clippy -D warnings` clean). Driven interchangeably from the CLI, the TUI, or the browser. Real platform adapters ship as recipes.
 
@@ -10,7 +10,7 @@ pacewright replaces a pile of ad-hoc daemon scripts (and eventually [Postiz](htt
 
 ## Why it exists
 
-Automating an authenticated LinkedIn/YouTube session safely is mostly about *not looking like a bot*: consistent fingerprint, a real session, and — critically — **human pacing** (bounded volume, spacing between actions, working hours, randomness). pacewright puts that pacing in the engine, declared per action, so every adapter inherits it for free. See [`docs/specs/`](docs/specs) for the full design and the anti-detection research behind it.
+Automating an authenticated, logged-in session safely is mostly about *not looking like a bot*: consistent fingerprint, a real session, and — critically — **human pacing** (bounded volume, spacing between actions, working hours, randomness). pacewright puts that pacing in the engine, declared per action, so every adapter inherits it for free. See [`docs/specs/`](docs/specs) for the full design and the anti-detection research behind it.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ Automating an authenticated LinkedIn/YouTube session safely is mostly about *not
      (CLI)    (dashboard)   (Claude)    (later)
 ```
 
-The engine is **platform-agnostic**. Adapters implement one trait (`execute(action, params) -> Result`) and *declare* which daily-limit keys each action spends; the engine enforces the limits, persists everything, and never needs to know what LinkedIn is. That boundary is what lets the whole engine be tested with a fake adapter and zero browser.
+The engine is **platform-agnostic**. Adapters implement one trait (`execute(action, params) -> Result`) and *declare* which daily-limit keys each action spends; the engine enforces the limits, persists everything, and never needs to know what any particular platform is. That boundary is what lets the whole engine be tested with a fake adapter and zero browser.
 
 ### Workspace
 
@@ -161,24 +161,24 @@ Enabling/disabling is a first-class runtime toggle (persisted, overriding the fi
 
 ## Log in to authenticated sites
 
-Recipes that touch a signed-in site (Riverside, YouTube Studio, LinkedIn…) reuse a **persistent, per-account browser session** instead of copying a snapshot of your everyday Chrome — which goes stale within minutes as short-lived tokens rotate. A **login is itself a recipe**, living under `~/.pacewright/recipes/accounts/<account>.kdl`:
+Recipes that touch a signed-in site (a media platform, a content studio, a social network…) reuse a **persistent, per-account browser session** instead of copying a snapshot of your everyday Chrome — which goes stale within minutes as short-lived tokens rotate. A **login is itself a recipe**, living under `~/.pacewright/recipes/accounts/<account>.kdl`:
 
 ```kdl
-recipe "accounts/prevetted-riverside" {
-    login-url "https://riverside.com/login"        // where you sign in (pacewright opens this headed)
+recipe "accounts/prevetted-globex" {
+    login-url "https://globex.com/login"        // where you sign in (pacewright opens this headed)
     // The steps ARE the signed-in check, run headless in the account profile. `expect` is a TRIPWIRE
     // (fails when its condition is true), so it trips on the signed-OUT signal: /dashboard bounces to
     // /login when signed out; signed in it stays on /dashboard, so the recipe succeeds.
-    step { goto "https://riverside.com/dashboard" }
-    step { expect on-fail="terminal" message="signed out" { settled-url-matches #"riverside\.com/login"# } }
+    step { goto "https://globex.com/dashboard" }
+    step { expect on-fail="terminal" message="signed out" { settled-url-matches #"globex\.com/login"# } }
 }
 ```
 
-A normal recipe references its account by evolving the `auth` flag — `auth account="prevetted-riverside"` (was `auth #true`). Every recipe sharing an account shares one session, run in the persistent profile `--browser prevetted-riverside` with **no cookie copy**, so the site refreshes its own tokens.
+A normal recipe references its account by evolving the `auth` flag — `auth account="prevetted-globex"` (was `auth #true`). Every recipe sharing an account shares one session, run in the persistent profile `--browser prevetted-globex` with **no cookie copy**, so the site refreshes its own tokens.
 
 ```bash
 pcw auth status                   # table: account · signed-in/out/unknown · recipes using it · last checked
-pcw auth login prevetted-riverside   # daemon pops a headed Chrome window — sign in by hand; it goes green
+pcw auth login prevetted-globex   # daemon pops a headed Chrome window — sign in by hand; it goes green
 pcw auth login --all              # open a login window for every signed-out account, one at a time
 pcw auth recheck [account]        # force a status refresh (runs each account's check headless)
 ```
@@ -215,10 +215,10 @@ launchctl load ~/Library/LaunchAgents/com.paperclip.pacewrightd.plist
 |---|---|
 | **M1 ✅** | Core engine + DummyAdapter + CLI + TUI + launchd + recipe engine + declarative scheduler + **web dashboard** |
 | M2 | Extend chrome-agent (larger viewport, real CDP input, human mouse movement, `Runtime.enable` audit) + browser handle in `RunCtx` |
-| M3 | LinkedIn **profile** adapter (scrape + avatar) — port `linkedin_scraper` to Rust |
-| M4 | LinkedIn **post / edit-mentions / reply-comments** + **pages** adapter |
-| M5 | Riverside adapter (extract raw, export magic clips, → Spotify, → YouTube unlisted) |
-| M6 | YouTube adapter + daily limits |
+| M3 | **profile** adapter (scrape + avatar) — port the profile scraper to Rust |
+| M4 | **post / edit-mentions / reply-comments** + **pages** adapter |
+| M5 | globex adapter (extract raw, export magic clips, → Spotify, → unlisted upload) |
+| M6 | Content-platform upload adapter + daily limits |
 | **M7 ✅** | MCP server (`pacewright-mcp`, 20 tools over stdio) + Claude skill (`.claude/skills/pacewright`) |
 | M8 | Tauri desktop GUI (Postiz replacement) + migrate off Postiz |
 

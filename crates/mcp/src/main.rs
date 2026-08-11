@@ -44,7 +44,8 @@ async fn daemon_call(req: Request) -> Result<Response> {
 /// with `isError` set when the daemon returned an error variant.
 fn tool_result(resp: Response) -> Value {
     let is_error = matches!(resp, Response::Error { .. });
-    let text = serde_json::to_string_pretty(&resp).unwrap_or_else(|e| format!("{{\"serialize_error\":\"{e}\"}}"));
+    let text = serde_json::to_string_pretty(&resp)
+        .unwrap_or_else(|e| format!("{{\"serialize_error\":\"{e}\"}}"));
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": is_error,
@@ -71,7 +72,10 @@ async fn handle_method(method: &str, params: &Value) -> Result<Value, String> {
         "tools/list" => Ok(json!({ "tools": tools::tool_catalog() })),
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let req = tools::build_request(name, &args)?;
             match daemon_call(req).await {
                 Ok(resp) => Ok(tool_result(resp)),
@@ -112,7 +116,9 @@ async fn main() -> Result<()> {
         let Some(id) = id else { continue };
         let reply = match result {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(message) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": message } }),
+            Err(message) => {
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": message } })
+            }
         };
         let mut out = serde_json::to_string(&reply)?;
         out.push('\n');

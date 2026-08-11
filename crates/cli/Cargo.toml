@@ -12,6 +12,7 @@ path = "src/main.rs"
 pacewright-proto = { path = "../proto" }
 pacewright-adapter-recipe = { path = "../adapter-recipe" }
 pacewright-core = { path = "../core" }
+pacewright-adapter-agent = { path = "../adapter-agent" }
 reqwest.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

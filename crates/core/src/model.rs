@@ -4,7 +4,13 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    Pending, Blocked, Deferred, Running, Succeeded, Failed, Canceled,
+    Pending,
+    Blocked,
+    Deferred,
+    Running,
+    Succeeded,
+    Failed,
+    Canceled,
 }
 
 impl TaskStatus {
@@ -13,18 +19,30 @@ impl TaskStatus {
     /// `terminal_strs` derive the DB terminal-set from `is_terminal` alone,
     /// so the SQL in `store.rs` can never drift from the Rust definition.
     pub const ALL: [TaskStatus; 7] = [
-        TaskStatus::Pending, TaskStatus::Blocked, TaskStatus::Deferred, TaskStatus::Running,
-        TaskStatus::Succeeded, TaskStatus::Failed, TaskStatus::Canceled,
+        TaskStatus::Pending,
+        TaskStatus::Blocked,
+        TaskStatus::Deferred,
+        TaskStatus::Running,
+        TaskStatus::Succeeded,
+        TaskStatus::Failed,
+        TaskStatus::Canceled,
     ];
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled)
+        matches!(
+            self,
+            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled
+        )
     }
 
     /// The wire strings of the terminal statuses, derived from `is_terminal`.
     /// Single source of truth for any query that must exclude finished tasks.
     pub fn terminal_strs() -> Vec<&'static str> {
-        Self::ALL.iter().filter(|s| s.is_terminal()).map(|s| s.as_str()).collect()
+        Self::ALL
+            .iter()
+            .filter(|s| s.is_terminal())
+            .map(|s| s.as_str())
+            .collect()
     }
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -63,6 +81,19 @@ pub struct Task {
     /// Task id of an escalation that backstops this one. If that task succeeds with a
     /// well-formed verdict, this task is marked Succeeded-by-adjudication.
     pub escalation: Option<String>,
+    /// Fail-safe for sensitive outward jobs: on a terminal failure (e.g. a preflight throw —
+    /// logged out, wrong account), pause this task's adapter scope so the next queued items don't
+    /// repeat the failure unattended. Opt-in; internal/data tasks leave it false.
+    pub pause_scope_on_failure: bool,
+    /// Fan-out spec (from a pipeline step's `fanout` block). When this task SUCCEEDS, its
+    /// `result` is turned into N paced, deduped act tasks — the declarative form of the
+    /// bash "scan into a queue, then paced `while read` loop" (R5). `None` for ordinary tasks.
+    pub fanout: Option<Value>,
+    /// All-time dedup ledger identity (R7). Set on a fanned-out act task: when it succeeds, the
+    /// engine records `(touch_scope, touch_id)` in the `touched` table so the target is never
+    /// acted on again — replacing the per-script `mm-pitched-all.log` / `.apollo-revealed.txt`.
+    pub touch_scope: Option<String>,
+    pub touch_id: Option<String>,
     pub attempts: i64,
     pub max_attempts: i64,
     pub last_error: Option<String>,
@@ -73,7 +104,12 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new_now(adapter: impl Into<String>, action: impl Into<String>, params: Value, now_ms: i64) -> Self {
+    pub fn new_now(
+        adapter: impl Into<String>,
+        action: impl Into<String>,
+        params: Value,
+        now_ms: i64,
+    ) -> Self {
         Task {
             id: uuid::Uuid::new_v4().to_string(),
             adapter: adapter.into(),
@@ -91,6 +127,10 @@ impl Task {
             pace_ms: None,
             dep_on_failure: false,
             escalation: None,
+            pause_scope_on_failure: false,
+            fanout: None,
+            touch_scope: None,
+            touch_id: None,
             attempts: 0,
             max_attempts: 3,
             last_error: None,
@@ -159,7 +199,10 @@ mod tests {
         // is both classified here and (by review) appended to `ALL`.
         for s in TaskStatus::ALL {
             let expected_terminal = match s {
-                TaskStatus::Pending | TaskStatus::Blocked | TaskStatus::Deferred | TaskStatus::Running => false,
+                TaskStatus::Pending
+                | TaskStatus::Blocked
+                | TaskStatus::Deferred
+                | TaskStatus::Running => false,
                 TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled => true,
             };
             assert_eq!(s.is_terminal(), expected_terminal, "{s:?}");

@@ -146,9 +146,7 @@ async fn run_loop<B: Backend>(sock: &Path, terminal: &mut Terminal<B>) -> Result
                 Pane::Schedule => {
                     " tab: view · ↑/↓: select · space: enable/disable · a: apply · q: quit "
                 }
-                Pane::Accounts => {
-                    " tab: view · ↑/↓: select · l: log in · r: recheck · q: quit "
-                }
+                Pane::Accounts => " tab: view · ↑/↓: select · l: log in · r: recheck · q: quit ",
                 _ => " tab: view · q: quit ",
             };
             f.render_widget(Paragraph::new(hint).style(Style::new().dim()), chunks[1]);

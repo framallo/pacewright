@@ -6,6 +6,7 @@ pub mod config;
 pub mod engine;
 pub mod limits;
 pub mod model;
+pub mod notify;
 pub mod oauth;
 pub mod pipeline;
 pub mod refs;

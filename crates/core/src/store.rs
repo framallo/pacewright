@@ -1,6 +1,6 @@
 use crate::model::{Task, TaskEvent, TaskStatus};
+use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::sync::Mutex;
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     pace_ms INTEGER,
     dep_on_failure INTEGER NOT NULL DEFAULT 0,
     escalation TEXT,
+    pause_scope_on_failure INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     last_error TEXT,
@@ -67,6 +68,19 @@ CREATE TABLE IF NOT EXISTS limit_overrides (
     active_end_min INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+-- Paused scopes, persisted so a daemon RESTART re-asserts them instead of silently resuming.
+-- `all` pauses the whole engine; any other value pauses that adapter.
+CREATE TABLE IF NOT EXISTS paused_scopes (
+    scope TEXT PRIMARY KEY NOT NULL
+);
+-- All-time dedup ledger (R7): a target, once acted on within a scope, is never touched again.
+-- Replaces the per-script text ledgers (mm-pitched-all.log, .apollo-revealed.txt, "grep the CSV").
+CREATE TABLE IF NOT EXISTS touched (
+    scope TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    first_touched_at INTEGER NOT NULL,
+    PRIMARY KEY (scope, target_id)
+);
 "#;
 
 /// `CREATE TABLE IF NOT EXISTS` will not alter an existing `tasks` table, so add the
@@ -79,6 +93,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE tasks ADD COLUMN pace_ms INTEGER",
         "ALTER TABLE tasks ADD COLUMN dep_on_failure INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE tasks ADD COLUMN escalation TEXT",
+        "ALTER TABLE tasks ADD COLUMN pause_scope_on_failure INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE tasks ADD COLUMN fanout TEXT",
+        "ALTER TABLE tasks ADD COLUMN touch_scope TEXT",
+        "ALTER TABLE tasks ADD COLUMN touch_id TEXT",
     ] {
         match conn.execute(ddl, []) {
             Ok(_) => {}
@@ -100,13 +118,17 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Store { conn: Mutex::new(conn) })
+        Ok(Store {
+            conn: Mutex::new(conn),
+        })
     }
     pub fn open_in_memory() -> rusqlite::Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Store { conn: Mutex::new(conn) })
+        Ok(Store {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
@@ -130,6 +152,12 @@ impl Store {
             pace_ms: row.get("pace_ms")?,
             dep_on_failure: row.get::<_, i64>("dep_on_failure")? != 0,
             escalation: row.get("escalation")?,
+            pause_scope_on_failure: row.get::<_, i64>("pause_scope_on_failure")? != 0,
+            fanout: row
+                .get::<_, Option<String>>("fanout")?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            touch_scope: row.get("touch_scope")?,
+            touch_id: row.get("touch_id")?,
             attempts: row.get("attempts")?,
             max_attempts: row.get("max_attempts")?,
             last_error: row.get("last_error")?,
@@ -141,72 +169,159 @@ impl Store {
     }
 
     pub fn insert_task(&self, t: &Task) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO tasks (id,adapter,action,params,status,scheduled_for,next_eligible_at,priority,recurrence,depends_on,dedup_key,run_id,step_name,pace_ms,dep_on_failure,escalation,attempts,max_attempts,last_error,result,created_at,updated_at,finished_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+            "INSERT INTO tasks (id,adapter,action,params,status,scheduled_for,next_eligible_at,priority,recurrence,depends_on,dedup_key,run_id,step_name,pace_ms,dep_on_failure,escalation,attempts,max_attempts,last_error,result,created_at,updated_at,finished_at,pause_scope_on_failure,fanout,touch_scope,touch_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
             params![
                 t.id, t.adapter, t.action, serde_json::to_string(&t.params).unwrap(),
                 t.status.as_str(), t.scheduled_for, t.next_eligible_at, t.priority,
                 t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.pace_ms,
                 t.dep_on_failure as i64, t.escalation, t.attempts, t.max_attempts,
                 t.last_error, t.result.as_ref().map(|v| serde_json::to_string(v).unwrap()),
-                t.created_at, t.updated_at, t.finished_at
+                t.created_at, t.updated_at, t.finished_at, t.pause_scope_on_failure as i64,
+                t.fanout.as_ref().map(|v| serde_json::to_string(v).unwrap()),
+                t.touch_scope, t.touch_id
             ],
         )?;
         Ok(())
     }
 
     pub fn update_task(&self, t: &Task) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
-            "UPDATE tasks SET adapter=?2,action=?3,params=?4,status=?5,scheduled_for=?6,next_eligible_at=?7,priority=?8,recurrence=?9,depends_on=?10,dedup_key=?11,run_id=?12,step_name=?13,pace_ms=?14,dep_on_failure=?15,escalation=?16,attempts=?17,max_attempts=?18,last_error=?19,result=?20,created_at=?21,updated_at=?22,finished_at=?23 WHERE id=?1",
+            "UPDATE tasks SET adapter=?2,action=?3,params=?4,status=?5,scheduled_for=?6,next_eligible_at=?7,priority=?8,recurrence=?9,depends_on=?10,dedup_key=?11,run_id=?12,step_name=?13,pace_ms=?14,dep_on_failure=?15,escalation=?16,attempts=?17,max_attempts=?18,last_error=?19,result=?20,created_at=?21,updated_at=?22,finished_at=?23,pause_scope_on_failure=?24,fanout=?25,touch_scope=?26,touch_id=?27 WHERE id=?1",
             params![
                 t.id, t.adapter, t.action, serde_json::to_string(&t.params).unwrap(),
                 t.status.as_str(), t.scheduled_for, t.next_eligible_at, t.priority,
                 t.recurrence, t.depends_on, t.dedup_key, t.run_id, t.step_name, t.pace_ms,
                 t.dep_on_failure as i64, t.escalation, t.attempts, t.max_attempts,
                 t.last_error, t.result.as_ref().map(|v| serde_json::to_string(v).unwrap()),
-                t.created_at, t.updated_at, t.finished_at
+                t.created_at, t.updated_at, t.finished_at, t.pause_scope_on_failure as i64,
+                t.fanout.as_ref().map(|v| serde_json::to_string(v).unwrap()),
+                t.touch_scope, t.touch_id
             ],
         )?;
         Ok(())
+    }
+
+    /// All-time dedup ledger (R7): has `(scope, target_id)` ever been acted on?
+    pub fn is_touched(&self, scope: &str, target_id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM touched WHERE scope=?1 AND target_id=?2",
+            params![scope, target_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Record `(scope, target_id)` as touched. Idempotent (`INSERT OR IGNORE`); returns whether
+    /// this call was the first touch (a new row), so a caller can log the transition once.
+    pub fn mark_touched(
+        &self,
+        scope: &str,
+        target_id: &str,
+        now_ms: i64,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO touched(scope, target_id, first_touched_at) VALUES (?1,?2,?3)",
+            params![scope, target_id, now_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// How many targets have been touched in a scope (for the digest / caps introspection).
+    pub fn touched_count(&self, scope: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM touched WHERE scope=?1",
+            params![scope],
+            |r| r.get(0),
+        )
+    }
+
+    /// Persist a paused scope (`INSERT OR IGNORE`, idempotent). Persisted, not just in memory, so a
+    /// daemon restart re-asserts it rather than silently resuming — the Jul-23 incident.
+    pub fn pause_scope(&self, scope: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO paused_scopes(scope) VALUES (?1)",
+            params![scope],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a paused scope (resume). No-op if absent.
+    pub fn resume_scope(&self, scope: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM paused_scopes WHERE scope=?1", params![scope])?;
+        Ok(())
+    }
+
+    /// Every currently-paused scope, sorted for stable output.
+    pub fn paused_scopes(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT scope FROM paused_scopes ORDER BY scope")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect()
     }
 
     /// Find a task by dedup key INCLUDING terminal ones. `find_active_by_dedup`
     /// deliberately excludes terminal tasks so a finished recurrence can be re-queued;
     /// resume needs the opposite, to see that a step already succeeded.
     pub fn find_by_dedup_any(&self, key: &str) -> rusqlite::Result<Option<Task>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT * FROM tasks WHERE dedup_key=?1 LIMIT 1", params![key], Self::row_to_task)
-            .optional()
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT * FROM tasks WHERE dedup_key=?1 LIMIT 1",
+            params![key],
+            Self::row_to_task,
+        )
+        .optional()
     }
 
     pub fn tasks_in_run(&self, run_id: &str) -> rusqlite::Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT * FROM tasks WHERE run_id=?1 ORDER BY created_at")?;
         let rows = stmt.query_map(params![run_id], Self::row_to_task)?;
         rows.collect()
     }
 
     pub fn get_task(&self, id: &str) -> rusqlite::Result<Option<Task>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT * FROM tasks WHERE id=?1", params![id], Self::row_to_task).optional()
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT * FROM tasks WHERE id=?1",
+            params![id],
+            Self::row_to_task,
+        )
+        .optional()
     }
 
-    pub fn list_tasks(&self, status: Option<TaskStatus>, limit: i64) -> rusqlite::Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+    pub fn list_tasks(
+        &self,
+        status: Option<TaskStatus>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Task>> {
+        let conn = self.conn.lock();
         let mut out = Vec::new();
         match status {
             Some(s) => {
-                let mut stmt = conn.prepare("SELECT * FROM tasks WHERE status=?1 ORDER BY created_at DESC LIMIT ?2")?;
+                let mut stmt = conn.prepare(
+                    "SELECT * FROM tasks WHERE status=?1 ORDER BY created_at DESC LIMIT ?2",
+                )?;
                 let rows = stmt.query_map(params![s.as_str(), limit], Self::row_to_task)?;
-                for r in rows { out.push(r?); }
+                for r in rows {
+                    out.push(r?);
+                }
             }
             None => {
-                let mut stmt = conn.prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?1")?;
+                let mut stmt =
+                    conn.prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?1")?;
                 let rows = stmt.query_map(params![limit], Self::row_to_task)?;
-                for r in rows { out.push(r?); }
+                for r in rows {
+                    out.push(r?);
+                }
             }
         }
         Ok(out)
@@ -217,21 +332,24 @@ impl Store {
     }
 
     pub fn find_active_by_dedup(&self, key: &str) -> rusqlite::Result<Option<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         // Exclude terminal statuses derived from `TaskStatus::is_terminal` (single
         // source of truth) rather than hardcoding the set in SQL — add a status and
         // this stays correct. Bind `key` + each terminal string positionally.
         let terminal = TaskStatus::terminal_strs();
         let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT * FROM tasks WHERE dedup_key=? AND status NOT IN ({placeholders}) LIMIT 1");
+        let sql = format!(
+            "SELECT * FROM tasks WHERE dedup_key=? AND status NOT IN ({placeholders}) LIMIT 1"
+        );
         let mut binds: Vec<&str> = Vec::with_capacity(1 + terminal.len());
         binds.push(key);
         binds.extend(terminal.iter().copied());
-        conn.query_row(&sql, rusqlite::params_from_iter(binds), Self::row_to_task).optional()
+        conn.query_row(&sql, rusqlite::params_from_iter(binds), Self::row_to_task)
+            .optional()
     }
 
     pub fn append_event(&self, e: &TaskEvent) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO task_events (task_id,at,from_status,to_status,detail) VALUES (?1,?2,?3,?4,?5)",
             params![e.task_id, e.at, e.from_status.map(|s| s.as_str()), e.to_status.as_str(), serde_json::to_string(&e.detail).unwrap()],
@@ -240,7 +358,7 @@ impl Store {
     }
 
     pub fn events_for(&self, task_id: &str) -> rusqlite::Result<Vec<TaskEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT task_id,at,from_status,to_status,detail FROM task_events WHERE task_id=?1 ORDER BY id ASC")?;
         let rows = stmt.query_map(params![task_id], |row| {
             let from: Option<String> = row.get("from_status")?;
@@ -255,12 +373,14 @@ impl Store {
             })
         })?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 
     pub fn counter_get(&self, key: &str, date: &str) -> rusqlite::Result<(i64, Option<i64>)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let res = conn.query_row(
             "SELECT count,last_spent_at FROM limit_counters WHERE limit_key=?1 AND window_date=?2",
             params![key, date], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
@@ -269,7 +389,7 @@ impl Store {
     }
 
     pub fn counter_spend(&self, key: &str, date: &str, at_ms: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO limit_counters (limit_key,window_date,count,last_spent_at) VALUES (?1,?2,1,?3)
              ON CONFLICT(limit_key,window_date) DO UPDATE SET count=count+1, last_spent_at=?3",
@@ -281,23 +401,34 @@ impl Store {
     /// All limit counters recorded for a given local date, ordered by key.
     /// Returns `(limit_key, count, last_spent_at)` tuples.
     pub fn list_counters(&self, date: &str) -> rusqlite::Result<Vec<(String, i64, Option<i64>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT limit_key, count, last_spent_at FROM limit_counters WHERE window_date=?1 ORDER BY limit_key",
         )?;
         let rows = stmt.query_map(params![date], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
         })?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 
     // ---- schedule enable/disable overrides ----------------------------------
 
     /// Upsert the runtime enabled override for a schedule entry.
-    pub fn schedule_state_set(&self, entry_id: &str, enabled: bool, at_ms: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+    pub fn schedule_state_set(
+        &self,
+        entry_id: &str,
+        enabled: bool,
+        at_ms: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO schedule_state (entry_id,enabled,updated_at) VALUES (?1,?2,?3)
              ON CONFLICT(entry_id) DO UPDATE SET enabled=?2, updated_at=?3",
@@ -308,19 +439,29 @@ impl Store {
 
     /// Every runtime enabled override, keyed by entry id.
     pub fn schedule_state_all(&self) -> rusqlite::Result<std::collections::HashMap<String, bool>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT entry_id, enabled FROM schedule_state")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+        })?;
         let mut out = std::collections::HashMap::new();
-        for r in rows { let (k, v) = r?; out.insert(k, v); }
+        for r in rows {
+            let (k, v) = r?;
+            out.insert(k, v);
+        }
         Ok(out)
     }
 
     // ---- runtime pacing overrides (set_limit) -------------------------------
 
     /// Upsert a runtime pacing override for a limit key.
-    pub fn limit_override_set(&self, key: &str, cfg: &crate::config::LimitConfig, at_ms: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+    pub fn limit_override_set(
+        &self,
+        key: &str,
+        cfg: &crate::config::LimitConfig,
+        at_ms: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO limit_overrides (limit_key,daily_cap,min_gap_ms,jitter,active_start_min,active_end_min,updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7)
@@ -331,8 +472,10 @@ impl Store {
     }
 
     /// Every runtime pacing override, as `(key, config)` pairs.
-    pub fn limit_overrides_all(&self) -> rusqlite::Result<Vec<(String, crate::config::LimitConfig)>> {
-        let conn = self.conn.lock().unwrap();
+    pub fn limit_overrides_all(
+        &self,
+    ) -> rusqlite::Result<Vec<(String, crate::config::LimitConfig)>> {
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT limit_key,daily_cap,min_gap_ms,jitter,active_start_min,active_end_min FROM limit_overrides ORDER BY limit_key",
         )?;
@@ -349,14 +492,16 @@ impl Store {
             ))
         })?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 
     /// Active (non-terminal) tasks whose `dedup_key` starts with `prefix` — the schedule
     /// reconciler uses this (prefix `"schedule:"`) to find its live tasks for pruning.
     pub fn list_active_by_dedup_prefix(&self, prefix: &str) -> rusqlite::Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let terminal = TaskStatus::terminal_strs();
         let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
@@ -368,7 +513,9 @@ impl Store {
         binds.extend(terminal.iter().copied());
         let rows = stmt.query_map(rusqlite::params_from_iter(binds), Self::row_to_task)?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 }
@@ -421,28 +568,28 @@ mod tests {
     #[test]
     fn test_counter_spend_and_rollover() {
         let s = Store::open_in_memory().unwrap();
-        s.counter_spend("linkedin.post", "2026-07-07", 100).unwrap();
-        s.counter_spend("linkedin.post", "2026-07-07", 200).unwrap();
-        let (c, last) = s.counter_get("linkedin.post", "2026-07-07").unwrap();
+        s.counter_spend("acme.post", "2026-07-07", 100).unwrap();
+        s.counter_spend("acme.post", "2026-07-07", 200).unwrap();
+        let (c, last) = s.counter_get("acme.post", "2026-07-07").unwrap();
         assert_eq!(c, 2);
         assert_eq!(last, Some(200));
         // different day is a fresh counter
-        assert_eq!(s.counter_get("linkedin.post", "2026-07-08").unwrap(), (0, None));
+        assert_eq!(s.counter_get("acme.post", "2026-07-08").unwrap(), (0, None));
     }
 
     #[test]
     fn test_list_counters_for_date() {
         let s = Store::open_in_memory().unwrap();
-        s.counter_spend("linkedin.post", "2026-07-07", 100).unwrap();
-        s.counter_spend("linkedin.post", "2026-07-07", 200).unwrap();
+        s.counter_spend("acme.post", "2026-07-07", 100).unwrap();
+        s.counter_spend("acme.post", "2026-07-07", 200).unwrap();
         s.counter_spend("email.send", "2026-07-07", 150).unwrap();
         s.counter_spend("email.send", "2026-07-08", 50).unwrap();
 
         let rows = s.list_counters("2026-07-07").unwrap();
         assert_eq!(rows.len(), 2);
         // ordered by limit_key
-        assert_eq!(rows[0], ("email.send".to_string(), 1, Some(150)));
-        assert_eq!(rows[1], ("linkedin.post".to_string(), 2, Some(200)));
+        assert_eq!(rows[0], ("acme.post".to_string(), 2, Some(200)));
+        assert_eq!(rows[1], ("email.send".to_string(), 1, Some(150)));
 
         let other_day = s.list_counters("2026-07-08").unwrap();
         assert_eq!(other_day, vec![("email.send".to_string(), 1, Some(50))]);
@@ -466,15 +613,24 @@ mod tests {
     fn test_limit_override_roundtrip() {
         use crate::config::LimitConfig;
         let s = Store::open_in_memory().unwrap();
-        let cfg = LimitConfig { daily_cap: 5, min_gap_ms: 60_000, jitter: 0.25, active_start_min: 540, active_end_min: 1080 };
-        s.limit_override_set("linkedin.post", &cfg, 100).unwrap();
+        let cfg = LimitConfig {
+            daily_cap: 5,
+            min_gap_ms: 60_000,
+            jitter: 0.25,
+            active_start_min: 540,
+            active_end_min: 1080,
+        };
+        s.limit_override_set("acme.post", &cfg, 100).unwrap();
         let all = s.limit_overrides_all().unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].0, "linkedin.post");
+        assert_eq!(all[0].0, "acme.post");
         assert_eq!(all[0].1, cfg);
         // upsert replaces
-        let cfg2 = LimitConfig { daily_cap: 10, ..cfg };
-        s.limit_override_set("linkedin.post", &cfg2, 200).unwrap();
+        let cfg2 = LimitConfig {
+            daily_cap: 10,
+            ..cfg
+        };
+        s.limit_override_set("acme.post", &cfg2, 200).unwrap();
         assert_eq!(s.limit_overrides_all().unwrap()[0].1.daily_cap, 10);
     }
 
@@ -507,8 +663,22 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let t = Task::new_now("dummy", "echo", serde_json::json!({}), 1000);
         s.insert_task(&t).unwrap();
-        s.append_event(&TaskEvent { task_id: t.id.clone(), at: 1, from_status: None, to_status: TaskStatus::Pending, detail: serde_json::json!({}) }).unwrap();
-        s.append_event(&TaskEvent { task_id: t.id.clone(), at: 2, from_status: Some(TaskStatus::Pending), to_status: TaskStatus::Running, detail: serde_json::json!({}) }).unwrap();
+        s.append_event(&TaskEvent {
+            task_id: t.id.clone(),
+            at: 1,
+            from_status: None,
+            to_status: TaskStatus::Pending,
+            detail: serde_json::json!({}),
+        })
+        .unwrap();
+        s.append_event(&TaskEvent {
+            task_id: t.id.clone(),
+            at: 2,
+            from_status: Some(TaskStatus::Pending),
+            to_status: TaskStatus::Running,
+            detail: serde_json::json!({}),
+        })
+        .unwrap();
         let evs = s.events_for(&t.id).unwrap();
         assert_eq!(evs.len(), 2);
         assert_eq!(evs[1].to_status, TaskStatus::Running);

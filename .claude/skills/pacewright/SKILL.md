@@ -2,7 +2,7 @@
 name: pacewright
 description: >
   Drive the pacewright automation daemon — queue, schedule, and monitor paced
-  browser-automation tasks (LinkedIn, Riverside, YouTube) with human-like pacing
+  browser-automation tasks (a social network, a media platform, and more) with human-like pacing
   and daily limits. Use when the user says "pacewright", "pcw", "queue a task",
   "check the queue/daemon", "run a recipe", "schedule a recurring task", "pace
   this", "pause/resume the daemon", or asks to render/publish/download through
@@ -65,10 +65,10 @@ Recipes with `auth account="…"` need a signed-in browser session first:
 
 Never enter the user's credentials yourself — `auth_login` is human-in-the-loop by design.
 
-**⚠ Google/YouTube accounts can't use `auth_login`.** `auth_login` launches a chrome-agent/CDP
+**⚠ Google accounts can't use `auth_login`.** `auth_login` launches a chrome-agent/CDP
 automation browser, and **Google blocks sign-in on it** ("this browser or app may not be secure").
-Riverside tolerates it; Google does not. So for a YouTube Studio / Google account (e.g.
-`prevetted-youtube`), do NOT run `auth_login` / `pcw auth login` — it just gets stuck at "logging in…".
+Most sites tolerate it; Google does not. So for a Google account, do NOT run
+`auth_login` / `pcw auth login` — it just gets stuck at "logging in…".
 Instead use the CDP-**attach** workaround: launch a *normal* Chrome with a dedicated `--user-data-dir`
 + `--remote-debugging-port=9222`, have the user sign in by hand, then drive it with
 `chrome-agent --connect auto` (attach, not launch). This path is outside pacewright's `auth` system.

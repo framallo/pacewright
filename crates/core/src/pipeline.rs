@@ -3,6 +3,7 @@
 //! A pipeline names steps, their dependencies, their params, and (optionally) how to
 //! verify each one. It references recipes by name and never encodes what a step *does*,
 //! which is what keeps the engine platform-agnostic: all domain logic stays in recipes.
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +39,29 @@ pub struct StepDef {
     pub fallback: Option<SubStep>,
 }
 
+/// A fan-out: turn one producer step's array result into N paced, deduped act tasks (R5). This is
+/// the declarative form of the bash "scan into a queue, then a paced `while read` loop calling the
+/// act recipe once per item". Serialized onto the producer's `Task.fanout` at expand time and
+/// materialized by the runner when the producer succeeds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FanoutDef {
+    /// The producer step whose `result` holds the items.
+    pub after: String,
+    /// The act recipe, `<adapter>/<action>`, run once per surviving item.
+    pub recipe: String,
+    /// Dotted path into the producer result to the array (`""` = the whole result is the array).
+    #[serde(default)]
+    pub items: String,
+    /// Name the item is bound under for the templates below (referenced as `{{ vars.<as>.… }}`).
+    pub as_var: String,
+    /// All-time dedup ledger scope (R7): an item whose id is already touched here is skipped.
+    pub scope: String,
+    /// Per-item id template, resolved to the ledger `target_id` (e.g. `{{ vars.item.url }}`).
+    pub id: String,
+    /// The act task's params template, resolved per item.
+    pub params: Value,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PipelineDef {
     pub name: String,
@@ -45,15 +69,22 @@ pub struct PipelineDef {
     pub pace_max_ms: i64,
     pub vars: Vec<VarDef>,
     pub steps: Vec<StepDef>,
+    pub fanouts: Vec<FanoutDef>,
     pub output: Value,
 }
 
 fn first_arg(n: &kdl::KdlNode) -> Option<&str> {
-    n.entries().iter().find(|e| e.name().is_none()).and_then(|e| e.value().as_string())
+    n.entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_string())
 }
 
 fn first_int(n: &kdl::KdlNode) -> Option<i128> {
-    n.entries().iter().find(|e| e.name().is_none()).and_then(|e| e.value().as_integer())
+    n.entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_integer())
 }
 
 fn prop_str<'a>(n: &'a kdl::KdlNode, key: &str) -> Option<&'a str> {
@@ -94,10 +125,15 @@ fn params_of(n: &kdl::KdlNode) -> Value {
 }
 
 fn sub_step(parent: &kdl::KdlNode, kind: &str) -> Result<Option<SubStep>, PipelineError> {
-    let Some(n) = children(parent).find(|c| c.name().value() == kind) else { return Ok(None) };
+    let Some(n) = children(parent).find(|c| c.name().value() == kind) else {
+        return Ok(None);
+    };
     let recipe = prop_str(n, "recipe")
         .ok_or_else(|| PipelineError::Invalid(format!("{kind} needs recipe=")))?;
-    Ok(Some(SubStep { recipe: recipe.to_string(), params: params_of(n) }))
+    Ok(Some(SubStep {
+        recipe: recipe.to_string(),
+        params: params_of(n),
+    }))
 }
 
 /// "90s" / "5m" / "1h" / "1500" (bare = ms) -> milliseconds.
@@ -110,11 +146,16 @@ fn dur_ms(s: &str) -> Result<i64, PipelineError> {
         Some('h') => (&s[..s.len() - 1], 3_600_000),
         _ => (s, 1),
     };
-    num.trim().parse::<i64>().map(|n| n * mult).map_err(|_| bad())
+    num.trim()
+        .parse::<i64>()
+        .map(|n| n * mult)
+        .map_err(|_| bad())
 }
 
 pub fn parse_pipeline(src: &str) -> Result<PipelineDef, PipelineError> {
-    let doc: kdl::KdlDocument = src.parse().map_err(|e| PipelineError::Kdl(format!("{e}")))?;
+    let doc: kdl::KdlDocument = src
+        .parse()
+        .map_err(|e| PipelineError::Kdl(format!("{e}")))?;
     let root = doc
         .nodes()
         .iter()
@@ -127,13 +168,17 @@ pub fn parse_pipeline(src: &str) -> Result<PipelineDef, PipelineError> {
     let (mut pace_min_ms, mut pace_max_ms) = (0_i64, 0_i64);
     let mut vars: Vec<VarDef> = Vec::new();
     let mut steps: Vec<StepDef> = Vec::new();
+    let mut fanouts: Vec<FanoutDef> = Vec::new();
     let mut output = Value::Object(Map::new());
 
     for n in children(root) {
         match n.name().value() {
             "pace" => {
                 pace_min_ms = prop_str(n, "min").map(dur_ms).transpose()?.unwrap_or(0);
-                pace_max_ms = prop_str(n, "max").map(dur_ms).transpose()?.unwrap_or(pace_min_ms);
+                pace_max_ms = prop_str(n, "max")
+                    .map(dur_ms)
+                    .transpose()?
+                    .unwrap_or(pace_min_ms);
                 if pace_max_ms < pace_min_ms {
                     return Err(PipelineError::Invalid("pace max is below pace min".into()));
                 }
@@ -155,7 +200,9 @@ pub fn parse_pipeline(src: &str) -> Result<PipelineDef, PipelineError> {
                 if sname.ends_with(".verify") || sname == "__vars" {
                     // These names are synthesized by run expansion; a hand-written step
                     // using one would collide on the (run_id, step_name) unique index.
-                    return Err(PipelineError::Invalid(format!("reserved step name: {sname}")));
+                    return Err(PipelineError::Invalid(format!(
+                        "reserved step name: {sname}"
+                    )));
                 }
                 steps.push(StepDef {
                     recipe: prop_str(n, "recipe")
@@ -174,6 +221,22 @@ pub fn parse_pipeline(src: &str) -> Result<PipelineDef, PipelineError> {
                     verify: sub_step(n, "verify")?,
                     fallback: sub_step(n, "fallback")?,
                     name: sname,
+                });
+            }
+            "fanout" => {
+                let need = |k: &str| {
+                    prop_str(n, k)
+                        .map(str::to_string)
+                        .ok_or_else(|| PipelineError::Invalid(format!("fanout needs {k}=")))
+                };
+                fanouts.push(FanoutDef {
+                    after: need("after")?,
+                    recipe: need("recipe")?,
+                    items: prop_str(n, "items").unwrap_or("").to_string(),
+                    as_var: prop_str(n, "as").unwrap_or("item").to_string(),
+                    scope: need("scope")?,
+                    id: need("id")?,
+                    params: params_of(n),
                 });
             }
             "output" => output = kv_block(n),
@@ -197,7 +260,29 @@ pub fn parse_pipeline(src: &str) -> Result<PipelineDef, PipelineError> {
             }
         }
     }
-    Ok(PipelineDef { name, pace_min_ms, pace_max_ms, vars, steps, output })
+    for f in &fanouts {
+        if !names.contains(&f.after.as_str()) {
+            return Err(PipelineError::Invalid(format!(
+                "fanout after unknown step {}",
+                f.after
+            )));
+        }
+        if f.recipe.split_once('/').is_none() {
+            return Err(PipelineError::Invalid(format!(
+                "fanout recipe `{}` is not <adapter>/<action>",
+                f.recipe
+            )));
+        }
+    }
+    Ok(PipelineDef {
+        name,
+        pace_min_ms,
+        pace_max_ms,
+        vars,
+        steps,
+        fanouts,
+        output,
+    })
 }
 
 #[cfg(test)]
@@ -251,6 +336,35 @@ pipeline "demo/two-step" {
     }
 
     #[test]
+    fn parses_a_fanout_block_and_attaches_it_to_the_producer() {
+        let src = r#"
+pipeline "li/comment" {
+    step "scan" recipe="linkedin/comment_scan" { params { query "AI" } }
+    step "draft" recipe="agent/ask" after="scan" { params { prompt "draft comments" json "true" } }
+    fanout after="draft" recipe="linkedin/comment_post" items="comments" as="item" scope="linkedin.comment" id="{{ vars.item.url }}" {
+        params { post_url "{{ vars.item.url }}" ; text "{{ vars.item.text }}" }
+    }
+}
+"#;
+        let p = parse_pipeline(src).unwrap();
+        assert_eq!(p.fanouts.len(), 1);
+        let f = &p.fanouts[0];
+        assert_eq!(f.after, "draft");
+        assert_eq!(f.recipe, "linkedin/comment_post");
+        assert_eq!(f.items, "comments");
+        assert_eq!(f.as_var, "item");
+        assert_eq!(f.scope, "linkedin.comment");
+        assert_eq!(f.id, "{{ vars.item.url }}");
+        assert_eq!(f.params["post_url"], "{{ vars.item.url }}");
+    }
+
+    #[test]
+    fn rejects_a_fanout_after_an_unknown_step() {
+        let src = r#"pipeline "x" { step "a" recipe="dummy/echo" { } fanout after="ghost" recipe="dummy/echo" scope="s" id="{{ vars.item.id }}" { } }"#;
+        assert!(parse_pipeline(src).is_err());
+    }
+
+    #[test]
     fn rejects_duplicate_step_names() {
         let src =
             r#"pipeline "x" { step "a" recipe="dummy/echo" { } step "a" recipe="dummy/echo" { } }"#;
@@ -280,26 +394,64 @@ pipeline "demo/two-step" {
 }
 
 #[cfg(test)]
-mod shipped_pipelines {
+mod realistic_pipeline {
     use super::*;
 
-    /// The pipeline we ship must actually parse; a broken one would only surface at
-    /// `pacewright run` time, on the episode you were trying to publish.
+    /// A full-featured pipeline — verify on every step, fallbacks on the least-proven ones, and an
+    /// output block — must parse. This is the shape `pacewright run` expands into tasks.
+    const SRC: &str = r#"
+pipeline "media/publish" {
+    description "Generic multi-step pipeline with verified steps and adjudicated fallbacks"
+    pace min="90s" max="5m"
+
+    var "project_id" required=#true
+    var "title" required=#true
+
+    step "render" recipe="globex/render" {
+        params { project_id "{{ vars.project_id }}" }
+        verify recipe="globex/verify_render" { params { project_id "{{ vars.project_id }}" } }
+    }
+    step "publish_long" recipe="globex/publish" after="render" {
+        params { title "{{ vars.title }}" }
+        attempts 2
+        verify recipe="acme/verify_video" {
+            params { video_id "{{ steps.publish_long.result.video_id }}" }
+        }
+        fallback recipe="agent/adjudicate" { params { note "review publish_long" } }
+    }
+    step "share" recipe="globex/share" after="publish_long" {
+        params { url "{{ steps.publish_long.verify.result.url }}" }
+        verify recipe="globex/verify_share" { params { project_id "{{ vars.project_id }}" } }
+        fallback recipe="agent/adjudicate" { params { note "review share" } }
+    }
+
+    output {
+        video_url "{{ steps.publish_long.verify.result.url }}"
+        share_url "{{ steps.share.verify.result.url }}"
+    }
+}
+"#;
+
     #[test]
-    fn podcast_episode_pipeline_parses() {
-        let src = include_str!("../../../packaging/pipelines/podcast-episode.kdl");
-        let p = parse_pipeline(src).expect("shipped podcast/episode pipeline must parse");
-        assert_eq!(p.name, "podcast/episode");
-        assert_eq!(p.steps.len(), 4);
-        assert!(p.steps.iter().all(|s| s.verify.is_some()), "every step must be verified");
-        // The two least-proven steps carry an adjudicator.
+    fn realistic_pipeline_parses_with_verify_fallback_and_output() {
+        let p = parse_pipeline(SRC).expect("a realistic pipeline must parse");
+        assert_eq!(p.name, "media/publish");
+        assert_eq!(p.steps.len(), 3);
+        assert!(
+            p.steps.iter().all(|s| s.verify.is_some()),
+            "every step must be verified"
+        );
         let fb: Vec<&str> = p
             .steps
             .iter()
             .filter(|s| s.fallback.is_some())
             .map(|s| s.name.as_str())
             .collect();
-        assert_eq!(fb, vec!["publish_long", "share_spotify"]);
+        assert_eq!(fb, vec!["publish_long", "share"]);
         assert!(p.vars.iter().any(|v| v.name == "project_id" && v.required));
+        assert_eq!(
+            p.output["video_url"],
+            "{{ steps.publish_long.verify.result.url }}"
+        );
     }
 }

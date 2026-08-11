@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     }
     // Recipe-backed adapters: one `RecipeAdapter` per distinct `<adapter>` prefix among the
     // installed `.kdl` recipes (populated by `pcw recipe add`). The site logic that used to
-    // live in `adapter-linkedin` is now a gitignored testbed recipe `linkedin/scrape_profile`.
+    // live in `adapter-acme` is now a gitignored testbed recipe `acme/scrape_profile`.
     // `build_adapter_registry` (shared with `RecipeReload`) also registers the built-in DummyAdapter.
     let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
     // All three chrome-agent callers (runner, login launcher, CliBrowser) must attach to the SAME
@@ -64,7 +64,8 @@ async fn main() -> Result<()> {
         Some(endpoint) => CliRecipeRunner::new().connect(endpoint),
         None => CliRecipeRunner::new(),
     });
-    let reg = build_adapter_registry(&recipe_registry, &recipe_runner);
+    let clock: Arc<dyn pacewright_core::clock::Clock> = Arc::new(SystemClock);
+    let reg = build_adapter_registry(&recipe_registry, &recipe_runner, &store, &clock);
     if recipe_registry.is_empty() {
         tracing::info!(
             "no recipes installed in {} — only browser-free adapters are available (add with `pcw recipe add`)",
@@ -86,10 +87,11 @@ async fn main() -> Result<()> {
         store,
         reg,
         cfg,
-        Arc::new(SystemClock),
+        clock,
         Arc::new(SeededRng::new(rand_seed())),
     )
-    .with_browser(browser);
+    .with_browser(browser)
+    .with_notifier(Arc::new(pacewright_daemon::notify::OutboxNotifier::new()));
     engine.recover_on_boot()?;
 
     // (No browser reaper. pacewright no longer launches browsers, so there is nothing to reap:

@@ -6,9 +6,9 @@ topic: pacewright pipeline runs + verified steps
 
 # Handoff: pacewright pipeline runs
 
-Goal set by Federico: one command takes a Riverside project id, title, description, publish date and
-episode number, runs the whole podcast publishing pipeline, and returns the YouTube URL, the shorts
-URLs and the Spotify URL, **having confirmed each against the platform**.
+Goal set by Federico: one command takes a globex project id, title, description, publish date and
+episode number, runs the whole podcast publishing pipeline, and returns the published video URL, the
+shorts URLs and the Spotify URL, **having confirmed each against the platform**.
 
 **Phase 1 (engine) is complete and tested. Phase 2 (verify recipes) is 1 of 4 done.**
 
@@ -16,8 +16,8 @@ URLs and the Spotify URL, **having confirmed each against the platform**.
 
 Two recorded incidents drive every design decision here:
 
-- `riverside/publish_clips` reported **success while publishing zero shorts**.
-- `riverside/share_spotify` reported **success while leaving a blank Spotify draft**.
+- `globex/publish_clips` reported **success while publishing zero shorts**.
+- `globex/share_spotify` reported **success while leaving a blank Spotify draft**.
 
 So `Succeeded` from a browser recipe is not evidence. The engine therefore treats a step as complete
 only when an **independent** check says the platform agrees. If you find yourself making something
@@ -58,13 +58,14 @@ Pipelines live in `~/.pacewright/recipes/pipelines/<name>.kdl` (`/` flattened to
 
 ## What Phase 2 still needs
 
-`youtube/verify_video` is written and **validates** (`chrome-agent recipe check` → ok). It is the
-template; the rest follow it exactly.
+A per-platform verify recipe is written and **validates** (`chrome-agent recipe check` → ok). It is
+the template; the rest follow it exactly. These verify recipes are **user-supplied, one per target
+platform** — pacewright ships the pattern, not the platform specifics.
 
-1. `youtube/verify_shorts` — count recent uploads at the expected privacy, assert `>= min_count`.
+1. A video-verify recipe — count recent uploads at the expected privacy, assert `>= min_count`.
    This is the check that would have caught the zero-shorts incident.
 2. `spotify/verify_episode` — episode exists, description non-empty, art present.
-3. `riverside/verify_exports` — expected export tiles exist and are not still exporting.
+3. `globex/verify_exports` — expected export tiles exist and are not still exporting.
 4. `claude/adjudicate` — the adversarial verdict adapter the two `fallback` blocks reference.
 5. **Restart the daemon.** The running one dates from **Jul 19**, predates everything here, and
    answers `no_adapter` for every recipe task. Then `pacewright recipe reload`.
@@ -72,18 +73,18 @@ template; the rest follow it exactly.
 
 ## Traps already paid for. Do not re-learn these.
 
-- **No domain adapters in `crates/`.** I built `crates/adapter-youtube` in Rust; Federico rejected it,
+- **No domain adapters in `crates/`.** I built a per-platform adapter in Rust; Federico rejected it,
   correctly. pacewright stays generic; per-step logic lives in **recipes**. It has been deleted.
 - **`__pw` is the locator runtime, not a variables bag.** `__pw.vars` does not exist. I shipped a
   recipe built on that assumption and deleted it. An `eval` step also needs a **page**, which defeats
   the token-only design, hence the `value` condition added to chrome-agent.
 - **One `capture` per `api` step.** `ApiRequest` holds a single `capture_key`; a second `capture`
-  child **silently overwrites** the first. `youtube/verify_video` therefore does one GET per field
+  child **silently overwrites** the first. The video-verify recipe therefore does one GET per field
   (1 quota unit each). Multi-capture on `ApiRequest` is a clean generic follow-up.
 - **KDL needs one node per line.** On a single line, a following node is absorbed as an *entry* of the
   previous one. `params { got "x" label "y" }` silently drops `label`. This cost two debugging cycles.
 - **A missing `capture` path yields `null`, it does not fail the step.** That is why the assertions,
-  not `expect-status`, are the real check. YouTube answers **200 with empty `items`** for an unknown id.
+  not `expect-status`, are the real check. The platform's API answers **200 with empty `items`** for an unknown id.
 - **`std::env::set_var` in tests destabilizes parallel runs.** `run::home_dir()` is read by callers,
   never inside helpers, for this reason.
 
@@ -105,7 +106,7 @@ so it works under `NativeBrowser`.
 
 ## Open questions
 
-- **Does pacewright inject `token` for a `youtube`-provider recipe** the way it does for LinkedIn?
+- **Does pacewright inject `token` for one provider's recipe** the way it does for `acme`?
   The secret is imported and the recipe declares `var "token" required=#true`, but the
   provider-to-recipe mapping was never inspected. **Check this before the first live run.**
 - **Does chrome-agent have a *read* step for a JSON file?** The `output` sink covers writing, so the
@@ -117,8 +118,8 @@ so it works under `NativeBrowser`.
 
 ## Credentials
 
-YouTube OAuth **is** configured now. The token from `~/.youtube-cli-token-prevetted-channel.json`
-was imported into `~/.pacewright/secrets.json` (scope `…/auth/youtube`, refresh token present, shows
+The video platform's OAuth **is** configured now. The token from the platform CLI's token file
+was imported into `~/.pacewright/secrets.json` (scope `…/auth/<provider>`, refresh token present, shows
 `token expired` which is fine — it refreshes on use). Backup: `secrets.json.bak-20260722`, mode 600.
 
 ## Key files
@@ -129,12 +130,12 @@ was imported into `~/.pacewright/secrets.json` (scope `…/auth/youtube`, refres
 - Engine: `crates/core/src/{run,pipeline,refs}.rs`; gate logic in `run::expand`
 - Scheduler edges: `crates/core/src/scheduler.rs` (`dep_on_failure`, the escalation race fix)
 - Adjudication: `crates/core/src/runner.rs` (evidence guardrail)
-- Pipeline: `packaging/pipelines/podcast-episode.kdl`
-- Recipe template: `~/.pacewright/recipes/youtube-verify-video.kdl`
+- Pipeline: an episode pipeline under `packaging/pipelines/`
+- Recipe template: a per-platform verify recipe under `~/.pacewright/recipes/`
 
 ## A caution about the first live run
 
-`podcast/episode` publishes to YouTube and Spotify. Its verify steps reference recipes that do not
+`podcast/episode` publishes to a video platform and Spotify. Its verify steps reference recipes that do not
 exist yet, so **until they are written the run will fail at its first verify — by design.** Do not
 "fix" that by removing the verify blocks. A step with no `verify` is recorded `unverified`, which is
 honest; a step whose verify was deleted to make the run go green is the original bug wearing a hat.

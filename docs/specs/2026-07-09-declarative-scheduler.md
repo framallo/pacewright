@@ -23,7 +23,7 @@ Three separated concepts (the crux decision: the schedule does **not** live in t
 | **Task** | a *specific case* — the params the recipe needs | the operator | a schedule file |
 | **Schedule** | *when* / how often, and whether it's enabled | the operator | a schedule file |
 
-A recipe is reusable and shareable — `linkedin/scrape_profile` runs for many leads on many
+A recipe is reusable and shareable — `acme/scrape_profile` runs for many leads on many
 cadences. Baking a schedule into it would force your timing on everyone who installs it and stop
 one recipe serving many cases. So **recipe = how (shared), task = which params (your case),
 schedule = when (yours)**.
@@ -47,9 +47,9 @@ params  = { url = "https://news.ycombinator.com/", out_dir = "~/vault/digests" }
 
 [[task]]
 id      = "scrape-jane"
-recipe  = "linkedin/scrape_profile"
+recipe  = "acme/scrape_profile"
 at      = "2026-07-10T09:00:00"          # RFC3339 → one-shot at a time
-params  = { url = "https://www.linkedin.com/in/jane/" }
+params  = { url = "https://www.acme.com/in/jane/" }
 
 [[task]]
 id      = "spotify-covers"
@@ -153,7 +153,7 @@ seo-os-style catalog:
 ```
 ┌ Schedule ─────────────────────────────────────────────────┐
 │ ◉ hn-digest        news/hackernews      next 09:00  ✓ ok   │
-│ ◉ scrape-jane      linkedin/scrape…     once 07-10  ○ pend │
+│ ◉ scrape-jane      acme/scrape…         once 07-10  ○ pend │
 │ ○ spotify-covers   spotify/upload_cover  —          disabled│
 └────────────────────────────────────────────────────────────┘
   [space] toggle   [a] apply   [tab] feed/schedule/limits   [q] quit
@@ -215,7 +215,7 @@ required a logged-in Chrome cookie DB and failed (`Chrome cookies file not found
 present. Cookie-copying is now **per-recipe and declarative**:
 
 - A recipe that needs the operator's logged-in session declares `auth #true` in its `recipe { … }`
-  block (e.g. `linkedin/scrape_profile`). `RecipeRegistry` parses it into `RecipeMeta.auth`; the
+  block (e.g. `acme/scrape_profile`). `RecipeRegistry` parses it into `RecipeMeta.auth`; the
   `RecipeAdapter` passes it to `RecipeRunner::run(path, vars, auth)`, which adds `--copy-cookies`
   only then. A public recipe (`news/hackernews`) omits it and navigates cold — chrome-agent ignores
   the unknown node (forward-compatible), so no chrome-agent change was needed.

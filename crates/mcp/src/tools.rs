@@ -14,7 +14,9 @@ fn req_str(args: &Value, tool: &str, field: &str) -> Result<String, String> {
 }
 
 fn opt_str(args: &Value, field: &str) -> Option<String> {
-    args.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(field)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn opt_i64(args: &Value, field: &str) -> Option<i64> {
@@ -44,19 +46,30 @@ pub fn build_request(name: &str, args: &Value) -> Result<Request, String> {
             dedup_key: opt_str(args, "dedup"),
             max_attempts: opt_i64(args, "max_attempts"),
         })),
-        "get_task" => Ok(Request::Get { id: req_str(args, name, "id")? }),
+        "get_task" => Ok(Request::Get {
+            id: req_str(args, name, "id")?,
+        }),
         "list_tasks" => Ok(Request::List {
             status: opt_str(args, "status"),
             adapter: opt_str(args, "adapter"),
             limit: opt_i64(args, "limit"),
         }),
-        "cancel_task" => Ok(Request::Cancel { id: req_str(args, name, "id")? }),
-        "run_now" => Ok(Request::RunNow { id: req_str(args, name, "id")?, force: opt_bool(args, "force") }),
+        "cancel_task" => Ok(Request::Cancel {
+            id: req_str(args, name, "id")?,
+        }),
+        "run_now" => Ok(Request::RunNow {
+            id: req_str(args, name, "id")?,
+            force: opt_bool(args, "force"),
+        }),
         "status" => Ok(Request::Status),
         "list_adapters" => Ok(Request::Adapters),
         "limits" => Ok(Request::Limits),
-        "pause" => Ok(Request::Pause { scope: req_str(args, name, "scope")? }),
-        "resume" => Ok(Request::Resume { scope: req_str(args, name, "scope")? }),
+        "pause" => Ok(Request::Pause {
+            scope: req_str(args, name, "scope")?,
+        }),
+        "resume" => Ok(Request::Resume {
+            scope: req_str(args, name, "scope")?,
+        }),
         "set_limit" => Ok(Request::SetLimit {
             key: req_str(args, name, "key")?,
             config: LimitSpec {
@@ -67,14 +80,28 @@ pub fn build_request(name: &str, args: &Value) -> Result<Request, String> {
             },
         }),
         "schedule_list" => Ok(Request::ScheduleList),
-        "schedule_apply" => Ok(Request::ScheduleApply { prune: opt_bool(args, "prune") }),
-        "schedule_enable" => Ok(Request::ScheduleEnable { id: req_str(args, name, "id")? }),
-        "schedule_disable" => Ok(Request::ScheduleDisable { id: req_str(args, name, "id")? }),
+        "schedule_apply" => Ok(Request::ScheduleApply {
+            prune: opt_bool(args, "prune"),
+        }),
+        "schedule_enable" => Ok(Request::ScheduleEnable {
+            id: req_str(args, name, "id")?,
+        }),
+        "schedule_disable" => Ok(Request::ScheduleDisable {
+            id: req_str(args, name, "id")?,
+        }),
         "auth_list" => Ok(Request::AuthList),
-        "auth_login" => Ok(Request::AuthLogin { account: req_str(args, name, "account")? }),
+        "auth_login" => Ok(Request::AuthLogin {
+            account: req_str(args, name, "account")?,
+        }),
         "auth_login_all" => Ok(Request::AuthLoginAll),
-        "auth_recheck" => Ok(Request::AuthRecheck { account: opt_str(args, "account") }),
+        "auth_recheck" => Ok(Request::AuthRecheck {
+            account: opt_str(args, "account"),
+        }),
         "recipe_reload" => Ok(Request::RecipeReload),
+        "digest" => Ok(Request::Digest),
+        "escalations" => Ok(Request::Escalations {
+            drain: args.get("drain").and_then(Value::as_bool).unwrap_or(false),
+        }),
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -88,9 +115,15 @@ fn schema(props: Value, required: &[&str]) -> Value {
     })
 }
 
-fn str_prop(desc: &str) -> Value { json!({ "type": "string", "description": desc }) }
-fn int_prop(desc: &str) -> Value { json!({ "type": "integer", "description": desc }) }
-fn bool_prop(desc: &str) -> Value { json!({ "type": "boolean", "description": desc }) }
+fn str_prop(desc: &str) -> Value {
+    json!({ "type": "string", "description": desc })
+}
+fn int_prop(desc: &str) -> Value {
+    json!({ "type": "integer", "description": desc })
+}
+fn bool_prop(desc: &str) -> Value {
+    json!({ "type": "boolean", "description": desc })
+}
 
 /// The `tools/list` catalog: every tool's name, human description, and input JSON Schema.
 pub fn tool_catalog() -> Value {
@@ -99,7 +132,7 @@ pub fn tool_catalog() -> Value {
             "name": "add_task",
             "description": "Enqueue a task for an adapter. `params` is the adapter/recipe's JSON input. Optional: `at` (epoch ms to run at), `every` (cron-like recurrence), `depends_on` (task id gate), `priority`, `dedup` (dedup key), `max_attempts`.",
             "inputSchema": schema(json!({
-                "adapter": str_prop("Adapter name, e.g. `riverside` or `dummy`."),
+                "adapter": str_prop("Adapter name, e.g. `globex` or `dummy`."),
                 "action": str_prop("Action/recipe name within the adapter, e.g. `list_projects`."),
                 "params": json!({ "type": "object", "description": "Adapter-specific JSON params." }),
                 "at": int_prop("Epoch ms to first run at (default: now)."),
@@ -120,6 +153,10 @@ pub fn tool_catalog() -> Value {
           "inputSchema": schema(json!({ "id": str_prop("Task id."), "force": bool_prop("Reserved.") }), &["id"]) },
         { "name": "status", "description": "Daemon summary: pending/running counts and paused scopes.",
           "inputSchema": schema(json!({}), &[]) },
+        { "name": "escalations", "description": "The escalation outbox: issues the notifier raised (terminal failures / auto-paused scopes) for triage. `drain:true` deletes each after reading. Use `get_task`/`resume` to act on them.",
+          "inputSchema": schema(json!({ "drain": bool_prop("Delete each escalation after reading.") }), &[]) },
+        { "name": "digest", "description": "Today's structured summary: what ran, what's queued, what failed (with errors), and what is waiting on a human (paused scopes + failure count).",
+          "inputSchema": schema(json!({}), &[]) },
         { "name": "list_adapters", "description": "List registered adapters and their actions.",
           "inputSchema": schema(json!({}), &[]) },
         { "name": "limits", "description": "Show today's rate-limit counters.",
@@ -129,7 +166,7 @@ pub fn tool_catalog() -> Value {
         { "name": "resume", "description": "Resume a previously paused scope.",
           "inputSchema": schema(json!({ "scope": str_prop("`all`, `daemon`, or an adapter name.") }), &["scope"]) },
         { "name": "set_limit", "description": "Set a runtime pacing override for a limit key (persisted). `min_gap`/`active` are human strings like `8m` / `09:00-17:00`.",
-          "inputSchema": schema(json!({ "key": str_prop("Limit key, e.g. `riverside.publish`."), "daily_cap": int_prop("Max runs per local day."), "min_gap": str_prop("Min gap between runs, e.g. `8m`."), "jitter": json!({ "type": "number", "description": "Fractional jitter 0..1." }), "active": str_prop("Active window, e.g. `09:00-17:00`.") }), &["key"]) },
+          "inputSchema": schema(json!({ "key": str_prop("Limit key, e.g. `globex.publish`."), "daily_cap": int_prop("Max runs per local day."), "min_gap": str_prop("Min gap between runs, e.g. `8m`."), "jitter": json!({ "type": "number", "description": "Fractional jitter 0..1." }), "active": str_prop("Active window, e.g. `09:00-17:00`.") }), &["key"]) },
         { "name": "schedule_list", "description": "Show the declarative schedule catalog (id, recipe, timing, next-fire, enabled, live status).",
           "inputSchema": schema(json!({}), &[]) },
         { "name": "schedule_apply", "description": "Reconcile the schedule files into the queue. `prune` also cancels live tasks for removed entries.",
@@ -157,11 +194,11 @@ mod tests {
 
     #[test]
     fn test_build_add_task_defaults_params_and_reads_options() {
-        let args = json!({ "adapter": "riverside", "action": "list_projects", "at": 123 });
+        let args = json!({ "adapter": "globex", "action": "list_projects", "at": 123 });
         let req = build_request("add_task", &args).unwrap();
         match req {
             Request::Add(a) => {
-                assert_eq!(a.adapter, "riverside");
+                assert_eq!(a.adapter, "globex");
                 assert_eq!(a.action, "list_projects");
                 assert_eq!(a.params, json!({}));
                 assert_eq!(a.scheduled_for, Some(123));
@@ -178,15 +215,18 @@ mod tests {
 
     #[test]
     fn test_unknown_tool_errors() {
-        assert!(build_request("nope", &json!({})).unwrap_err().contains("unknown tool"));
+        assert!(build_request("nope", &json!({}))
+            .unwrap_err()
+            .contains("unknown tool"));
     }
 
     #[test]
     fn test_set_limit_maps_spec_fields() {
-        let args = json!({ "key": "riverside.publish", "daily_cap": 5, "min_gap": "8m", "jitter": 0.5 });
+        let args =
+            json!({ "key": "globex.publish", "daily_cap": 5, "min_gap": "8m", "jitter": 0.5 });
         match build_request("set_limit", &args).unwrap() {
             Request::SetLimit { key, config } => {
-                assert_eq!(key, "riverside.publish");
+                assert_eq!(key, "globex.publish");
                 assert_eq!(config.daily_cap, Some(5));
                 assert_eq!(config.min_gap.as_deref(), Some("8m"));
                 assert_eq!(config.jitter, Some(0.5));
@@ -205,7 +245,10 @@ mod tests {
             let stub = json!({
                 "adapter": "a", "action": "b", "id": "x", "scope": "all", "key": "k", "account": "acct"
             });
-            assert!(build_request(name, &stub).is_ok(), "catalog tool `{name}` failed to build");
+            assert!(
+                build_request(name, &stub).is_ok(),
+                "catalog tool `{name}` failed to build"
+            );
         }
     }
 }

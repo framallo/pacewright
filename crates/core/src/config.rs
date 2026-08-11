@@ -13,7 +13,13 @@ pub struct LimitConfig {
 
 impl LimitConfig {
     pub fn permissive() -> Self {
-        LimitConfig { daily_cap: i64::MAX, min_gap_ms: 0, jitter: 0.0, active_start_min: 0, active_end_min: 1440 }
+        LimitConfig {
+            daily_cap: i64::MAX,
+            min_gap_ms: 0,
+            jitter: 0.0,
+            active_start_min: 0,
+            active_end_min: 1440,
+        }
     }
 
     /// Build a `LimitConfig` from the human-friendly parts a `set_limit` carries — the same
@@ -31,7 +37,10 @@ impl LimitConfig {
         };
         Ok(LimitConfig {
             daily_cap: daily_cap.unwrap_or(i64::MAX),
-            min_gap_ms: match min_gap { Some(g) => parse_duration_ms(g)?, None => 0 },
+            min_gap_ms: match min_gap {
+                Some(g) => parse_duration_ms(g)?,
+                None => 0,
+            },
             jitter: jitter.unwrap_or(0.0),
             active_start_min: astart,
             active_end_min: aend,
@@ -77,18 +86,33 @@ struct RawLimit {
 
 fn parse_duration_ms(s: &str) -> Result<i64> {
     let s = s.trim();
-    let (num, mult) = if let Some(v) = s.strip_suffix("ms") { (v, 1) }
-        else if let Some(v) = s.strip_suffix('s') { (v, 1000) }
-        else if let Some(v) = s.strip_suffix('m') { (v, 60_000) }
-        else if let Some(v) = s.strip_suffix('h') { (v, 3_600_000) }
-        else { (s, 1) };
-    Ok(num.trim().parse::<i64>().map_err(|_| anyhow!("bad duration {s}"))? * mult)
+    let (num, mult) = if let Some(v) = s.strip_suffix("ms") {
+        (v, 1)
+    } else if let Some(v) = s.strip_suffix('s') {
+        (v, 1000)
+    } else if let Some(v) = s.strip_suffix('m') {
+        (v, 60_000)
+    } else if let Some(v) = s.strip_suffix('h') {
+        (v, 3_600_000)
+    } else {
+        (s, 1)
+    };
+    Ok(num
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| anyhow!("bad duration {s}"))?
+        * mult)
 }
 
 fn parse_active(s: &str) -> Result<(i32, i32)> {
-    let (a, b) = s.split_once('-').ok_or_else(|| anyhow!("bad active window {s}"))?;
+    let (a, b) = s
+        .split_once('-')
+        .ok_or_else(|| anyhow!("bad active window {s}"))?;
     let to_min = |hm: &str| -> Result<i32> {
-        let (h, m) = hm.trim().split_once(':').ok_or_else(|| anyhow!("bad time {hm}"))?;
+        let (h, m) = hm
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| anyhow!("bad time {hm}"))?;
         Ok(h.trim().parse::<i32>()? * 60 + m.trim().parse::<i32>()?)
     };
     Ok((to_min(a)?, to_min(b)?))
@@ -103,20 +127,32 @@ impl Config {
                 Some(a) => parse_active(&a)?,
                 None => (0, 1440),
             };
-            limits.insert(k, LimitConfig {
-                daily_cap: v.daily_cap.unwrap_or(i64::MAX),
-                min_gap_ms: match v.min_gap { Some(g) => parse_duration_ms(&g)?, None => 0 },
-                jitter: v.jitter.unwrap_or(0.0),
-                active_start_min: astart,
-                active_end_min: aend,
-            });
+            limits.insert(
+                k,
+                LimitConfig {
+                    daily_cap: v.daily_cap.unwrap_or(i64::MAX),
+                    min_gap_ms: match v.min_gap {
+                        Some(g) => parse_duration_ms(&g)?,
+                        None => 0,
+                    },
+                    jitter: v.jitter.unwrap_or(0.0),
+                    active_start_min: astart,
+                    active_end_min: aend,
+                },
+            );
         }
         let browser_connect = raw.browser.and_then(|b| b.connect);
-        Ok(Config { limits, browser_connect })
+        Ok(Config {
+            limits,
+            browser_connect,
+        })
     }
 
     pub fn limit_for(&self, key: &str) -> LimitConfig {
-        self.limits.get(key).cloned().unwrap_or_else(LimitConfig::permissive)
+        self.limits
+            .get(key)
+            .cloned()
+            .unwrap_or_else(LimitConfig::permissive)
     }
 
     /// Set (or replace) a limit at runtime — used by `set_limit` to layer a persisted

@@ -821,13 +821,13 @@ mod tests {
     #[test]
     fn test_counter_spend_and_rollover() {
         let s = Store::open_in_memory().unwrap();
-        s.counter_spend("linkedin.post", "2026-07-07", 100).unwrap();
-        s.counter_spend("linkedin.post", "2026-07-07", 200).unwrap();
-        let (c, last) = s.counter_get("linkedin.post", "2026-07-07").unwrap();
+        s.counter_spend("acme.post", "2026-07-07", 100).unwrap();
+        s.counter_spend("acme.post", "2026-07-07", 200).unwrap();
+        let (c, last) = s.counter_get("acme.post", "2026-07-07").unwrap();
         assert_eq!(c, 2);
         assert_eq!(last, Some(200));
         // different day is a fresh counter
-        assert_eq!(s.counter_get("linkedin.post", "2026-07-08").unwrap(), (0, None));
+        assert_eq!(s.counter_get("acme.post", "2026-07-08").unwrap(), (0, None));
     }
 
     #[test]
@@ -2366,7 +2366,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::open(db_path.to_str().unwrap())?);
     let mut reg = AdapterRegistry::new();
     reg.register(Arc::new(DummyAdapter::new()));
-    // M2+: register linkedin/riverside/youtube adapters here.
+    // M2+: register acme/globex adapters here.
 
     let engine = Engine::new(store, reg, cfg, Arc::new(SystemClock), Arc::new(SeededRng::new(rand_seed())));
     engine.recover_on_boot()?;
@@ -2709,10 +2709,10 @@ jitter    = 0.5
 active    = "09:00-18:00"
 
 # Real keys arrive with their adapters (M3+):
-# [limits."linkedin.post"]           daily_cap = 3   min_gap = "45m"  jitter = 0.5  active = "09:00-18:00"
-# [limits."linkedin.comment"]        daily_cap = 15  min_gap = "8m"   jitter = 0.5  active = "09:00-18:00"
-# [limits."linkedin.profile_scrape"] daily_cap = 40  min_gap = "20s"  jitter = 0.3
-# [limits."youtube.upload"]          daily_cap = 5   min_gap = "30m"
+# [limits."acme.post"]           daily_cap = 3   min_gap = "45m"  jitter = 0.5  active = "09:00-18:00"
+# [limits."acme.comment"]        daily_cap = 15  min_gap = "8m"   jitter = 0.5  active = "09:00-18:00"
+# [limits."acme.profile_scrape"] daily_cap = 40  min_gap = "20s"  jitter = 0.3
+# [limits."globex.upload"]       daily_cap = 5   min_gap = "30m"
 ```
 
 - [ ] **Step 2: Write install instructions in the README**

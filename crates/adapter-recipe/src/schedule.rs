@@ -199,6 +199,10 @@ pub fn load_dir(dir: &Path) -> (Vec<ScheduleEntry>, Vec<String>) {
 
 // ---- validation ------------------------------------------------------------
 
+/// Engine-provided adapters that a schedule may reference even though they are not recipes. Kept in
+/// lockstep with the built-ins the daemon registers in `build_adapter_registry`.
+pub const BUILTIN_ADAPTERS: &[&str] = &["dummy", "agent", "claude", "claude_cli", "pipeline"];
+
 /// Partition entries into the **valid** ones (safe to reconcile) and a list of
 /// human-readable errors for the invalid ones. Checks: ids are globally unique, each recipe
 /// resolves, its required vars are all present in `params`, and cron patterns parse. An entry
@@ -221,6 +225,11 @@ pub fn partition(
                 "task `{}`: recipe `{}` is not `<adapter>/<action>`",
                 e.id, e.recipe
             )),
+            // Built-in engine adapters (`agent`/`claude` reasoning, `pipeline` launcher, `dummy`)
+            // aren't recipes, so the RecipeRegistry can't see them. They're always registered by the
+            // daemon, so accept them without a recipe-existence or required-var check (the adapter
+            // validates its own params at runtime).
+            Some((adapter, _)) if BUILTIN_ADAPTERS.contains(&adapter) => {}
             Some((adapter, action)) => match registry.get(adapter, action) {
                 None => errs.push(format!(
                     "task `{}`: no recipe `{}` installed",

@@ -13,15 +13,15 @@ loop (E) are deferred to their own specs.
 
 ## 1. Context — why this redesign
 
-`LinkedInAdapter` (`crates/adapter-linkedin/src/lib.rs`) proved the browser seam works, but it
+`AcmeAdapter` (`crates/adapter-acme/src/lib.rs`) proved the browser seam works, but it
 also proved the anti-pattern: its extraction logic is **hand-written Rust + an embedded JS
-blob** (`PROFILE_JS`). When LinkedIn changed its markup, the fix required editing Rust,
+blob** (`PROFILE_JS`). When acme changed its markup, the fix required editing Rust,
 recompiling, and redeploying a binary. Worse, the first version keyed off CSS classes
-(`.text-body-medium`) and, because LinkedIn ships build-hashed classes (`e6590096 _3293afb7 …`),
+(`.text-body-medium`) and, because acme ships build-hashed classes (`e6590096 _3293afb7 …`),
 **silently returned nulls** — a wrong answer that still reported `succeeded`.
 
 The redesign: **a recipe is a data file, not code.** A single generic engine interprets it.
-Platform knowledge (how to read a LinkedIn profile) lives in a versioned, testable,
+Platform knowledge (how to read an acme profile) lives in a versioned, testable,
 Claude-authorable **KDL** file; the engine knows nothing about any platform. This is the
 substrate the later subsystems need — a recipe repo (C) can only distribute *data* safely, a
 test harness (D) can only pin *a recipe's* behavior, and LLM repair (E) can only rewrite
@@ -36,7 +36,7 @@ test harness (D) can only pin *a recipe's* behavior, and LLM repair (E) can only
   for shared recipes. Format-preserving parsing is a direct enabler of subsystem E (surgical
   single-step repair without reflowing the file).
 - **Extraction primitive: Playwright-style locators**, not CSS/XPath and not raw JS. The
-  resilient extraction that actually works on LinkedIn is *semantic* (`getByRole("heading")`,
+  resilient extraction that actually works on acme is *semantic* (`getByRole("heading")`,
   `getByText(/followers$/)`) — which is exactly what I hand-reinvented badly in `PROFILE_JS`.
   Locators are resolved by a **runtime that ships with the engine** (`locators.js`), so
   recipes stay pure declarative data and never carry executable JS.
@@ -50,10 +50,10 @@ fork's `Session { copy_cookies: true }`). Every recipe runs *inside* that authen
 
 Rejected alternatives, and why:
 - **Conditional login** ("if logged out, log in") needs conditionals we excluded (§7) *and*
-  means scripting LinkedIn's login form — exactly the fresh, unproven session LinkedIn's
+  means scripting acme's login form — exactly the fresh, unproven session acme's
   anti-bot keys on. The core thesis (core-engine spec §9) is that the safe substrate is the
   *already-trusted* profile, not a scripted login.
-- **A `linkedin/login` recipe dependency** has the same login-automation problem plus needs
+- **An `acme/login` recipe dependency** has the same login-automation problem plus needs
   recipe composition we don't have.
 - **Cookie inheritance** ✅ is what already works in this codebase (chrome-agent `--copy-cookies`
   copies the Cookies DB + the `Local State` decryption key). It is a **session-lifecycle**
@@ -73,7 +73,7 @@ fails `Terminal` with a clear message. It detects; it never fixes.
    locator resolution (§5) and real CDP actions.
 3. A **`RecipeAdapter`** that plugs recipes into the existing `Adapter`/pacing/runner machinery,
    preserving the `pcw add <adapter> <action> --params …` UX.
-4. Port `linkedin/scrape_profile` to a recipe and **delete** the hand-written adapter (§9).
+4. Port `acme/scrape_profile` to a recipe and **delete** the hand-written adapter (§9).
 
 **Non-goals (deferred, each its own spec).**
 - The "awesome recipes" **repo** (subsystem C). Recipes ship in-repo under `recipes/` for now.
@@ -116,7 +116,7 @@ crates/recipe/
   (default `~/.pacewright/recipes/`, overridable via config / `$PACEWRIGHT_RECIPES`). Recipes
   are **distributed data, not repo source** — they are *not* committed into this engine repo;
   they come from the operator's local dir or the awesome-recipes repo (subsystem C). Each
-  recipe's `name` ("linkedin/scrape_profile") maps to `(adapter="linkedin", action="scrape_profile")`
+  recipe's `name` ("acme/scrape_profile") maps to `(adapter="acme", action="scrape_profile")`
   so the RPC/CLI surface is unchanged. `limit_keys_for` reads the recipe's `limit-key`, so
   pacing stays declared in data.
 
@@ -125,12 +125,12 @@ crates/recipe/
 ## 4. The recipe schema (KDL)
 
 ```kdl
-recipe "linkedin/scrape_profile" {
-    description "Navigate to a LinkedIn profile and extract the top card."
-    limit-key "linkedin.profile_scrape"
+recipe "acme/scrape_profile" {
+    description "Navigate to an acme profile and extract the top card."
+    limit-key "acme.profile_scrape"
 
     // Variables interpolated into string values as {{ name }}.
-    var "url" required=#true doc="https://www.linkedin.com/in/<slug>/"
+    var "url" required=#true doc="https://www.acme.com/in/<slug>/"
 
     step {
         goto "{{ url }}"
@@ -138,7 +138,7 @@ recipe "linkedin/scrape_profile" {
 
     // A tripwire: if the listed condition holds, abort the run with `on-fail`'s error class.
     step {
-        expect on-fail="terminal" message="auth wall — Chrome not logged into LinkedIn" {
+        expect on-fail="terminal" message="auth wall — Chrome not logged into acme" {
             // `settled-*` reads the post-redirect location, not goto's echoed URL.
             settled-url-matches "/authwall|/login/"
         }
@@ -190,7 +190,7 @@ recipe "linkedin/scrape_profile" {
 
 ### 4a. The robustness ladder (relative locators)
 
-Some data has no semantic handle of its own — e.g. a LinkedIn `headline`/`location` is just "the
+Some data has no semantic handle of its own — e.g. an acme `headline`/`location` is just "the
 paragraph under the name," a bare `<p>` with a build-hashed class. Rather than pin it with a
 brittle absolute position, anchor it to a *semantic* element with a relative locator. `after <loc>`
 resolves the first element (matching the outer locator's props) that follows the anchor in document
@@ -235,7 +235,7 @@ breaks them, which is what subsystem D (golden tests on a frozen page) catches a
    just be slow; the runner backs off and requeues).
 4. **Actions use real CDP input**, never JS synthetic events: `click`/`fill` take the resolved
    `backendNodeId`, ask the browser for its box model, and dispatch `Input.dispatch*`. Synthetic
-   events are detectable and break LinkedIn `@`-mention autocomplete (design spec §9). This is
+  events are detectable and break a site's `@`-mention autocomplete (design spec §9). This is
    why the engine needs the fork's real-input `BrowserHandle` methods (§8), not just `eval`.
 5. **`extract`** calls `__pw.extract(spec, many)` — for `many=#false` the resolved element's
    trimmed text; for `many=#true` the array of matches' texts. Result is written under the
@@ -310,17 +310,17 @@ loses the injected runtime between calls — see the sequencing note). Per the a
 
 ## 9. Migration — delete the hand-written adapter
 
-- `crates/adapter-linkedin` is **removed**. Its behavior (auth-wall tripwire, settled-URL check,
-  heading/follower extraction) is reproduced by `linkedin/scrape_profile.kdl` — authored and
-  KDL-validated this session (`recipes/linkedin/`, **gitignored**; see below).
-- **LinkedIn recipes are a testbed, not a committed artifact.** Recipes are distributed data
-  (§3): the LinkedIn ones live in the operator's local recipes dir now and the awesome-recipes
+- `crates/adapter-acme` is **removed**. Its behavior (auth-wall tripwire, settled-URL check,
+  heading/follower extraction) is reproduced by `acme/scrape_profile.kdl` — authored and
+  KDL-validated this session (`recipes/acme/`, **gitignored**; see below).
+- **`acme` recipes are a testbed, not a committed artifact.** Recipes are distributed data
+  (§3): the `acme` ones live in the operator's local recipes dir now and the awesome-recipes
   repo (subsystem C) later — never in this engine repo. `recipes/` is gitignored precisely so it
   can be a stable local testbed without becoming repo source. What this migration *commits* is the
-  engine and the deletion of the Rust adapter, not any LinkedIn `.kdl`.
+  engine and the deletion of the Rust adapter, not any `acme` `.kdl`.
 - The daemon registers one `RecipeAdapter` (backed by a `RecipeRegistry` over the configured
-  recipes dir) in place of `LinkedInAdapter`. With a LinkedIn recipe present, `pcw adapters` lists
-  `linkedin/scrape_profile` and `pcw add linkedin scrape_profile --params '{"url":…}'` runs it.
+  recipes dir) in place of `AcmeAdapter`. With an `acme` recipe present, `pcw adapters` lists
+  `acme/scrape_profile` and `pcw add acme scrape_profile --params '{"url":…}'` runs it.
 - Regression bar (validated against the local testbed recipe, not committed): run against the same
   live profile, the recipe must return the same `name`/`followers`/`landed_url` the Rust adapter
   produced this session. (`headline`/`location` were positional even in Rust; the recipe returns
@@ -344,11 +344,11 @@ what makes it unit-testable over `FakeBrowser`.
   responses and assert step behavior — var interpolation, extract accumulation, guard→error-class
   mapping, auto-wait timeout→`Retryable`, fallback-locator use.
 - **Model tests:** parse small example KDL recipes (committed as test fixtures under the crate,
-  *non-LinkedIn* — a synthetic `example/*` recipe) into the typed model; assert load-time errors
+  *non-acme* — a synthetic `example/*` recipe) into the typed model; assert load-time errors
   for missing required vars / unknown `{{ … }}` / bad `on-fail` class. Committed test recipes are
-  deliberately generic; LinkedIn recipes stay in the gitignored testbed.
+  deliberately generic; acme recipes stay in the gitignored testbed.
 - The **real known-state fixture + golden-output harness is subsystem D** — deferred. This spec
-  deliberately does not freeze a LinkedIn page; it proves the *engine*, not a *recipe*.
+  deliberately does not freeze an acme page; it proves the *engine*, not a *recipe*.
 
 ---
 
@@ -379,5 +379,5 @@ what makes it unit-testable over `FakeBrowser`.
    on `FakeBrowser`.
 5. `click`/`fill`/`wait` with auto-wait once the fork's real-input `BrowserHandle` methods exist.
 6. `RecipeAdapter` + `RecipeRegistry`; wire into the daemon behind the existing RPC shape.
-7. Port `linkedin/scrape_profile` to KDL; delete `crates/adapter-linkedin`; verify the
+7. Port `acme/scrape_profile` to KDL; delete `crates/adapter-acme`; verify the
    regression bar (§9) end-to-end against the fork.

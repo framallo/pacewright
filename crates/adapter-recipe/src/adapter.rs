@@ -1,6 +1,6 @@
 //! `RecipeAdapter` — one pacewright `Adapter` backing every recipe under a given
 //! `<adapter>` prefix. It replaces the hand-written per-site adapters (e.g.
-//! `adapter-linkedin`): the site logic now lives in a `.kdl` recipe, and this thin
+//! `adapter-acme`): the site logic now lives in a `.kdl` recipe, and this thin
 //! shim only *routes* an `(adapter, action)` to that recipe file, runs it via a
 //! `RecipeRunner`, and maps the outcome to `Value` / `AdapterError`.
 //!
@@ -128,7 +128,10 @@ impl Adapter for RecipeAdapter {
             .run(
                 &meta.path,
                 &vars_json,
-                &RunOpts { account: meta.account.clone(), foreground: meta.foreground },
+                &RunOpts {
+                    account: meta.account.clone(),
+                    foreground: meta.foreground,
+                },
             )
             .await?;
 
@@ -164,11 +167,11 @@ mod tests {
     use pacewright_core::browser::NullBrowser;
     use std::path::Path;
 
-    const LINKEDIN: &str = r#"recipe "linkedin/scrape_profile" {
+    const ACME: &str = r#"recipe "acme/scrape_profile" {
         description "scrape a profile"
-        limit-key "linkedin.profile_scrape"
-        auth account="prevetted-linkedin"
-        var "url" from="linkedin" required=#true
+        limit-key "acme.profile_scrape"
+        auth account="acme-account"
+        var "url" from="acme" required=#true
     }"#;
 
     fn reg_from(text: &str) -> Arc<RecipeRegistry> {
@@ -195,54 +198,54 @@ mod tests {
     #[test]
     fn exposes_actions_and_limit_keys_from_recipes() {
         let a = RecipeAdapter::new(
-            "linkedin",
-            reg_from(LINKEDIN),
+            "acme",
+            reg_from(ACME),
             Arc::new(FakeRecipeRunner::ok(json!({}))),
         );
-        assert_eq!(a.name(), "linkedin");
+        assert_eq!(a.name(), "acme");
         let acts = a.actions();
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].name, "scrape_profile");
         assert_eq!(
             a.limit_keys_for("scrape_profile"),
-            vec!["linkedin.profile_scrape".to_string()]
+            vec!["acme.profile_scrape".to_string()]
         );
         assert!(a.limit_keys_for("nope").is_empty());
     }
 
     #[tokio::test]
     async fn execute_runs_the_recipe_and_returns_the_result() {
-        let reg = reg_from(LINKEDIN);
-        let expected_path = reg.get("linkedin", "scrape_profile").unwrap().path.clone();
+        let reg = reg_from(ACME);
+        let expected_path = reg.get("acme", "scrape_profile").unwrap().path.clone();
         let runner = Arc::new(FakeRecipeRunner::new(move |p: &Path, vars: &str| {
             assert_eq!(p, expected_path);
-            // the job-runner already mapped `linkedin` → the recipe's `url` var
+            // the job-runner already mapped `acme` → the recipe's `url` var
             assert!(vars.contains("\"url\""), "vars_json = {vars}");
             Ok(json!({"ok": true, "result": {"name": "Jane"}, "unexpected": []}))
         }));
-        let a = RecipeAdapter::new("linkedin", reg, runner.clone());
+        let a = RecipeAdapter::new("acme", reg, runner.clone());
         let out = a
             .execute(
                 &ctx(),
                 "scrape_profile",
-                json!({"url": "https://linkedin.com/in/jane"}),
+                json!({"url": "https://acme.example/in/jane"}),
             )
             .await
             .unwrap();
         assert_eq!(out["name"], "Jane");
         assert_eq!(runner.call_count(), 1);
-        // `auth account="prevetted-linkedin"` → the account name propagates, so the runner drives
+        // `auth account="acme-account"` → the account name propagates, so the runner drives
         // that account's own TAB of the attached Chrome.
         let call = runner.calls.lock().unwrap()[0].clone();
-        assert_eq!(call.2.account.as_deref(), Some("prevetted-linkedin"));
+        assert_eq!(call.2.account.as_deref(), Some("acme-account"));
         assert!(!call.2.foreground, "a scrape must not steal focus");
     }
 
     #[tokio::test]
     async fn unknown_action_is_terminal() {
         let a = RecipeAdapter::new(
-            "linkedin",
-            reg_from(LINKEDIN),
+            "acme",
+            reg_from(ACME),
             Arc::new(FakeRecipeRunner::ok(json!({}))),
         );
         let err = a.execute(&ctx(), "nope", json!({})).await.unwrap_err();
@@ -255,8 +258,8 @@ mod tests {
     #[tokio::test]
     async fn non_object_params_are_terminal() {
         let a = RecipeAdapter::new(
-            "linkedin",
-            reg_from(LINKEDIN),
+            "acme",
+            reg_from(ACME),
             Arc::new(FakeRecipeRunner::ok(json!({}))),
         );
         let err = a
@@ -271,7 +274,7 @@ mod tests {
         let runner = Arc::new(FakeRecipeRunner::new(|_: &Path, _: &str| {
             Err(AdapterError::Retryable("locator not found".into()))
         }));
-        let a = RecipeAdapter::new("linkedin", reg_from(LINKEDIN), runner);
+        let a = RecipeAdapter::new("acme", reg_from(ACME), runner);
         let err = a
             .execute(&ctx(), "scrape_profile", json!({}))
             .await
@@ -283,7 +286,7 @@ mod tests {
     async fn result_less_recipe_yields_empty_object() {
         // A recipe whose effects are all `output` files returns no `result`.
         let runner = Arc::new(FakeRecipeRunner::ok(json!({"ok": true, "unexpected": []})));
-        let a = RecipeAdapter::new("linkedin", reg_from(LINKEDIN), runner);
+        let a = RecipeAdapter::new("acme", reg_from(ACME), runner);
         let out = a
             .execute(&ctx(), "scrape_profile", json!({}))
             .await

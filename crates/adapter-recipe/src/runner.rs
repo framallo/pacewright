@@ -21,7 +21,7 @@ fn secrets_path() -> PathBuf {
         .join("secrets.json")
 }
 
-/// The provider (recipe-name prefix) of a recipe source: `recipe "linkedin/post"` → `"linkedin"`.
+/// The provider (recipe-name prefix) of a recipe source: `recipe "acme/post"` → `"acme"`.
 fn recipe_provider(src: &str) -> Option<String> {
     let after = src.split("recipe ").nth(1)?.trim_start();
     let inner = after.strip_prefix('"')?;
@@ -71,13 +71,16 @@ pub struct RunOpts {
     /// session the human established there via `pcw auth login`). `None` → the shared page.
     pub account: Option<String>,
     /// `foreground #true` — raise the tab (`--activate`) for the run. Chrome throttles background
-    /// tabs, which stalls a Riverside render.
+    /// tabs, which stalls a heavy render.
     pub foreground: bool,
 }
 
 impl RunOpts {
     pub fn account(name: impl Into<String>) -> Self {
-        Self { account: Some(name.into()), foreground: false }
+        Self {
+            account: Some(name.into()),
+            foreground: false,
+        }
     }
     pub fn foreground(mut self, on: bool) -> Self {
         self.foreground = on;
@@ -109,7 +112,7 @@ pub use pacewright_core::browser::{default_connect_endpoint, DEFAULT_CHROME_CONN
 ///
 /// **Attaches** to the operator's always-on, non-headless Chrome (launched by launchd on
 /// `--remote-debugging-port`, never by chrome-agent) rather than launching one. Launching is
-/// what breaks auth: LinkedIn walls a CDP-launched profile and revokes `li_at`, and Google
+/// what breaks auth: acme walls a CDP-launched profile and revokes `li_at`, and Google
 /// refuses sign-in on one outright.
 ///
 /// Sites are separated by named **tabs**, not by browser profiles — `account` picks the page.
@@ -405,14 +408,15 @@ mod tests {
 
     fn store_with_token() -> SecretStore {
         let mut s = SecretStore::default();
-        s.set_app("linkedin", "cid", "csec");
+        s.set_app("acme", "cid", "csec");
         // valid for a long time from now_ms=1000 below
-        s.set_tokens("linkedin", "TOK", None, 10_000_000_000, None).unwrap();
-        s.set_author_urn("linkedin", "urn:li:person:ME").unwrap();
+        s.set_tokens("acme", "TOK", None, 10_000_000_000, None)
+            .unwrap();
+        s.set_author_urn("acme", "urn:li:person:ME").unwrap();
         s
     }
 
-    const POST_SRC: &str = r#"recipe "linkedin/post_with_mentions" {
+    const POST_SRC: &str = r#"recipe "acme/post_with_mentions" {
         var "token" required=#true
         var "author_urn" required=#true
         var "commentary" required=#true
@@ -420,16 +424,21 @@ mod tests {
 
     #[test]
     fn recipe_provider_extracts_prefix() {
-        assert_eq!(recipe_provider(POST_SRC).as_deref(), Some("linkedin"));
+        assert_eq!(recipe_provider(POST_SRC).as_deref(), Some("acme"));
         assert_eq!(
-            recipe_provider(r#"recipe "riverside/list_projects" {}"#).as_deref(),
-            Some("riverside")
+            recipe_provider(r#"recipe "globex/list_projects" {}"#).as_deref(),
+            Some("globex")
         );
     }
 
     #[test]
     fn inject_adds_token_and_author_urn() {
-        let out = inject_oauth_vars(POST_SRC, r#"{"commentary":"hi"}"#, &store_with_token(), 1000);
+        let out = inject_oauth_vars(
+            POST_SRC,
+            r#"{"commentary":"hi"}"#,
+            &store_with_token(),
+            1000,
+        );
         let obj: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(obj["token"], "TOK");
         assert_eq!(obj["author_urn"], "urn:li:person:ME");
@@ -438,23 +447,34 @@ mod tests {
 
     #[test]
     fn inject_is_noop_when_recipe_declares_no_token() {
-        let src = r#"recipe "riverside/list_projects" { var "production_id" }"#;
+        let src = r#"recipe "globex/list_projects" { var "production_id" }"#;
         let vars = r#"{"production_id":"x"}"#;
-        assert_eq!(inject_oauth_vars(src, vars, &store_with_token(), 1000), vars);
+        assert_eq!(
+            inject_oauth_vars(src, vars, &store_with_token(), 1000),
+            vars
+        );
     }
 
     #[test]
     fn inject_does_not_overwrite_explicit_token() {
-        let out = inject_oauth_vars(POST_SRC, r#"{"token":"EXPLICIT"}"#, &store_with_token(), 1000);
+        let out = inject_oauth_vars(
+            POST_SRC,
+            r#"{"token":"EXPLICIT"}"#,
+            &store_with_token(),
+            1000,
+        );
         let obj: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(obj["token"], "EXPLICIT");
     }
 
     #[test]
     fn inject_noop_when_no_valid_token() {
-        // Empty store → no token for linkedin → vars unchanged (recipe fails on missing var later).
+        // Empty store → no token for acme → vars unchanged (recipe fails on missing var later).
         let vars = r#"{"commentary":"hi"}"#;
-        assert_eq!(inject_oauth_vars(POST_SRC, vars, &SecretStore::default(), 1000), vars);
+        assert_eq!(
+            inject_oauth_vars(POST_SRC, vars, &SecretStore::default(), 1000),
+            vars
+        );
     }
 
     #[test]
@@ -501,7 +521,11 @@ mod tests {
     fn cli_runner_builds_the_pinned_invocation() {
         let r = CliRecipeRunner::new().timeout_secs(90);
         // a public recipe → the shared page, no account tab.
-        let args = r.args(Path::new("/r/hn.kdl"), r#"{"url":"u"}"#, &RunOpts::default());
+        let args = r.args(
+            Path::new("/r/hn.kdl"),
+            r#"{"url":"u"}"#,
+            &RunOpts::default(),
+        );
         // pinned browser+page, stealth, then the subcommand + vars-json
         let find = |f: &str| args.iter().position(|a| a == f).expect("flag present");
         assert_eq!(args[find("--browser") + 1], "pacewright");
@@ -518,10 +542,18 @@ mod tests {
     fn cli_runner_attaches_and_never_launches() {
         // The whole point of the refactor: pacewright ATTACHES to the operator's real, always-on
         // Chrome instead of letting chrome-agent launch one. A launched browser is a bot signal —
-        // LinkedIn walls the profile and revokes `li_at`; Google refuses sign-in outright.
+        // acme walls the profile and revokes `li_at`; Google refuses sign-in outright.
         let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
-        let args = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
-        let find = |f: &str| args.iter().position(|a| a == f).unwrap_or_else(|| panic!("{f} absent: {args:?}"));
+        let args = r.args(
+            Path::new("/r/li.kdl"),
+            "{}",
+            &RunOpts::account("acme-account"),
+        );
+        let find = |f: &str| {
+            args.iter()
+                .position(|a| a == f)
+                .unwrap_or_else(|| panic!("{f} absent: {args:?}"))
+        };
         assert_eq!(args[find("--connect") + 1], "http://127.0.0.1:9222");
         // --connect is a global flag → must precede the `recipe` subcommand.
         assert!(find("--connect") < find("recipe"));
@@ -533,10 +565,16 @@ mod tests {
         // Chrome. Attached, the profile IS the session: there is nothing to copy, and the real
         // Chrome is visible by definition. Passing either is now meaningless at best.
         let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
-        for opts in [RunOpts::account("prevetted-linkedin"), RunOpts::default()] {
+        for opts in [RunOpts::account("acme-account"), RunOpts::default()] {
             let args = r.args(Path::new("/r/x.kdl"), "{}", &opts);
-            assert!(!args.contains(&"--headed".to_string()), "attached must not pass --headed: {args:?}");
-            assert!(!args.contains(&"--copy-cookies".to_string()), "attached has nothing to copy: {args:?}");
+            assert!(
+                !args.contains(&"--headed".to_string()),
+                "attached must not pass --headed: {args:?}"
+            );
+            assert!(
+                !args.contains(&"--copy-cookies".to_string()),
+                "attached has nothing to copy: {args:?}"
+            );
         }
     }
 
@@ -546,15 +584,28 @@ mod tests {
         // attached browser, and the account picks a named TAB inside it. Verified live on
         // 2026-07-16 — three named pages coexist as three real tabs and do not clobber each other.
         let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
-        let li = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
-        let rv = r.args(Path::new("/r/rv.kdl"), "{}", &RunOpts::account("prevetted-riverside"));
+        let li = r.args(
+            Path::new("/r/li.kdl"),
+            "{}",
+            &RunOpts::account("acme-account"),
+        );
+        let rv = r.args(
+            Path::new("/r/rv.kdl"),
+            "{}",
+            &RunOpts::account("globex-account"),
+        );
         let page = |a: &Vec<String>| a[a.iter().position(|x| x == "--page").unwrap() + 1].clone();
-        let browser = |a: &Vec<String>| a[a.iter().position(|x| x == "--browser").unwrap() + 1].clone();
-        assert_eq!(page(&li), "prevetted-linkedin");
-        assert_eq!(page(&rv), "prevetted-riverside");
+        let browser =
+            |a: &Vec<String>| a[a.iter().position(|x| x == "--browser").unwrap() + 1].clone();
+        assert_eq!(page(&li), "acme-account");
+        assert_eq!(page(&rv), "globex-account");
         assert_ne!(page(&li), page(&rv), "each account gets its own tab");
         // ...but they share ONE browser now.
-        assert_eq!(browser(&li), browser(&rv), "one attached Chrome for every account");
+        assert_eq!(
+            browser(&li),
+            browser(&rv),
+            "one attached Chrome for every account"
+        );
         // A public/shared recipe keeps the runner's default page.
         let pubrec = r.args(Path::new("/r/hn.kdl"), "{}", &RunOpts::default());
         assert_eq!(page(&pubrec), "pacewright");
@@ -563,19 +614,36 @@ mod tests {
     #[test]
     fn cli_runner_activates_only_foreground_recipes() {
         // One attached Chrome has exactly ONE foreground tab. Chrome throttles the rest, which is
-        // what stalls a Riverside render — so a recipe that needs to be watched must raise its tab.
+        // what stalls a heavy render — so a recipe that needs to be watched must raise its tab.
         let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
-        let fg = r.args(Path::new("/r/rv.kdl"), "{}", &RunOpts::account("prevetted-riverside").foreground(true));
-        assert!(fg.contains(&"--activate".to_string()), "foreground recipe must raise its tab: {fg:?}");
+        let fg = r.args(
+            Path::new("/r/rv.kdl"),
+            "{}",
+            &RunOpts::account("globex-account").foreground(true),
+        );
+        assert!(
+            fg.contains(&"--activate".to_string()),
+            "foreground recipe must raise its tab: {fg:?}"
+        );
         // --activate is a global flag → must precede the `recipe` subcommand.
         let apos = fg.iter().position(|a| a == "--activate").unwrap();
         let rpos = fg.iter().position(|a| a == "recipe").unwrap();
-        assert!(apos < rpos, "--activate must precede the subcommand: {fg:?}");
+        assert!(
+            apos < rpos,
+            "--activate must precede the subcommand: {fg:?}"
+        );
 
         // Default off: raising a window steals focus on the operator's real Mac, and most recipes
         // (scrapes, API polls) have no reason to.
-        let bg = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
-        assert!(!bg.contains(&"--activate".to_string()), "background recipe must not steal focus: {bg:?}");
+        let bg = r.args(
+            Path::new("/r/li.kdl"),
+            "{}",
+            &RunOpts::account("acme-account"),
+        );
+        assert!(
+            !bg.contains(&"--activate".to_string()),
+            "background recipe must not steal focus: {bg:?}"
+        );
     }
 
     #[test]
@@ -585,7 +653,11 @@ mod tests {
         // omitting it filed our pages under the browser key `default`, which is exactly the
         // shared-`default` hijack another chrome-agent consumer can walk into.
         let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
-        let args = r.args(Path::new("/r/li.kdl"), "{}", &RunOpts::account("prevetted-linkedin"));
+        let args = r.args(
+            Path::new("/r/li.kdl"),
+            "{}",
+            &RunOpts::account("acme-account"),
+        );
         let browser = &args[args.iter().position(|a| a == "--browser").unwrap() + 1];
         assert_eq!(browser, "pacewright");
         assert_ne!(browser, "default", "never the shared default browser key");
@@ -594,7 +666,10 @@ mod tests {
     #[tokio::test]
     async fn missing_binary_is_terminal() {
         let r = CliRecipeRunner::new().bin("definitely-not-real-xyz");
-        let err = r.run(Path::new("/r/x.kdl"), "{}", &RunOpts::default()).await.unwrap_err();
+        let err = r
+            .run(Path::new("/r/x.kdl"), "{}", &RunOpts::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, AdapterError::Terminal(_)), "got {err:?}");
     }
 
