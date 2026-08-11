@@ -107,6 +107,26 @@ pub trait RecipeRunner: Send + Sync {
 /// cannot drift onto different endpoints.
 pub use pacewright_core::browser::{default_connect_endpoint, DEFAULT_CHROME_CONNECT};
 
+/// The chrome-agent binary pacewright shells out to (`CHROME_AGENT_BIN`, default `chrome-agent`).
+pub fn chrome_agent_bin() -> String {
+    std::env::var("CHROME_AGENT_BIN").unwrap_or_else(|_| "chrome-agent".to_string())
+}
+
+/// Preflight: does `<bin> recipe` exist? Recipes + pipelines shell out to `chrome-agent recipe run`;
+/// a chrome-agent built WITHOUT the recipe engine (plain upstream, or the fork's `main` before the
+/// engine was merged) makes every recipe task fail cryptically. The daemon calls this at boot so it
+/// warns once, loudly, instead of failing per task. Runs `<bin> recipe --help` and checks exit 0.
+pub fn recipe_subcommand_available(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .args(["recipe", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// The real runner:
 /// `chrome-agent --connect <endpoint> --browser pacewright --page <account> recipe run <file>`.
 ///
@@ -536,6 +556,13 @@ mod tests {
         assert_eq!(args[find("--vars-json") + 1], r#"{"url":"u"}"#);
         // global flags precede the subcommand
         assert!(find("--browser") < find("recipe"));
+    }
+
+    #[test]
+    fn recipe_preflight_is_false_for_a_missing_binary() {
+        assert!(!recipe_subcommand_available(
+            "chrome-agent-definitely-not-installed-xyz"
+        ));
     }
 
     #[test]
