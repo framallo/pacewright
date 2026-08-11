@@ -242,6 +242,16 @@ impl Store {
         )
     }
 
+    /// Every scope in the ledger with its touched-target count, sorted by scope. Powers the
+    /// dashboard's Ledger pane and `digest` introspection.
+    pub fn touched_scopes(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT scope, COUNT(*) FROM touched GROUP BY scope ORDER BY scope")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
     /// Persist a paused scope (`INSERT OR IGNORE`, idempotent). Persisted, not just in memory, so a
     /// daemon restart re-asserts it rather than silently resuming — the Jul-23 incident.
     pub fn pause_scope(&self, scope: &str) -> rusqlite::Result<()> {

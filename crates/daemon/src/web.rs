@@ -44,6 +44,12 @@ pub async fn snapshot(srv: &Server) -> Value {
     // Cached auth status — `AuthList` reads the cache (no per-account check), so it's cheap enough
     // to carry in the 1 s snapshot and lets the Accounts pane flip live during a login.
     let accounts = rpc_value(srv, Request::AuthList).await;
+    // Newer feature panes: escalations (call-Claude outbox), datasets (saved JSON), the dedup
+    // ledger, and the Claude Max/Pro subscription status.
+    let escalations = rpc_value(srv, Request::Escalations { drain: false }).await;
+    let datasets = rpc_value(srv, Request::DataList).await;
+    let ledger = rpc_value(srv, Request::LedgerStats).await;
+    let anthropic = rpc_value(srv, Request::AnthropicStatus).await;
     json!({
         "status": status,
         "tasks": tasks.get("tasks").cloned().unwrap_or(json!([])),
@@ -51,6 +57,10 @@ pub async fn snapshot(srv: &Server) -> Value {
         "schedule_errors": schedules.get("errors").cloned().unwrap_or(json!([])),
         "limits": limits,
         "accounts": accounts.get("accounts").cloned().unwrap_or(json!([])),
+        "escalations": escalations.get("escalations").cloned().unwrap_or(json!([])),
+        "datasets": datasets.get("datasets").cloned().unwrap_or(json!([])),
+        "ledger": ledger.get("scopes").cloned().unwrap_or(json!([])),
+        "anthropic": anthropic,
     })
 }
 
@@ -58,6 +68,7 @@ pub async fn snapshot(srv: &Server) -> Value {
 pub fn app(srv: Arc<Server>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/next", get(next_index))
         .route("/api", post(api))
         .route("/ws", get(ws_upgrade))
         .with_state(srv)
@@ -65,6 +76,12 @@ pub fn app(srv: Arc<Server>) -> Router {
 
 async fn index() -> impl IntoResponse {
     Html(include_str!("web/index.html"))
+}
+
+/// The feature dashboard (escalations · datasets · ledger · subscription · fleet), served at
+/// `/next` alongside the original `/` control plane.
+async fn next_index() -> impl IntoResponse {
+    Html(include_str!("web/next.html"))
 }
 
 /// The whole control plane: a `proto::Request` in, a `proto::Response` out — identical to the

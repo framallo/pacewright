@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pacewright · features</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --line:#2a3140; --ink:#e6edf3;
+    --dim:#8b949e; --accent:#4c8dff; --good:#3fb950; --warn:#e3b341; --bad:#f85149; --pill:#21262d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+  .logo{font-weight:700;letter-spacing:-.5px}
+  .logo b{color:var(--accent)}
+  nav{display:flex;gap:4px;flex-wrap:wrap}
+  nav button{background:none;border:0;color:var(--dim);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
+  nav button.on{background:var(--panel2);color:var(--ink)}
+  nav button:hover{color:var(--ink)}
+  .spacer{flex:1}
+  .conn{width:9px;height:9px;border-radius:50%;background:var(--bad)}
+  .conn.up{background:var(--good)}
+  main{padding:20px;max-width:1200px;margin:0 auto}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card .k{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+  .card .v{font-size:26px;font-weight:600;margin-top:4px}
+  .card .v.small{font-size:15px;font-weight:500}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:20px}
+  .phead{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .phead h2{margin:0;font-size:14px}
+  .phead .count{color:var(--dim);font-size:12px}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.4px;padding:10px 16px;border-bottom:1px solid var(--line)}
+  td{padding:10px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;background:var(--pill);font-size:11.5px;color:var(--dim)}
+  .pill.good{color:#7ee787;background:rgba(63,185,80,.12)}
+  .pill.warn{color:#f2cc60;background:rgba(227,179,65,.12)}
+  .pill.bad{color:#ff7b72;background:rgba(248,81,73,.12)}
+  .pill.run{color:#79c0ff;background:rgba(76,141,255,.12)}
+  button.act{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px}
+  button.act:hover{border-color:var(--accent)}
+  .empty{padding:22px 16px;color:var(--dim);text-align:center}
+  .err{color:#ff7b72}
+  .muted{color:var(--dim)}
+  .rowsub{color:var(--dim);font-size:12px;margin-top:2px}
+  .switch{position:relative;width:34px;height:20px;display:inline-block}
+  .switch input{display:none}
+  .slider{position:absolute;inset:0;background:var(--line);border-radius:20px;transition:.15s;cursor:pointer}
+  .slider:before{content:"";position:absolute;width:14px;height:14px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s}
+  .switch input:checked+.slider{background:var(--accent)}
+  .switch input:checked+.slider:before{transform:translateX(14px)}
+  pre.data{margin:0;padding:12px 16px;max-height:340px;overflow:auto;font-size:12px;color:var(--dim);white-space:pre-wrap}
+  .sub{display:flex;align-items:center;gap:10px}
+  .barwrap{background:var(--panel2);border-radius:6px;height:8px;overflow:hidden;min-width:80px;flex:1}
+  .bar{height:100%;background:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">pace<b>wright</b> · features</div>
+  <nav id="nav"></nav>
+  <div class="spacer"></div>
+  <div id="sub" class="pill">subscription: —</div>
+  <div id="conn" class="conn" title="live"></div>
+</header>
+<main id="main"></main>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+let SNAP = {};
+const PANES = ["Overview","Fleet","Escalations","Datasets","Ledger","Limits"];
+let pane = localStorage.getItem("pw-next-pane") || "Overview";
+let dataOpen = null; // dataset currently expanded
+
+// --- transport ---
+async function api(method, params){
+  const r = await fetch("/api",{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify(params?{method,params}:{method})});
+  return r.json();
+}
+function connectWS(){
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = ()=>$("conn").classList.add("up");
+  ws.onclose = ()=>{$("conn").classList.remove("up");setTimeout(connectWS,1000)};
+  ws.onmessage = (e)=>{ SNAP = JSON.parse(e.data); render(); };
+}
+
+// --- helpers ---
+const esc = (s)=>String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function statusPill(s){
+  const m={succeeded:"good",failed:"bad",running:"run",pending:"",deferred:"warn",blocked:"warn",canceled:""};
+  return `<span class="pill ${m[s]||""}">${esc(s)}</span>`;
+}
+function ago(ms){
+  if(!ms) return "";
+  const d=Date.now()-ms, a=Math.abs(d);
+  const u=a<60000?[Math.round(a/1000),"s"]:a<3600000?[Math.round(a/60000),"m"]:a<86400000?[Math.round(a/3600000),"h"]:[Math.round(a/86400000),"d"];
+  return d>=0?`${u[0]}${u[1]} ago`:`in ${u[0]}${u[1]}`;
+}
+
+// --- panes ---
+function paneOverview(){
+  const st = SNAP.status||{};
+  const esc_n = (SNAP.escalations||[]).length;
+  const ds = SNAP.datasets||[];
+  const rows = ds.reduce((a,d)=>a+(d.count||0),0);
+  const led = SNAP.ledger||[];
+  const touched = led.reduce((a,s)=>a+(s.count||0),0);
+  const a = SNAP.anthropic||{};
+  const cards = [
+    ["pending", st.pending??"—"],
+    ["running", st.running??"—"],
+    ["escalations", esc_n, esc_n?"bad":""],
+    ["datasets", ds.length],
+    ["data rows", rows],
+    ["ledger targets", touched],
+  ];
+  const paused = (st.paused||[]);
+  return `
+  <div class="cards">
+    ${cards.map(([k,v,cls])=>`<div class="card"><div class="k">${k}</div><div class="v ${cls?'':''}" style="${cls==='bad'?'color:var(--bad)':''}">${esc(v)}</div></div>`).join("")}
+  </div>
+  <div class="panel">
+    <div class="phead"><h2>Claude subscription</h2></div>
+    <table><tr>
+      <td>${a.signed_in?`<span class="pill good">signed in</span>`:`<span class="pill bad">signed out</span>`}</td>
+      <td class="muted">${a.state?("state: "+esc(a.state)):""}${a.expires_at_ms?(" · token "+ago(a.expires_at_ms)):""}</td>
+      <td class="muted">${a.signed_in?"agent/* + claude_cli bill your Max/Pro plan":"run <code>pcw anthropic login</code> to use the subscription"}</td>
+    </tr></table>
+  </div>
+  ${paused.length?`<div class="panel"><div class="phead"><h2 class="err">Paused scopes</h2><span class="count">need a human</span></div>
+    <table>${paused.map(p=>`<tr><td class="mono">${esc(p)}</td><td><button class="act" onclick="resumeScope('${esc(p)}')">Resume</button></td></tr>`).join("")}</table></div>`:""}
+  `;
+}
+
+function paneFleet(){
+  const sc = SNAP.schedules||[];
+  if(!sc.length) return emptyPanel("Fleet","no schedules");
+  const row = (s)=>{
+    const when = s.every?`every <code>${esc(s.every)}</code>`:(s.at?("at "+esc(new Date(s.at).toLocaleString())):"on apply");
+    const next = s.next_fire?`<div class="rowsub">next ${ago(s.next_fire)}</div>`:"";
+    return `<tr>
+      <td><label class="switch"><input type="checkbox" ${s.enabled?"checked":""} onchange="toggleSched('${esc(s.id)}',this.checked)"><span class="slider"></span></label></td>
+      <td><b>${esc(s.id)}</b><div class="rowsub mono">${esc(s.recipe)}</div></td>
+      <td>${when}${next}</td>
+      <td>${s.live_status?statusPill(s.live_status):'<span class="muted">—</span>'}</td>
+      <td>${s.last_error?`<span class="err">${esc(s.last_error)}</span>`:""}</td>
+    </tr>`;
+  };
+  return `<div class="panel"><div class="phead"><h2>Fleet schedules</h2><span class="count">${sc.length}</span>
+      <div class="spacer"></div><button class="act" onclick="applySched()">Apply</button></div>
+    <table><thead><tr><th>on</th><th>id</th><th>when</th><th>live</th><th>last error</th></tr></thead>
+    <tbody>${sc.map(row).join("")}</tbody></table></div>`;
+}
+
+function paneEscalations(){
+  const es = SNAP.escalations||[];
+  if(!es.length) return emptyPanel("Escalations","nothing needs Claude — clean.");
+  const row = (o)=>{
+    const e = o.event||{};
+    const kind = e.kind==="scope_paused"?`<span class="pill bad">scope paused</span>`:`<span class="pill warn">task failed</span>`;
+    return `<tr>
+      <td>${kind}</td>
+      <td class="mono">${esc(e.adapter)}/${esc(e.action)}${e.paused_scope?`<div class="rowsub">scope <b>${esc(e.paused_scope)}</b> halted</div>`:""}</td>
+      <td class="err">${esc(e.error||"")}</td>
+      <td class="muted">${ago(e.at_ms)}</td>
+      <td>${e.paused_scope?`<button class="act" onclick="resumeScope('${esc(e.paused_scope)}')">Resume</button>`:""}</td>
+    </tr>`;
+  };
+  return `<div class="panel"><div class="phead"><h2>Escalations</h2><span class="count">${es.length}</span>
+      <div class="spacer"></div><button class="act" onclick="drainEsc()">Drain</button></div>
+    <table><thead><tr><th>kind</th><th>where</th><th>error</th><th>when</th><th></th></tr></thead>
+    <tbody>${es.map(row).join("")}</tbody></table></div>`;
+}
+
+function paneDatasets(){
+  const ds = SNAP.datasets||[];
+  const list = ds.length?`<table><thead><tr><th>dataset</th><th>rows</th><th></th></tr></thead><tbody>${
+    ds.map(d=>`<tr><td class="mono">${esc(d.name)}</td><td>${esc(d.count)}</td>
+      <td><button class="act" onclick="showData('${esc(d.name)}')">${dataOpen===d.name?"Hide":"View"}</button></td></tr>`).join("")
+  }</tbody></table>`:`<div class="empty">no datasets yet — a <code>data/append</code> step creates one</div>`;
+  let preview = "";
+  if(dataOpen && DATACACHE[dataOpen]!==undefined){
+    preview = `<div class="panel"><div class="phead"><h2>${esc(dataOpen)}</h2><span class="count">first rows</span></div>
+      <pre class="data">${esc(JSON.stringify(DATACACHE[dataOpen],null,2))}</pre></div>`;
+  }
+  return `<div class="panel"><div class="phead"><h2>Datasets</h2><span class="count">saved JSON task output</span></div>${list}</div>${preview}`;
+}
+
+function paneLedger(){
+  const led = SNAP.ledger||[];
+  if(!led.length) return emptyPanel("Ledger","no targets touched yet");
+  const max = Math.max(1,...led.map(s=>s.count||0));
+  const row = (s)=>`<tr><td class="mono">${esc(s.scope)}</td><td style="width:55%"><div class="sub"><div class="barwrap"><div class="bar" style="width:${Math.round(100*(s.count||0)/max)}%"></div></div><span>${esc(s.count)}</span></div></td></tr>`;
+  return `<div class="panel"><div class="phead"><h2>All-time dedup ledger</h2><span class="count">never act on a target twice (R7)</span></div>
+    <table><thead><tr><th>scope</th><th>targets touched</th></tr></thead><tbody>${led.map(row).join("")}</tbody></table></div>`;
+}
+
+function paneLimits(){
+  const lim = SNAP.limits||{};
+  const keys = lim.limits || lim.keys || [];
+  const arr = Array.isArray(keys)?keys:Object.entries(keys).map(([k,v])=>({key:k,...v}));
+  if(!arr.length) return emptyPanel("Limits","no spend recorded today");
+  return `<div class="panel"><div class="phead"><h2>Pacing / caps today</h2></div>
+    <table><thead><tr><th>key</th><th>count</th><th>last spent</th></tr></thead><tbody>${
+      arr.map(l=>`<tr><td class="mono">${esc(l.key||l.limit_key)}</td><td>${esc(l.count??0)}</td><td class="muted">${l.last_spent_at?ago(l.last_spent_at):""}</td></tr>`).join("")
+    }</tbody></table></div>`;
+}
+
+function emptyPanel(title,msg){
+  return `<div class="panel"><div class="phead"><h2>${esc(title)}</h2></div><div class="empty">${esc(msg)}</div></div>`;
+}
+
+const DATACACHE = {};
+async function showData(name){
+  if(dataOpen===name){ dataOpen=null; render(); return; }
+  dataOpen = name;
+  const r = await api("data_show",{name,limit:50});
+  DATACACHE[name] = (r.type==="ok"? (r.items||r) : {error:r.message});
+  render();
+}
+
+// --- actions ---
+async function resumeScope(s){ await api("resume",{scope:s}); }
+async function drainEsc(){ await api("escalations",{drain:true}); }
+async function applySched(){ await api("schedule_apply",{prune:false}); }
+async function toggleSched(id,on){ await api(on?"schedule_enable":"schedule_disable",{id}); }
+
+// --- shell ---
+function render(){
+  // subscription chip
+  const a = SNAP.anthropic||{};
+  const chip = $("sub");
+  chip.textContent = "subscription: " + (a.signed_in? (a.state||"signed in") : "signed out");
+  chip.className = "pill " + (a.signed_in?"good":"bad");
+  // nav
+  $("nav").innerHTML = PANES.map(p=>`<button class="${p===pane?'on':''}" onclick="setPane('${p}')">${p}${p==='Escalations'&&(SNAP.escalations||[]).length?` (${SNAP.escalations.length})`:''}</button>`).join("");
+  // body
+  const fn = {Overview:paneOverview,Fleet:paneFleet,Escalations:paneEscalations,Datasets:paneDatasets,Ledger:paneLedger,Limits:paneLimits}[pane];
+  $("main").innerHTML = fn ? fn() : "";
+}
+function setPane(p){ pane=p; localStorage.setItem("pw-next-pane",p); render(); }
+window.setPane=setPane; window.resumeScope=resumeScope; window.drainEsc=drainEsc;
+window.applySched=applySched; window.toggleSched=toggleSched; window.showData=showData;
+
+render();
+connectWS();
+</script>
+</body>
+</html>

@@ -129,6 +129,18 @@ pub enum Request {
         #[serde(default)]
         drain: bool,
     },
+    /// Saved JSON datasets (task output): each `(name, row_count)`.
+    DataList,
+    /// One dataset's rows (capped by `limit`).
+    DataShow {
+        name: String,
+        #[serde(default)]
+        limit: Option<i64>,
+    },
+    /// All-time dedup ledger: per-scope touched counts (R7).
+    LedgerStats,
+    /// Whether a Claude Max/Pro subscription is signed in, its freshness, and email.
+    AnthropicStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

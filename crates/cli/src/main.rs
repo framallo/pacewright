@@ -119,6 +119,23 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AnthropicCmd,
     },
+    /// Inspect saved JSON datasets (task output).
+    Data {
+        #[command(subcommand)]
+        cmd: DataCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DataCmd {
+    /// List datasets with row counts.
+    List,
+    /// Print a dataset's rows.
+    Show {
+        name: String,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -263,6 +280,10 @@ async fn main() -> Result<()> {
         Cmd::Pause { scope } => Request::Pause { scope },
         Cmd::Resume { scope } => Request::Resume { scope },
         Cmd::Limits => Request::Limits,
+        Cmd::Data { cmd } => match cmd {
+            DataCmd::List => Request::DataList,
+            DataCmd::Show { name, limit } => Request::DataShow { name, limit },
+        },
         Cmd::Adapters => Request::Adapters,
         Cmd::Status => Request::Status,
         Cmd::Run {
