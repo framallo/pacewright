@@ -13,6 +13,7 @@
 
 pub mod adapter;
 pub mod auth;
+pub mod pool;
 pub mod registry;
 pub mod runner;
 pub mod schedule;
@@ -21,8 +22,10 @@ pub use adapter::RecipeAdapter;
 pub use auth::{
     AccountInfo, AccountStatus, AuthManager, CliLoginLauncher, LoginLauncher, NativeLoginLauncher,
 };
+pub use pool::{ChromeLease, ChromePool};
 pub use registry::{RecipeMeta, RecipeRegistry, RecipeVar};
 pub use runner::{
     chrome_agent_bin, recipe_subcommand_available, CliRecipeRunner, NativeRecipeRunner, RecipeRunner,
+    RunOpts,
 };
 pub use schedule::{partition, reconcile, validate, ReconcileReport, ScheduleEntry, Timing};

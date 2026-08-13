@@ -296,7 +296,7 @@ fn is_stale_outcome(outcome: &Result<Value, AdapterError>) -> bool {
 /// spawned (Send) task. We isolate it on a dedicated current-thread runtime + `LocalSet` and return
 /// only the Send result (`Value`/`AdapterError`) over a oneshot — the standard !Send bridge.
 pub struct NativeRecipeRunner {
-    connect: Option<String>,
+    pool: crate::pool::ChromePool,
     browser_name: String,
     page_name: String,
     stealth: bool,
@@ -313,7 +313,9 @@ impl Default for NativeRecipeRunner {
 impl NativeRecipeRunner {
     pub fn new() -> Self {
         Self {
-            connect: default_connect_endpoint(),
+            pool: crate::pool::ChromePool::new(
+                pacewright_core::browser::default_connect_pool(),
+            ),
             browser_name: "pacewright".to_string(),
             page_name: "pacewright".to_string(),
             stealth: true,
@@ -321,8 +323,15 @@ impl NativeRecipeRunner {
             solver: None,
         }
     }
+    /// Attach to exactly one Chrome: a pool of one, which is the original behavior.
     pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
-        self.connect = Some(endpoint.into());
+        self.pool = crate::pool::ChromePool::single(endpoint);
+        self
+    }
+    /// Attach across several Chromes. An account still lands on its own one (that is where its
+    /// session is); accountless runs spread, so the pool size is the parallelism.
+    pub fn pool(mut self, pool: crate::pool::ChromePool) -> Self {
+        self.pool = pool;
         self
     }
     pub fn timeout_secs(mut self, s: u64) -> Self {
@@ -357,18 +366,58 @@ impl RecipeRunner for NativeRecipeRunner {
         let vars = pacewright_chrome::api::parse_vars(&[], Some(&injected))
             .map_err(|e| AdapterError::Terminal(format!("recipe vars: {e}")))?;
 
-        let connect = self
-            .connect
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string());
-        let browser_name = self.browser_name.clone();
+        // Lease a Chrome for this run. The lease lives until the end of this function, so the slot
+        // is not handed to another run while this recipe is driving its tab.
+        let lease = self.pool.lease(opts.account.as_deref()).await;
+        let connect = lease.endpoint().to_string();
+        // Per-slot bookkeeping name: chrome-agent caches a page's CDP target id under
+        // `--browser <name>`, so N Chromes under one name would look up each other's tabs.
+        let browser_name = lease.browser_name(&self.browser_name);
         let page = opts.account.clone().unwrap_or_else(|| self.page_name.clone());
-        let stealth = self.stealth;
-        let timeout_secs = self.timeout_secs;
         let activate = opts.foreground;
         let path = recipe_path.to_string_lossy().to_string();
-        let solver = self.solver.clone();
 
+        // First attempt, then the same stale-page recovery the CLI runner already had. The native
+        // path never got it, and the pool made it matter: more Chromes means more cached tabs, and
+        // a tab closed since chrome-agent recorded it is otherwise a permanent task failure.
+        let outcome = self
+            .attached(&connect, &browser_name, &page, &path, vars.clone(), activate)
+            .await;
+        if is_stale_outcome(&outcome) {
+            pacewright_core::browser::prune_stale_page(&browser_name, &page);
+            return self
+                .attached(&connect, &browser_name, &page, &path, vars, activate)
+                .await;
+        }
+        outcome
+    }
+}
+
+impl NativeRecipeRunner {
+    /// One attach-and-run on a dedicated current-thread runtime.
+    ///
+    /// The recipe engine holds `Rc<CdpClient>`, so its future is `!Send` and cannot run on
+    /// pacewright's spawned task: it is isolated on its own thread + `LocalSet` and only the Send
+    /// result crosses back over a oneshot.
+    #[allow(clippy::too_many_arguments)]
+    async fn attached(
+        &self,
+        connect: &str,
+        browser_name: &str,
+        page: &str,
+        path: &str,
+        vars: std::collections::BTreeMap<String, String>,
+        activate: bool,
+    ) -> Result<Value, AdapterError> {
+        let (connect, browser_name, page, path) = (
+            connect.to_string(),
+            browser_name.to_string(),
+            page.to_string(),
+            path.to_string(),
+        );
+        let stealth = self.stealth;
+        let timeout_secs = self.timeout_secs;
+        let solver = self.solver.clone();
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Value, AdapterError>>();
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -395,7 +444,8 @@ impl RecipeRunner for NativeRecipeRunner {
                     timeout_secs,
                     activate,
                 };
-                match pacewright_chrome::api::run_recipe_attached(&at, &path, vars, solver_ref).await {
+                match pacewright_chrome::api::run_recipe_attached(&at, &path, vars, solver_ref).await
+                {
                     Ok(o) => Ok(serde_json::json!({
                         "ok": true, "result": o.result, "unexpected": o.unexpected,
                     })),
@@ -404,8 +454,9 @@ impl RecipeRunner for NativeRecipeRunner {
             });
             let _ = tx.send(res);
         });
-        rx.await
-            .map_err(|_| AdapterError::Terminal("recipe worker thread ended without a result".into()))?
+        rx.await.map_err(|_| {
+            AdapterError::Terminal("recipe worker thread ended without a result".into())
+        })?
     }
 }
 

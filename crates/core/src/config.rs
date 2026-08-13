@@ -51,9 +51,19 @@ impl LimitConfig {
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub limits: HashMap<String, LimitConfig>,
-    /// Endpoint of the always-on Chrome to attach to (`http://127.0.0.1:9222`, or `auto`).
-    /// `None` = not configured; the browser layer falls back to `browser::DEFAULT_CHROME_CONNECT`.
-    pub browser_connect: Option<String>,
+    /// Every Chrome to attach to, in declaration order (`http://127.0.0.1:9222`, or `auto`).
+    /// Empty = not configured; the browser layer falls back to `browser::DEFAULT_CHROME_CONNECT`.
+    ///
+    /// A **list**, because one Chrome and many Chromes are the same mechanism at different sizes:
+    /// the original single-browser operator has a one-element pool and needs no config change.
+    pub browser_pool: Vec<String>,
+}
+
+impl Config {
+    /// The one endpoint, for callers that predate the pool. `None` when unconfigured.
+    pub fn browser_connect(&self) -> Option<&str> {
+        self.browser_pool.first().map(String::as_str)
+    }
 }
 
 #[derive(Deserialize)]
@@ -68,9 +78,31 @@ struct RawConfig {
 /// hit a hard failure on daemon boot.
 #[derive(Deserialize)]
 struct RawBrowser {
-    /// e.g. `"http://127.0.0.1:9222"`, `"ws://…"`, or `"auto"`.
+    /// One endpoint (`"http://127.0.0.1:9222"`, `"ws://…"`, `"auto"`) or a list of them.
     #[serde(default)]
-    connect: Option<String>,
+    connect: Option<Connect>,
+}
+
+/// `connect` takes a string or a list of strings. Untagged so the existing one-line form keeps
+/// parsing unchanged — an operator's `config.toml` needs no edit to stay on one Chrome.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Connect {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Connect {
+    fn into_pool(self) -> Vec<String> {
+        match self {
+            Connect::One(s) => vec![s],
+            Connect::Many(v) => v,
+        }
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+    }
 }
 #[derive(Deserialize)]
 struct RawLimit {
@@ -141,10 +173,14 @@ impl Config {
                 },
             );
         }
-        let browser_connect = raw.browser.and_then(|b| b.connect);
+        let browser_pool = raw
+            .browser
+            .and_then(|b| b.connect)
+            .map(Connect::into_pool)
+            .unwrap_or_default();
         Ok(Config {
             limits,
-            browser_connect,
+            browser_pool,
         })
     }
 
@@ -184,14 +220,36 @@ active = "09:00-18:00"
     }
     #[test]
     fn test_browser_connect_parses_and_defaults() {
-        // Absent → None (the browser layer falls back to DEFAULT_CHROME_CONNECT).
-        assert_eq!(Config::from_toml("").unwrap().browser_connect, None);
+        // Absent → empty pool (the browser layer falls back to DEFAULT_CHROME_CONNECT).
+        assert!(Config::from_toml("").unwrap().browser_pool.is_empty());
+        assert_eq!(Config::from_toml("").unwrap().browser_connect(), None);
         // An explicit endpoint overrides, so the port can move without a rebuild.
         let c = Config::from_toml("[browser]\nconnect = \"http://127.0.0.1:9333\"\n").unwrap();
-        assert_eq!(c.browser_connect.as_deref(), Some("http://127.0.0.1:9333"));
+        assert_eq!(c.browser_pool, ["http://127.0.0.1:9333"]);
+        assert_eq!(c.browser_connect(), Some("http://127.0.0.1:9333"));
         // chrome-agent's own discovery mode is a legal value too.
         let c = Config::from_toml("[browser]\nconnect = \"auto\"\n").unwrap();
-        assert_eq!(c.browser_connect.as_deref(), Some("auto"));
+        assert_eq!(c.browser_connect(), Some("auto"));
+    }
+
+    #[test]
+    fn test_browser_connect_accepts_a_pool() {
+        // The scale case: many Chromes for throughput. Same key, a list instead of a string, so
+        // the one-Chrome operator's config keeps parsing byte for byte unchanged.
+        let c = Config::from_toml(
+            "[browser]\nconnect = [\"http://127.0.0.1:9222\", \"http://127.0.0.1:9223\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.browser_pool,
+            ["http://127.0.0.1:9222", "http://127.0.0.1:9223"]
+        );
+        // `browser_connect()` still answers for callers that only ever wanted one.
+        assert_eq!(c.browser_connect(), Some("http://127.0.0.1:9222"));
+        // Blank entries are dropped instead of becoming an endpoint nothing listens on.
+        let c =
+            Config::from_toml("[browser]\nconnect = [\"http://127.0.0.1:9222\", \"  \"]\n").unwrap();
+        assert_eq!(c.browser_pool, ["http://127.0.0.1:9222"]);
     }
 
     #[test]
@@ -201,7 +259,7 @@ active = "09:00-18:00"
         // anyway. An operator upgrading with the old key in config.toml must not get a hard
         // failure on daemon boot.
         let c = Config::from_toml("[browser]\nidle_timeout = \"10m\"\n").unwrap();
-        assert_eq!(c.browser_connect, None);
+        assert!(c.browser_pool.is_empty());
     }
 
     #[test]

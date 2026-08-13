@@ -256,6 +256,47 @@ newer capabilities the classic panes don't: **Overview** (live counts + Claude s
 **Datasets** (saved JSON task output, with an inline row view), **Ledger** (per-scope all-time dedup
 counts), and **Limits**. Same WebSocket snapshot, same `POST /api` control plane.
 
+## One Chrome, or many
+
+pacewright **attaches** to already-running Chromes and never launches one. How many it attaches to is
+the one knob, and both settings are the same mechanism at different sizes — **a pool of one is the
+original behavior**, so nothing branches on a mode:
+
+```toml
+[browser]
+connect = "http://127.0.0.1:9222"                                  # one Chrome
+connect = ["http://127.0.0.1:9222", "http://127.0.0.1:9223"]       # a pool
+```
+
+| | One Chrome | A pool |
+|---|---|---|
+| For | signed-in sites (social, media, content studios) | throughput on sites that don't fight you |
+| Why | one consistent fingerprint and one real session is the whole anti-detection story | the work is parallel, so N browsers is N× the runs per hour |
+| Started by | `com.paperclip.pacewright-chrome.plist` (visible, you sign in by hand) | `./packaging/chrome-pool.sh up 4` |
+
+Two rules keep a pool correct, and both are load-bearing:
+
+1. **An account is pinned to one Chrome.** A signed-in session lives where the human signed in and
+   cannot be moved, so `auth account="…"` resolves a stable slot from a hash of the account name —
+   and `pcw auth login` resolves the *same* slot, so the login and the later runs agree. Adding an
+   endpoint reshuffles accounts and costs them a re-login; `pcw auth status` shows who went
+   signed-out.
+2. **One run per Chrome at a time**, held by a permit for the length of the run. Not throttling: a
+   named page is a real tab, so two runs in one browser would drive the same tab and clobber each
+   other. The permit makes that unrepresentable, and the pool size becomes the parallelism.
+
+Each slot also gets its own `--browser` bookkeeping name (`pacewright`, `pacewright-1`, …). That one
+is not cosmetic: chrome-agent caches a page's CDP target id under the browser name, so N Chromes
+sharing a name look up each other's tabs and every run dies with `Target … not found in /json/list`.
+Slot 0 keeps the bare name, so an existing single-Chrome `sessions.json` stays valid.
+
+Proven live, not just in unit tests:
+
+```bash
+./packaging/chrome-pool.sh up 3
+cargo test -p pacewright-adapter-recipe --test pool_live -- --ignored --nocapture
+```
+
 ## Install as a background service (macOS launchd)
 
 ```bash

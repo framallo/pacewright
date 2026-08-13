@@ -2,15 +2,33 @@
 # Every (platform, action) that needs throttling gets a limit key.
 # Keys not listed here are unrestricted.
 
-# The always-on Chrome that pacewright ATTACHES to, started by the launchd job
-# (packaging/com.paperclip.pacewright-chrome.plist). pacewright never launches a browser itself:
-# a CDP-launched browser is a bot signal, so a social network walls the profile and revokes `li_at`, and
-# Google refuses sign-in on it outright. Sites are separated by named TABS in this one Chrome.
+# The Chrome(s) pacewright ATTACHES to. pacewright never launches a browser itself.
 #
-# Must match the job's --remote-debugging-port. Omit the section for the default below.
-# "auto" lets chrome-agent discover the endpoint itself. PACEWRIGHT_CHROME_CONNECT overrides both.
+# ONE Chrome — the default, and the safe one for signed-in sites. Started by the launchd job
+# (packaging/com.paperclip.pacewright-chrome.plist). A CDP-launched browser is a bot signal, so a
+# social network walls the profile and revokes `li_at`, and Google refuses sign-in on it outright.
+# Sites are separated by named TABS in this one Chrome. Must match the job's
+# --remote-debugging-port. Omit the section for the default below. "auto" lets chrome-agent discover
+# the endpoint itself. PACEWRIGHT_CHROME_CONNECT overrides both (comma-separated for a pool).
 [browser]
 connect = "http://127.0.0.1:9222"
+
+# MANY Chromes — for throughput, when the target is not adversarial and the work is parallel
+# (filling merchant invoicing portals, say). Same key, a list instead of a string, so the one-Chrome
+# config above keeps working byte for byte:
+#
+#   ./packaging/chrome-pool.sh up 4
+#   connect = ["http://127.0.0.1:9222", "http://127.0.0.1:9223",
+#              "http://127.0.0.1:9224", "http://127.0.0.1:9225"]
+#
+# The list length is also the parallelism: ONE run per Chrome at a time. That is not throttling —
+# a named page is a real tab, so two runs in one browser would drive the same tab and clobber each
+# other. The permit makes that unrepresentable.
+#
+# An `auth account="…"` recipe always lands on the SAME Chrome (a stable hash of the account name),
+# because its session lives where the human signed in and cannot move. `pcw auth login` resolves the
+# same slot, so the login and the runs agree. Adding an endpoint reshuffles accounts and costs those
+# accounts a re-login — `pcw auth status` shows who went signed-out.
 
 [limits."dummy.capped"]
 daily_cap = 3

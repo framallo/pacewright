@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-/// Where the operator's always-on Chrome listens for CDP. pacewright **attaches** to that Chrome
-/// (started by launchd with `--remote-debugging-port`, never by chrome-agent) and separates sites
-/// by named *tabs* rather than by browser profiles.
+/// Where the always-on Chrome listens for CDP. pacewright **attaches** to that Chrome (started by
+/// launchd with `--remote-debugging-port`, never by chrome-agent) and separates sites by named
+/// *tabs* rather than by browser profiles.
 ///
 /// Launching is what breaks auth: a CDP-launched browser is a bot signal, so Acme walls the
 /// profile and revokes `li_at`, and Google refuses sign-in outright. See
@@ -33,6 +33,55 @@ pub fn default_connect_endpoint() -> Option<String> {
         std::env::var("PACEWRIGHT_CHROME_CONNECT")
             .unwrap_or_else(|_| DEFAULT_CHROME_CONNECT.to_string()),
     )
+}
+
+/// Every Chrome pacewright may attach to, in order. **A pool of one is the original behavior**, so
+/// nothing branches on "single vs multi": the single-Chrome operator just has a one-element pool.
+///
+/// Two use cases share this list and pull in opposite directions:
+///
+/// - **One shared Chrome** (the operator's real, logged-in browser). Safety comes from *not*
+///   looking like a bot: one fingerprint, one session, human pacing. More browsers would be more
+///   fingerprints to keep consistent, for no gain.
+/// - **Many Chromes** (throughput). Filling merchant invoicing portals is not adversarial, and the
+///   work is embarrassingly parallel: N browsers is N times the invoices per hour.
+///
+/// `PACEWRIGHT_CHROME_CONNECT` accepts a comma-separated list for the second case.
+pub fn default_connect_pool() -> Vec<String> {
+    match std::env::var("PACEWRIGHT_CHROME_CONNECT") {
+        Ok(v) => v
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => vec![DEFAULT_CHROME_CONNECT.to_string()],
+    }
+}
+
+/// Which pool slot an **account** belongs to, by a stable hash of its name.
+///
+/// This is the load-bearing rule of a multi-Chrome pool: a signed-in session lives in the one
+/// Chrome where the human signed in, and it cannot be moved. So `pcw auth login <account>` and
+/// every later run of that account MUST resolve to the same slot, or the run opens a logged-out
+/// tab in a different browser and the recipe dies at the auth wall.
+///
+/// A hash, not a counter: it needs no persistence and survives a daemon restart. Adding an
+/// endpoint to the pool DOES reshuffle accounts (and costs those accounts a re-login) — the
+/// alternative is a stored assignment table, which is more machinery than a rare, visible
+/// migration deserves. `pcw auth status` shows who is signed out, so the cost is legible.
+pub fn slot_for_account(account: &str, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    // FNV-1a: two lines, stable across processes and releases. `DefaultHasher` guarantees
+    // neither, and an assignment that moves between runs is exactly the bug this prevents.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in account.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h % len as u64) as usize
 }
 
 /// Rewrite chrome-agent's "Could not resolve CDP WebSocket from …" into something that names the
@@ -325,6 +374,42 @@ mod connect_tests {
     /// The verbatim message chrome-agent emits when the endpoint is dead (captured live
     /// 2026-07-16 against a port with nothing listening).
     const REAL_MSG: &str = "Could not resolve CDP WebSocket from http://127.0.0.1:9999. If Chrome uses built-in remote debugging, run `chrome-agent --connect` without a URL for auto-discovery.";
+
+    #[test]
+    fn a_pool_of_one_puts_every_account_on_the_only_chrome() {
+        // The original single-Chrome behavior IS a pool of one, so no caller needs a mode flag.
+        for a in ["acme", "globex", "", "a-very-long-account-name"] {
+            assert_eq!(slot_for_account(a, 1), 0);
+        }
+        // A pool declared empty must not panic on a modulo by zero.
+        assert_eq!(slot_for_account("acme", 0), 0);
+    }
+
+    #[test]
+    fn an_account_always_lands_on_the_same_chrome() {
+        // The load-bearing property: `pcw auth login acme` signs in on ONE Chrome, and every
+        // later run of `acme` must attach to that same one or it hits a logged-out tab.
+        for len in [2usize, 3, 4, 8] {
+            let first = slot_for_account("acme", len);
+            for _ in 0..100 {
+                assert_eq!(slot_for_account("acme", len), first, "pool of {len}");
+            }
+            assert!(first < len, "slot {first} outside a pool of {len}");
+        }
+    }
+
+    #[test]
+    fn different_accounts_spread_across_the_pool() {
+        // Not a hash-quality claim — just that eight accounts over four Chromes use more than one
+        // of them. A hash that sent everything to slot 0 would pass every test above and defeat
+        // the entire point of the pool.
+        let used: std::collections::BTreeSet<usize> =
+            ["acme", "globex", "initech", "umbrella", "soylent", "tyrell", "wayne", "stark"]
+                .iter()
+                .map(|a| slot_for_account(a, 4))
+                .collect();
+        assert!(used.len() > 1, "every account landed on the same Chrome: {used:?}");
+    }
 
     #[test]
     fn connect_failure_names_the_cause_and_the_fix() {

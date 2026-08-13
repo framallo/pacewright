@@ -1,6 +1,7 @@
 use anyhow::Result;
 use pacewright_adapter_recipe::{
-    schedule, AuthManager, NativeLoginLauncher, NativeRecipeRunner, RecipeRegistry, RecipeRunner,
+    schedule, AuthManager, ChromePool, NativeLoginLauncher, NativeRecipeRunner, RecipeRegistry,
+    RecipeRunner,
 };
 use pacewright_adapter_agent::{AnthropicCompleter, ClaudeSolver};
 use pacewright_core::clock::SystemClock;
@@ -57,18 +58,27 @@ async fn main() -> Result<()> {
     // `build_adapter_registry` (shared with `RecipeReload`) also registers the built-in DummyAdapter.
     let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
     // Both chrome-agent callers (recipe runner + login launcher) link the vendored crate in-process
-    // and must attach to the SAME always-on Chrome, so `browser.connect` is threaded to each.
-    // Cloned up front because `cfg` moves into the engine before the launcher is built.
-    let browser_connect = cfg.browser_connect.clone();
+    // and must resolve an account to the SAME Chrome, so they share ONE pool rather than each
+    // building its own from config. Sharing is not a micro-optimization: a session cannot move
+    // between browsers, so a login and a run that disagreed on the slot would leave every task for
+    // that account failing at an auth wall, and the symptom would look like a broken recipe.
+    //
+    // `browser.connect` takes one endpoint or a list. One is the original behavior — the operator's
+    // single always-on Chrome — and a list is throughput: the pool size is how many runs go at once.
+    let pool = ChromePool::new(cfg.browser_pool.clone());
+    tracing::info!(
+        "chrome pool: {} instance(s) — {}",
+        pool.len(),
+        pool.endpoints().collect::<Vec<_>>().join(", ")
+    );
     // Claude-vision solver for recipe `solve` steps (captcha workaround). Pays via the same Max/Pro
     // OAuth as the `agent` step; a recipe without a `solve` step never invokes it.
     let solver = Arc::new(ClaudeSolver::new(Arc::new(AnthropicCompleter::new())));
-    let recipe_runner: Arc<dyn RecipeRunner> = Arc::new(match &cfg.browser_connect {
-        Some(endpoint) => NativeRecipeRunner::new()
-            .connect(endpoint)
+    let recipe_runner: Arc<dyn RecipeRunner> = Arc::new(
+        NativeRecipeRunner::new()
+            .pool(pool.clone())
             .with_solver(solver.clone()),
-        None => NativeRecipeRunner::new().with_solver(solver.clone()),
-    });
+    );
     let clock: Arc<dyn pacewright_core::clock::Clock> = Arc::new(SystemClock);
     let reg = build_adapter_registry(&recipe_registry, &recipe_runner, &store, &clock);
     if recipe_registry.is_empty() {
@@ -120,10 +130,9 @@ async fn main() -> Result<()> {
     let auth = Arc::new(AuthManager::new(
         recipe_registry.clone(),
         recipe_runner.clone(),
-        Arc::new(match &browser_connect {
-            Some(endpoint) => NativeLoginLauncher::new().connect(endpoint),
-            None => NativeLoginLauncher::new(),
-        }),
+        // The SAME pool the runner got: the login must open on the Chrome that will later run the
+        // account, or the human signs in on the wrong browser and every run of it hits an auth wall.
+        Arc::new(NativeLoginLauncher::new().pool(pool)),
     ));
 
     let engine = Arc::new(Mutex::new(engine));

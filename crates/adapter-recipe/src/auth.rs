@@ -106,8 +106,17 @@ impl LoginLauncher for CliLoginLauncher {
 /// In-process login launcher: links the vendored chrome-agent and attaches directly, so `pcw auth
 /// login` needs no `chrome-agent` binary. Attaches to the always-on Chrome, navigates the account's
 /// tab to the login URL, and raises the window. Same !Send bridge as [`NativeRecipeRunner`].
+///
+/// With a pool of several Chromes it opens the login on **the account's own slot**, resolved by the
+/// same function the runner uses. That agreement is the whole correctness of a multi-Chrome pool: a
+/// session cannot move between browsers, so signing in on the wrong one leaves every later run of
+/// that account hitting an auth wall — and the failure looks like a broken recipe, not a misrouted
+/// login.
+///
+/// It takes no permit: a login hands the browser to a human, and holding a slot for as long as
+/// someone takes to type their password would stall every queued run.
 pub struct NativeLoginLauncher {
-    connect: String,
+    pool: crate::pool::ChromePool,
     browser_name: String,
     stealth: bool,
 }
@@ -121,13 +130,19 @@ impl Default for NativeLoginLauncher {
 impl NativeLoginLauncher {
     pub fn new() -> Self {
         Self {
-            connect: default_connect_endpoint().unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string()),
+            pool: crate::pool::ChromePool::new(pacewright_core::browser::default_connect_pool()),
             browser_name: "pacewright".to_string(),
             stealth: true,
         }
     }
+    /// Sign in on exactly one Chrome: a pool of one, which is the original behavior.
     pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
-        self.connect = endpoint.into();
+        self.pool = crate::pool::ChromePool::single(endpoint);
+        self
+    }
+    /// Share the runner's pool, so a login lands on the Chrome that will run the account.
+    pub fn pool(mut self, pool: crate::pool::ChromePool) -> Self {
+        self.pool = pool;
         self
     }
 }
@@ -135,7 +150,9 @@ impl NativeLoginLauncher {
 #[async_trait]
 impl LoginLauncher for NativeLoginLauncher {
     async fn open(&self, account: &str, login_url: &str) -> Result<(), String> {
-        let connect = self.connect.clone();
+        // The account's own slot, not "the" Chrome: with a pool this is what keeps the login and
+        // the later runs on the same browser. No permit — a human is about to type.
+        let connect = self.pool.endpoint_of(Some(account)).to_string();
         let browser = self.browser_name.clone();
         let page = account.to_string();
         let url = login_url.to_string();
