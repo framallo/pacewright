@@ -1,8 +1,8 @@
 use anyhow::Result;
 use pacewright_adapter_recipe::{
-    schedule, AuthManager, CliLoginLauncher, CliRecipeRunner, RecipeRegistry, RecipeRunner,
+    schedule, AuthManager, NativeLoginLauncher, NativeRecipeRunner, RecipeRegistry, RecipeRunner,
 };
-use pacewright_browser::CliBrowser;
+use pacewright_adapter_agent::{AnthropicCompleter, ClaudeSolver};
 use pacewright_core::clock::SystemClock;
 use pacewright_core::config::Config;
 use pacewright_core::engine::Engine;
@@ -56,13 +56,18 @@ async fn main() -> Result<()> {
     // live in `adapter-acme` is now a gitignored testbed recipe `acme/scrape_profile`.
     // `build_adapter_registry` (shared with `RecipeReload`) also registers the built-in DummyAdapter.
     let recipe_registry = Arc::new(RecipeRegistry::load_dir(&recipes_dir()));
-    // All three chrome-agent callers (runner, login launcher, CliBrowser) must attach to the SAME
-    // always-on Chrome, so `browser.connect` is threaded to each rather than defaulted per-caller.
+    // Both chrome-agent callers (recipe runner + login launcher) link the vendored crate in-process
+    // and must attach to the SAME always-on Chrome, so `browser.connect` is threaded to each.
     // Cloned up front because `cfg` moves into the engine before the launcher is built.
     let browser_connect = cfg.browser_connect.clone();
+    // Claude-vision solver for recipe `solve` steps (captcha workaround). Pays via the same Max/Pro
+    // OAuth as the `agent` step; a recipe without a `solve` step never invokes it.
+    let solver = Arc::new(ClaudeSolver::new(Arc::new(AnthropicCompleter::new())));
     let recipe_runner: Arc<dyn RecipeRunner> = Arc::new(match &cfg.browser_connect {
-        Some(endpoint) => CliRecipeRunner::new().connect(endpoint),
-        None => CliRecipeRunner::new(),
+        Some(endpoint) => NativeRecipeRunner::new()
+            .connect(endpoint)
+            .with_solver(solver.clone()),
+        None => NativeRecipeRunner::new().with_solver(solver.clone()),
     });
     let clock: Arc<dyn pacewright_core::clock::Clock> = Arc::new(SystemClock);
     let reg = build_adapter_registry(&recipe_registry, &recipe_runner, &store, &clock);
@@ -73,32 +78,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Preflight: recipes + pipelines shell out to `chrome-agent recipe run`. If the installed
-    // chrome-agent lacks the recipe subcommand (plain upstream, or a build from a branch without the
-    // engine), every recipe task would fail cryptically — warn once, loudly, at boot instead.
-    if !recipe_registry.is_empty() {
-        let bin = pacewright_adapter_recipe::chrome_agent_bin();
-        if pacewright_adapter_recipe::recipe_subcommand_available(&bin) {
-            tracing::info!("preflight: `{bin} recipe` available — recipes/pipelines can run");
-        } else {
-            tracing::error!(
-                "preflight: `{bin} recipe` is MISSING — every recipe/pipeline task will fail. \
-                 Install a chrome-agent built with the recipe engine (framallo/chrome-agent `main`); \
-                 browser-free adapters (agent/claude_cli/data/http/pipeline) still work."
-            );
-        }
-    }
-
-    // Lazy: nothing touches Chrome until a task actually drives the browser, so a daemon on a
-    // machine without `chrome-agent` — or with the always-on Chrome down — still boots and runs
-    // browser-free adapters. Browser tasks then fail Terminal with a clear message.
-    //
-    // Read the attach endpoint before `cfg` moves into the engine.
-    let browser = Arc::new(match &cfg.browser_connect {
-        Some(endpoint) => CliBrowser::new().connect(endpoint),
-        None => CliBrowser::new(),
-    });
-
     let engine = Engine::new(
         store,
         reg,
@@ -106,7 +85,6 @@ async fn main() -> Result<()> {
         clock,
         Arc::new(SeededRng::new(rand_seed())),
     )
-    .with_browser(browser)
     .with_notifier(Arc::new(pacewright_daemon::notify::OutboxNotifier::new()));
     engine.recover_on_boot()?;
 
@@ -137,14 +115,14 @@ async fn main() -> Result<()> {
 
     // Auth: account recipes (`accounts/*`) establish + check the sessions authed recipes reuse.
     // The check runs the account recipe headless in its profile (same `recipe_runner`); login opens
-    // a headed window via chrome-agent. Account recipes aren't task adapters, so they never entered
-    // the `RecipeAdapter` loop above.
+    // a headed window in the attached Chrome. Both link the vendored chrome-agent in-process — no
+    // binary. Account recipes aren't task adapters, so they never entered the `RecipeAdapter` loop.
     let auth = Arc::new(AuthManager::new(
         recipe_registry.clone(),
         recipe_runner.clone(),
         Arc::new(match &browser_connect {
-            Some(endpoint) => CliLoginLauncher::new().connect(endpoint),
-            None => CliLoginLauncher::new(),
+            Some(endpoint) => NativeLoginLauncher::new().connect(endpoint),
+            None => NativeLoginLauncher::new(),
         }),
     ));
 

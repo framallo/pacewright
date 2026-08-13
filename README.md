@@ -41,9 +41,10 @@ The engine is **platform-agnostic**. Adapters implement one trait (`execute(acti
 | `pacewright-cli` | `pacewright` (alias `pcw`) — client subcommands + live ratatui TUI |
 | `pacewright-mcp` | `pacewright-mcp` — stdio MCP server bridging an MCP client (Claude) to the daemon socket |
 | `pacewright-adapter-dummy` | reference `Adapter` (`echo`/`slow`/`flaky`/`always_fail`/`rate_heavy`/`panic`) for testing the engine |
-| `pacewright-browser` | `CliBrowser` — the real `BrowserHandle`, drives the attached Chrome via the `chrome-agent` CLI |
-| `pacewright-adapter-recipe` | KDL recipe engine: `RecipeAdapter`/`RecipeRegistry`/`RecipeRunner`, the declarative scheduler, and account auth |
-| `pacewright-adapter-agent` | Claude adapters: `agent`/`claude` (Messages API) + `claude_cli` (`claude -p`) + the Claude Max/Pro OAuth client |
+| `pacewright-chrome` | vendored `chrome-agent` (MIT): CDP client + KDL recipe engine (incl. the `solve` captcha step) — driven **in-process** by `pacewright-adapter-recipe`, so the daemon needs no external `chrome-agent` binary |
+| `pacewright-browser` | legacy `CliBrowser` `BrowserHandle` (shelled the `chrome-agent` CLI); superseded by in-process `pacewright-chrome`, kept for reference/tests |
+| `pacewright-adapter-recipe` | KDL recipe engine glue: `RecipeAdapter`/`RecipeRegistry`, `NativeRecipeRunner` (in-process, attaches to the always-on Chrome) + `NativeLoginLauncher`, the declarative scheduler, and account auth |
+| `pacewright-adapter-agent` | Claude adapters: `agent`/`claude` (Messages API) + `claude_cli` (`claude -p`) + the Claude Max/Pro OAuth client + `ClaudeSolver` (Claude-vision captcha solver behind the recipe `solve` step) |
 
 ## Build
 

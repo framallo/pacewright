@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 pacewright-core = { path = "../core" }
+pacewright-chrome = { path = "../chrome" }
 serde_json.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true }
