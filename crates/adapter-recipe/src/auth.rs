@@ -103,6 +103,73 @@ impl LoginLauncher for CliLoginLauncher {
     }
 }
 
+/// In-process login launcher: links the vendored chrome-agent and attaches directly, so `pcw auth
+/// login` needs no `chrome-agent` binary. Attaches to the always-on Chrome, navigates the account's
+/// tab to the login URL, and raises the window. Same !Send bridge as [`NativeRecipeRunner`].
+pub struct NativeLoginLauncher {
+    connect: String,
+    browser_name: String,
+    stealth: bool,
+}
+
+impl Default for NativeLoginLauncher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeLoginLauncher {
+    pub fn new() -> Self {
+        Self {
+            connect: default_connect_endpoint().unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string()),
+            browser_name: "pacewright".to_string(),
+            stealth: true,
+        }
+    }
+    pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
+        self.connect = endpoint.into();
+        self
+    }
+}
+
+#[async_trait]
+impl LoginLauncher for NativeLoginLauncher {
+    async fn open(&self, account: &str, login_url: &str) -> Result<(), String> {
+        let connect = self.connect.clone();
+        let browser = self.browser_name.clone();
+        let page = account.to_string();
+        let url = login_url.to_string();
+        let stealth = self.stealth;
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(format!("login runtime: {e}")));
+                    return;
+                }
+            };
+            let local = tokio::task::LocalSet::new();
+            let res = local.block_on(&rt, async move {
+                let at = pacewright_chrome::api::RecipeAttach {
+                    connect: &connect,
+                    browser: &browser,
+                    page: &page,
+                    stealth,
+                    timeout_secs: 30,
+                    activate: true,
+                };
+                pacewright_chrome::api::open_page(&at, &url)
+                    .await
+                    .map_err(|e| e.to_string())
+            });
+            let _ = tx.send(res);
+        });
+        rx.await
+            .map_err(|_| "login worker thread ended without a result".to_string())?
+    }
+}
+
 /// Cached signed-in state for one account. `signed_in = None` = unknown (never checked, or the check
 /// was unreachable). `logging_in` = an interactive login is in flight.
 #[derive(Clone, Debug, Default, PartialEq)]

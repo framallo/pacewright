@@ -1,5 +1,41 @@
 # pacewright — handoff
 
+## ⛔ START HERE — in-process chrome-agent + captcha `solve` step (2026-08-12)
+
+Follow-on to the sections below. pacewright no longer shells the `chrome-agent` **binary** on the
+recipe/login path: the fork is **vendored** into the workspace as `crates/chrome`
+(`pacewright-chrome`, MIT) and driven **in-process**. The recipe engine also gained a Claude-vision
+`solve` step to work around captchas. **442 tests pass, clippy `-D warnings` clean.** Not committed.
+
+### What changed
+- **Vendored engine (`pacewright-chrome`).** The whole `chrome-agent` (CDP client + KDL recipe
+  engine) now lives in `crates/chrome`. `crates/chrome/src/api.rs` adds two in-process entry points:
+  `run_recipe_attached` (attach → run recipe → return the JSON `Outcome`, no stdout) and `open_page`
+  (attach → navigate → raise a login window).
+- **`NativeRecipeRunner` + `NativeLoginLauncher`** (`adapter-recipe`) replace the `Cli*` shims in the
+  daemon. The engine holds `Rc<CdpClient>` (its future is `!Send`), so each runs the recipe on a
+  dedicated current-thread runtime + `LocalSet` and returns only the `Send` result over a oneshot —
+  the standard `!Send` bridge. `main.rs` no longer builds `CliBrowser`/preflight; the boot preflight
+  (checked for the `chrome-agent recipe` subcommand) is gone.
+- **Captcha `solve` step.** New `Step::Solve { prompt, locator, key? }`: screenshots the page, hands
+  the PNG + prompt to an injected `Solver` (a boxed-future trait in `recipe::engine`, no async_trait
+  dep), then types the answer. `adapter-agent::ClaudeSolver` implements it via the vision-extended
+  `AnthropicCompleter` (`CompletionRequest.images`), paid by the Max/Pro OAuth. The daemon wires it
+  with `NativeRecipeRunner::with_solver(...)`. No solver configured → the step fails terminal.
+- **Form fill** needs no new engine work — it's `fill`/`insert`/`select`/`click` steps. See the
+  worked example `recipes/examples/login-with-captcha.kdl` (fill + `solve` + submit).
+
+### Verified
+- `cargo test --workspace` (442 passed) + `cargo clippy --workspace --all-targets -D warnings` clean.
+- `recipes/examples/login-with-captcha.kdl` parses + validates offline via `pcw schedule check`
+  (the vendored `RecipeRegistry::load_dir`).
+- **Not exercised live:** the actual captcha vision round-trip and login window need a real Chrome +
+  Claude call on Federico's machine — the plumbing is unit-tested (engine dispatch via a `FakeSolver`,
+  `ClaudeSolver` request shaping), the live solve is not.
+- `Cli*` (`CliRecipeRunner`/`CliLoginLauncher`/`CliBrowser`) are retired from the daemon but kept as
+  exported fallbacks (still used by `server.rs` tests); the `pacewright-browser` crate is unused by
+  the daemon now.
+
 ## ⛔ START HERE — non-browser jobs + JSON datastore + Claude Max/Pro OAuth (2026-08-10)
 
 Follow-on to the outreach fleet migration below. The engine gained a JSON datastore and non-browser

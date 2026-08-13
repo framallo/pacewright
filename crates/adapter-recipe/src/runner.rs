@@ -13,6 +13,7 @@ use pacewright_core::model::AdapterError;
 use pacewright_core::secrets::SecretStore;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// `~/.pacewright/secrets.json` — the OAuth secret store (mode 0600).
 fn secrets_path() -> PathBuf {
@@ -283,6 +284,128 @@ fn is_stale_outcome(outcome: &Result<Value, AdapterError>) -> bool {
     match outcome {
         Err(e) => pacewright_core::browser::is_stale_page_target(&e.to_string()),
         Ok(_) => false,
+    }
+}
+
+/// In-process recipe runner: links the vendored chrome-agent (`pacewright_chrome`) and drives the
+/// attached Chrome directly over CDP — no `chrome-agent` subprocess, PATH, or symlink. Same behavior
+/// contract as [`CliRecipeRunner`] (OAuth-var injection, `{ok,result,unexpected}` envelope, error
+/// classification), just linked instead of shelled.
+///
+/// The recipe engine holds `Rc<CdpClient>`, so its future is `!Send` and can't run on pacewright's
+/// spawned (Send) task. We isolate it on a dedicated current-thread runtime + `LocalSet` and return
+/// only the Send result (`Value`/`AdapterError`) over a oneshot — the standard !Send bridge.
+pub struct NativeRecipeRunner {
+    connect: Option<String>,
+    browser_name: String,
+    page_name: String,
+    stealth: bool,
+    timeout_secs: u64,
+    solver: Option<Arc<dyn pacewright_chrome::recipe::engine::Solver + Send + Sync>>,
+}
+
+impl Default for NativeRecipeRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativeRecipeRunner {
+    pub fn new() -> Self {
+        Self {
+            connect: default_connect_endpoint(),
+            browser_name: "pacewright".to_string(),
+            page_name: "pacewright".to_string(),
+            stealth: true,
+            timeout_secs: 180,
+            solver: None,
+        }
+    }
+    pub fn connect(mut self, endpoint: impl Into<String>) -> Self {
+        self.connect = Some(endpoint.into());
+        self
+    }
+    pub fn timeout_secs(mut self, s: u64) -> Self {
+        self.timeout_secs = s;
+        self
+    }
+    /// Wire a challenge solver (pacewright passes a Claude-vision solver), enabling recipe `solve`
+    /// steps to work around captchas. Without it, a `solve` step fails terminal.
+    pub fn with_solver(
+        mut self,
+        solver: Arc<dyn pacewright_chrome::recipe::engine::Solver + Send + Sync>,
+    ) -> Self {
+        self.solver = Some(solver);
+        self
+    }
+}
+
+#[async_trait]
+impl RecipeRunner for NativeRecipeRunner {
+    async fn run(
+        &self,
+        recipe_path: &Path,
+        vars_json: &str,
+        opts: &RunOpts,
+    ) -> Result<Value, AdapterError> {
+        // Inject OAuth secrets exactly as the CLI path did, then resolve to a var map — all on the
+        // caller thread (Send), before crossing to the recipe worker.
+        let src = std::fs::read_to_string(recipe_path).unwrap_or_default();
+        let store = SecretStore::load(secrets_path()).unwrap_or_default();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let injected = inject_oauth_vars(&src, vars_json, &store, now_ms);
+        let vars = pacewright_chrome::api::parse_vars(&[], Some(&injected))
+            .map_err(|e| AdapterError::Terminal(format!("recipe vars: {e}")))?;
+
+        let connect = self
+            .connect
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CHROME_CONNECT.to_string());
+        let browser_name = self.browser_name.clone();
+        let page = opts.account.clone().unwrap_or_else(|| self.page_name.clone());
+        let stealth = self.stealth;
+        let timeout_secs = self.timeout_secs;
+        let activate = opts.foreground;
+        let path = recipe_path.to_string_lossy().to_string();
+        let solver = self.solver.clone();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Value, AdapterError>>();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(AdapterError::Terminal(format!("recipe runtime: {e}"))));
+                    return;
+                }
+            };
+            let local = tokio::task::LocalSet::new();
+            let res = local.block_on(&rt, async move {
+                // Coerce the Send+Sync Arc (needed to cross the thread) down to the bare
+                // `&dyn Solver` the engine expects; dropping the auto-trait bounds is a valid unsize.
+                let solver_ref: Option<&dyn pacewright_chrome::recipe::engine::Solver> =
+                    match &solver {
+                        Some(s) => Some(&**s),
+                        None => None,
+                    };
+                let at = pacewright_chrome::api::RecipeAttach {
+                    connect: &connect,
+                    browser: &browser_name,
+                    page: &page,
+                    stealth,
+                    timeout_secs,
+                    activate,
+                };
+                match pacewright_chrome::api::run_recipe_attached(&at, &path, vars, solver_ref).await {
+                    Ok(o) => Ok(serde_json::json!({
+                        "ok": true, "result": o.result, "unexpected": o.unexpected,
+                    })),
+                    Err(e) => Err(classify(&e.to_string())),
+                }
+            });
+            let _ = tx.send(res);
+        });
+        rx.await
+            .map_err(|_| AdapterError::Terminal("recipe worker thread ended without a result".into()))?
     }
 }
 

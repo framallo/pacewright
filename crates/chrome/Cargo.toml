@@ -1,0 +1,37 @@
+[package]
+name = "pacewright-chrome"
+version = "0.5.0"
+edition = "2024"
+license = "MIT"
+description = "Vendored chrome-agent: CDP browser driver + KDL recipe engine, linked in-process by pacewright (no external chrome-agent binary)."
+
+# Vendored from framallo/chrome-agent (MIT). Kept as its own crate so pacewright links the CDP driver
+# + recipe engine directly instead of shelling `chrome-agent recipe run`. Lib-only (the CLI bin is
+# dropped). `api` on by default so recipe `request`/`api` steps can reach real HTTPS.
+[lib]
+name = "pacewright_chrome"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "io-std", "signal", "process"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+dirs = "6"
+thiserror = "2"
+libc = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+kdl = "6"
+
+[features]
+default = ["api"]
+api = ["ureq/rustls"]
+
+# Vendored third-party code carries its own lint policy; don't subject it to pacewright's
+# pedantic/nursery `-D warnings` gate. Build/tests still enforce correctness.
+[lints.clippy]
+all = "allow"
+pedantic = "allow"
+nursery = "allow"

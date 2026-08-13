@@ -10,6 +10,8 @@
 //! Claude touchpoint and uses your Claude Code subscription login directly.
 pub mod anthropic_oauth;
 pub mod claude_cli;
+pub mod solver;
+pub use solver::ClaudeSolver;
 use async_trait::async_trait;
 use pacewright_core::adapter::{Adapter, RunCtx};
 use pacewright_core::model::{ActionSpec, AdapterError};
@@ -28,6 +30,9 @@ pub struct CompletionRequest {
     pub max_tokens: u32,
     pub system: Option<String>,
     pub prompt: String,
+    /// Base64-encoded PNG images sent as image content blocks before the prompt text (vision).
+    /// Empty for a plain text ask. Used by the captcha solver to show Claude the challenge.
+    pub images: Vec<String>,
 }
 
 /// The one thing the adapter needs from the outside world: turn a prompt into text. Split behind a
@@ -231,6 +236,7 @@ impl AgentAdapter {
                 .map(String::from)
                 .or(system),
             prompt,
+            images: Vec::new(),
         }
     }
 }
@@ -390,10 +396,28 @@ impl Completer for AnthropicCompleter {
             ));
         };
 
+        // Text-only → a plain string content; with images → image blocks first, then the prompt text
+        // (Anthropic vision message shape). PNG is what the recipe engine's `screenshot()` produces.
+        let content = if req.images.is_empty() {
+            json!(req.prompt)
+        } else {
+            let mut blocks: Vec<Value> = req
+                .images
+                .iter()
+                .map(|b64| {
+                    json!({
+                        "type": "image",
+                        "source": { "type": "base64", "media_type": "image/png", "data": b64 },
+                    })
+                })
+                .collect();
+            blocks.push(json!({ "type": "text", "text": req.prompt }));
+            json!(blocks)
+        };
         let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_tokens,
-            "messages": [{ "role": "user", "content": req.prompt }],
+            "messages": [{ "role": "user", "content": content }],
         });
         if use_oauth {
             // Subscription inference REQUIRES the Claude Code identity as the first system block.
