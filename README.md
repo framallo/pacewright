@@ -288,6 +288,7 @@ Intentionally deferred to later milestones, not oversights:
 
 ## Design docs
 
+- Recipe authoring (KDL grammar): [`docs/RECIPES.md`](docs/RECIPES.md)
 - Spec: [`docs/specs/2026-07-07-core-engine-design.md`](docs/specs/2026-07-07-core-engine-design.md)
 - M1 implementation plan: [`docs/plans/2026-07-07-m1-core-engine.md`](docs/plans/2026-07-07-m1-core-engine.md)
 

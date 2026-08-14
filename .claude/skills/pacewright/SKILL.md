@@ -48,11 +48,22 @@ it yourself unless they ask.
 
 ## Recipes
 
-Recipes are KDL files in `~/.pacewright/recipes/` (installed via `pcw recipe add owner/repo[#subdir]`,
-or copied in). After adding/editing recipe files, **`recipe_reload`** (tool) or `pcw recipe reload`
-makes them runnable **without restarting the daemon** (`pcw recipe add` reloads automatically).
-Caveat: account recipes (`accounts/*`) and a new daemon *binary* still need a restart. Example recipes
-live in the gitignored `recipes/` dir at the repo root (and in the runtime `~/.pacewright/recipes/`).
+Recipes are declarative KDL files in `~/.pacewright/recipes/`, run **in-process** against the
+attached Chrome (the vendored `pacewright-chrome` engine — no `chrome-agent` binary). Install with
+`pcw recipe add <owner>/<repo>[@ref][#subdir]`, or copy files in. After adding/editing, **`recipe_reload`**
+(tool) or `pcw recipe reload` makes them runnable **without restarting the daemon** (`pcw recipe add`
+reloads automatically). Caveat: account recipes (`accounts/*`) and a new daemon *binary* still need a
+restart.
+
+- **Authoring** — the full KDL grammar (verbs, locators, vars, limit-keys, auth, output) is in
+  [`docs/RECIPES.md`](../../../docs/RECIPES.md). Recipe steps cover navigation, `fill`/`insert`/`select`/
+  `click`/`upload` (**form fill**), `extract`, `expect` tripwires, `request`/`api` (HTTP), and **`solve`**
+  (Claude-vision **captcha** workaround: screenshots the challenge, asks Claude to read it, types the
+  answer — the daemon wires the solver; paid by the Max/Pro login).
+- **Private recipe repo** — `pcw recipe add` shells `git clone` over HTTPS, so a **private** repo works
+  through git's own auth. One-time: `git config --global url."git@github.com:".insteadOf "https://github.com/"`,
+  then `pcw recipe add <owner>/pacewright-recipes`. Provenance (repo + pinned SHA) is recorded.
+- Example recipes live in the gitignored `recipes/` dir at the repo root (and in `~/.pacewright/recipes/`).
 
 ## Built-in adapters (no recipe needed)
 
@@ -115,19 +126,18 @@ once: `pcw anthropic login [--paste]` (PKCE OAuth to claude.ai; tokens auto-refr
 Recipes with `auth account="…"` need a signed-in browser session first:
 
 - `auth_list` — each account's signed-in / out / unknown status and which recipes use it.
-- `auth_login { account }` — pops a **headed** Chrome (chrome-agent-launched) and a human signs in by
-  hand. `auth_login_all` opens one window per signed-out account.
+- `auth_login { account }` — navigates the account's tab in the **attached** always-on Chrome to the
+  recipe's login URL and raises the window (in-process via `NativeLoginLauncher` — it no longer
+  *launches* a browser, and there's no `chrome-agent` binary). A human signs in by hand.
+  `auth_login_all` opens one per signed-out account.
 - `auth_recheck { account? }` — re-run the headless signed-in check and refresh the cached status.
 
 Never enter the user's credentials yourself — `auth_login` is human-in-the-loop by design.
 
-**⚠ Google accounts can't use `auth_login`.** `auth_login` launches a chrome-agent/CDP
-automation browser, and **Google blocks sign-in on it** ("this browser or app may not be secure").
-Most sites tolerate it; Google does not. So for a Google account, do NOT run
-`auth_login` / `pcw auth login` — it just gets stuck at "logging in…".
-Instead use the CDP-**attach** workaround: launch a *normal* Chrome with a dedicated `--user-data-dir`
-+ `--remote-debugging-port=9222`, have the user sign in by hand, then drive it with
-`chrome-agent --connect auto` (attach, not launch). This path is outside pacewright's `auth` system.
+**Google accounts:** because pacewright now attaches to your real, everyday always-on Chrome (not a
+CDP-*launched* throwaway), the old "Google blocks a launched browser" trap is mostly gone — the raised
+tab is your normal Chrome. Still sign in by hand in that window; if Google flags the automated session,
+finish the sign-in in the same Chrome outside pacewright, then `auth_recheck`.
 
 ## Scheduling (recurrent tasks)
 
