@@ -131,6 +131,26 @@ The socket path defaults to `~/.pacewright/pw.sock`; override it with the `PACEW
 (useful for a non-default daemon). A call made while the daemon is down returns a tool error with an
 actionable message rather than failing the protocol.
 
+## Teach an agent to drive it (skill)
+
+MCP gives an agent the **tools**; the bundled **skill** gives it the **know-how** — the mental model
+(pacing, pipelines, fan-out, the all-time ledger, escalations) and the workflows the raw tool schemas
+don't teach. It ships in this repo at [`.claude/skills/pacewright/SKILL.md`](.claude/skills/pacewright/SKILL.md).
+
+For a new user on Claude Code / omp, install it once:
+
+```bash
+# user-level (available in every project):
+mkdir -p ~/.claude/skills && cp -R .claude/skills/pacewright ~/.claude/skills/
+# or project-level: it's already discovered when you work inside a checkout of this repo.
+```
+
+With the skill installed and the MCP server registered, the agent picks it up automatically when you
+say "pacewright" / "queue a task" / "run a recipe" and drives the daemon for you. To **author** new
+recipes, point the agent at [`docs/RECIPES.md`](docs/RECIPES.md) (the KDL grammar); recipes and
+schedules themselves are best kept in a **private** repo (`pcw recipe add <owner>/<repo>` installs
+them — private repos work through your git auth).
+
 ## Configure limits & pacing
 
 `~/.pacewright/config.toml` — every `(platform, action)` that needs throttling gets a limit key. Keys not listed are unrestricted.
