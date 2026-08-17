@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Default wall-clock cap: 2100s (35m) — the value the LinkedIn/X scripts settled on for a full
-/// paced round (a 25m cap was killing rounds mid-batch, per `linkedin-comment-run.sh`).
+/// Default wall-clock cap: 2100s (35m) — enough for a full paced round (a 25m cap was observed
+/// killing rounds mid-batch).
 pub const DEFAULT_CAP_SECS: u64 = 2100;
 /// A failure faster than this is treated as a startup/API error, not a finished round, so it is
 /// retryable (the engine backs off and retries) rather than a terminal give-up (R4).
