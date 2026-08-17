@@ -53,8 +53,8 @@ existing `depends_on`. The scheduler, limits, runner and recovery are otherwise 
   **regenerable projection**; the task rows stay the source of truth.
 - **CLI.** `pacewright run <pipeline> --run-id <id> --params '{…}'` (start *or* resume), `runs`, `show`.
 
-Pipelines live in `~/.pacewright/recipes/pipelines/<name>.kdl` (`/` flattened to `-`). The shipped
-`podcast/episode` is in `packaging/pipelines/` with a test that parses it.
+Pipelines live in `~/.pacewright/recipes/pipelines/<name>.kdl` (`/` flattened to `-`); a parse test
+covers an example pipeline. See [`docs/RECIPES.md`](RECIPES.md) for the pipeline grammar.
 
 ## What Phase 2 still needs
 
@@ -130,7 +130,7 @@ was imported into `~/.pacewright/secrets.json` (scope `…/auth/<provider>`, ref
 - Engine: `crates/core/src/{run,pipeline,refs}.rs`; gate logic in `run::expand`
 - Scheduler edges: `crates/core/src/scheduler.rs` (`dep_on_failure`, the escalation race fix)
 - Adjudication: `crates/core/src/runner.rs` (evidence guardrail)
-- Pipeline: an episode pipeline under `packaging/pipelines/`
+- Pipeline: an example pipeline under `~/.pacewright/recipes/pipelines/`
 - Recipe template: a per-platform verify recipe under `~/.pacewright/recipes/`
 
 ## A caution about the first live run

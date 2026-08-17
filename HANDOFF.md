@@ -36,33 +36,43 @@ recipe/login path: the fork is **vendored** into the workspace as `crates/chrome
   exported fallbacks (still used by `server.rs` tests); the `pacewright-browser` crate is unused by
   the daemon now.
 
-## ⛔ START HERE — non-browser jobs + JSON datastore + Claude Max/Pro OAuth (2026-08-10)
+## ⛔ START HERE — JSON datastore, non-browser adapters, Claude Max/Pro OAuth (2026-08-10)
 
-Follow-on to the outreach fleet migration below. The engine gained a JSON datastore and non-browser
-REST/data adapters, the jobs that were deferred there (x-harvest, plus new podcast sourcing/hooks) are
-now declarative pipelines, and the agent adapters run on the Claude Max/Pro subscription. **245+ tests
-pass, clippy `-D warnings` clean.** Not committed.
+The engine gained a JSON datastore, non-browser REST/data adapters, fan-out + an all-time dedup
+ledger, an escalation notifier, and Claude Max/Pro OAuth for the agent adapters. **245+ tests pass,
+clippy `-D warnings` clean.**
 
 ### JSON datastore + data/http adapters
 - **JSON datastore (`core::datastore`)** — per-dataset JSON files at `~/.pacewright/data/<name>.json`
-  (an array of objects), appended with all-time dedup on a key field. "Save data as JSON, not CSV" —
-  the result-sink the CSV-accumulating crawls needed, minus the CSV. Read via RPCs `DataList`/`DataShow`,
+  (an array of objects), appended with all-time dedup on a key field. Read via RPCs `DataList`/`DataShow`,
   CLI `pcw data list` / `pcw data show <name> [--limit N]`, MCP `data_list`/`data_show`.
 - **`data/append`** (`{dataset, items: array|object, key?}`) and **`data/read`**
   (`{dataset, limit?, chunk_size?}`) — `chunk_size` returns `{chunks:[{index,items}]}`, ready to fan out.
 - **`http/request`** — non-browser REST (`{method, url, headers, query, body|json, secret={env,as}}`
   where `as` = `bearer` | `header:X` | `query:X` | `body:X`), injecting a secret from env at call time
   (never stored). limit-key `http.request`.
-- `schedule::partition` now also accepts the `data` + `http` built-ins (full set:
-  `dummy`/`agent`/`claude`/`claude_cli`/`pipeline`/`data`/`http`).
+- `schedule::partition` accepts the built-ins: `dummy`/`agent`/`claude`/`claude_cli`/`pipeline`/`data`/`http`.
 
-### The non-browser jobs (finished the fleet)
-- **x-harvest** — now migrated (supersedes the "NOT migrated" note in the section below):
-  `outreach/x-harvest` pipeline (recipe `x/harvest` → `data/append` into the `x/pool-ai` + `x/pool-lib`
-  JSON datasets, deduped).
-- **podcast sourcing** — `outreach/podcast-sourcing` pipeline (`http/request` Apollo REST →
-  `data/append` `podcast/hosts`; needs `APOLLO_API_KEY`; disabled by default).
-- **podcast hooks (R13)** — `outreach/podcast-hooks` pipeline (`data/read` chunk → fanout → `claude_cli`).
+### Fan-out, ledger, escalation (the scan→act primitives)
+- **All-time dedup ledger (R7)** — `touched(scope,target_id,first_touched_at)` in `core::store`
+  (`is_touched`/`mark_touched`/`touched_count`).
+- **Fan-out (R5)** — a pipeline `fanout after=<step> recipe=… items=… as=… scope=… id=… { params }`
+  block turns a producer step's array `result` into one paced, deduped act task per item
+  (`core::run::materialize_fanout`), keyed on the ledger id (`dedup_key="touch:<scope>:<id>"`),
+  spending the act recipe's `limit-key`, and marking the ledger on success. `Task` gained
+  `fanout`/`touch_scope`/`touch_id`.
+- **Escalation notifier — "call Claude when there is an issue"** — `core::notify::{Notifier,
+  EscalationEvent}` (+`NullNotifier`/`RecordingNotifier`). The runner escalates on terminal failure /
+  auto-paused scope; `daemon::notify::OutboxNotifier` writes `~/.pacewright/escalations/*.json`
+  (+ optional `claude -p` when `PACEWRIGHT_CLAUDE_NOTIFY=1`). Read via `pcw escalations [--drain]`,
+  the MCP `escalations` tool, or the `digest`'s `waiting_on_human`.
+
+### Adapters: claude_cli + pipeline launcher
+- **`claude_cli/run`** — shells a real `claude -p` (prompt/`prompt_file`, `model`, `add_dir[]`,
+  `cap_secs`) with a daemon-owned wall-clock cap + retry-on-fast-fail. (`agent/ask` stays the
+  single-turn API completer.)
+- **`pipeline/start`** — starts a fresh dated run (`<prefix>-YYYYMMDD`) so a scan→act pipeline recurs
+  on the declarative schedule.
 
 ### Claude Max/Pro OAuth — agent adapters on the subscription
 - **`crates/adapter-agent/src/anthropic_oauth.rs`** — PKCE login to claude.ai, token exchange/refresh
@@ -71,60 +81,11 @@ pass, clippy `-D warnings` clean.** Not committed.
   Code system-identity block) before falling back to `ANTHROPIC_API_KEY`. `claude_cli/run` strips
   `ANTHROPIC_API_KEY` from its subprocess so it uses the Max/Pro login too.
 - **Auth precedence:** `ANTHROPIC_OAUTH_TOKEN` env > stored Max login (auto-refreshed) > `ANTHROPIC_API_KEY`.
-- CLI `pcw anthropic login [--paste] | status | logout` (a local OAuth flow — browser + secret store,
-  no daemon socket). RPCs `AnthropicStatus` + `LedgerStats` feed the dashboard.
-- MCP tools added this session: `escalations`, `data_list`, `data_show`, `ledger_stats`, `anthropic_status`
-  (26 tools total).
+- CLI `pcw anthropic login [--paste] | status | logout`. RPCs `AnthropicStatus` + `LedgerStats` feed
+  the dashboard. MCP: `escalations`, `data_list`, `data_show`, `ledger_stats`, `anthropic_status` (26 tools).
 
-### Cutover
-`packaging/cutover-outreach.sh` (reversible, `--undo`) now verifies the daemon **and** `pcw anthropic
-status`, applies the schedules, and retires the 6 migrated launchd plists.
-
-## ⛔ START HERE — outreach fleet migration (2026-08-10)
-
-Built to `channels/pacewright-outreach-requirements-2026-08-10.md`. The engine gained the pieces the
-shell fleet needed, and the jobs are now declarative pacewright schedules. **233 tests pass, clippy
-`-D warnings` clean.** Not committed.
-
-### New engine capabilities (all tested)
-- **All-time dedup ledger (R7)** — `touched(scope,target_id,first_touched_at)` in `core::store`
-  (`is_touched`/`mark_touched`/`touched_count`). Replaces `mm-pitched-all.log` / `.apollo-revealed.txt`.
-- **Fan-out (R5)** — a pipeline `fanout after=<step> recipe=… items=… as=… scope=… id=… { params }`
-  block. On the producer step's success the runner turns its array `result` into one paced, deduped
-  act task per item (`core::run::materialize_fanout`), each keyed on the ledger id
-  (`dedup_key="touch:<scope>:<id>"`), spending the act recipe's `limit-key` for cap/gap, and marking
-  the ledger on its own success. `Task` gained `fanout`/`touch_scope`/`touch_id`.
-- **Escalation notifier — "call Claude when there is an issue"** — `core::notify::{Notifier,
-  EscalationEvent}` (+`NullNotifier`/`RecordingNotifier`). The runner escalates on terminal failure /
-  auto-paused scope. Daemon impl `daemon::notify::OutboxNotifier` writes
-  `~/.pacewright/escalations/*.json` (+ optional `claude -p` when `PACEWRIGHT_CLAUDE_NOTIFY=1`). Read
-  it via `pcw escalations [--drain]`, the MCP `escalations` tool, or the `digest`'s `waiting_on_human`.
-- **`claude_cli` adapter (R1 + R4)** — `claude_cli/run` shells a real `claude -p` (prompt/`prompt_file`,
-  `model`, `add_dir[]`, `cap_secs`) with a daemon-owned wall-clock cap and retry-on-fast-fail. This is
-  the "headless-claude round" the LinkedIn/X/book scripts hand-rolled with `caffeinate`/watchdog; now
-  it's a capped, escalating pacewright task. (`agent/ask` stays the single-turn API completer.)
-- **`pipeline` launcher** — built-in `pipeline/start` starts a fresh dated run (`<prefix>-YYYYMMDD`) so
-  a scan→act pipeline recurs on the declarative schedule. `schedule::partition` now accepts the
-  built-in adapters (`dummy`/`agent`/`claude`/`claude_cli`/`pipeline`).
-
-### The migrated fleet (deployed to `~/.pacewright`, canonical copies in `packaging/`)
-`schedules/outreach.toml` + `config.toml` (fleet caps) + `recipes/matchmaker-scan.kdl` +
-`recipes/pipelines/outreach-matchmaker.kdl`:
-- **matchmaker** → deterministic `outreach/matchmaker` pipeline (scan 5 categories → fan-out
-  `matchmaker/pitch`, cap 100/day, ledger dedup). The R5 showcase.
-- **linkedin-comment / x-engage / book-promo** → `claude_cli/run` schedules (the scripts already were
-  `claude -p` rounds; now daemon-capped + escalating instead of 8 launchd agents).
-- **linkedin-invitations** → scheduled `linkedin/invitations` recipe.
-- **x-harvest** → NOT migrated (deferred): a CSV-accumulating crawl needing a recipe result-sink
-  pacewright doesn't have; lowest spec priority; still runs as its launchd crawl.
-
-### Cutover (NOT done — your go; it starts real outreach)
-`packaging/cutover-outreach.sh` is reversible (`--undo`). It verifies the new daemon is up,
-`schedule apply`s, then unloads + archives the 6 migrated launchd plists (keeps `pacewright-chrome`,
-`caddy`, `paperclipai.server`, `linkedin-post-daily`, `x-harvest`). Run it deliberately once you
-restart the daemon on the new binary. Verified live in an isolated daemon: `pipeline/start`→dated run,
-terminal failure→escalation outbox+`pcw escalations`+digest; deterministic tests cover fan-out+ledger.
-**Live browser/`claude -p` runs were NOT exercised here** (need the logged-in Chrome + live sites).
+> Recipes, schedules, and per-brand fleet config are **not** in this repo — they're distributed data,
+> kept private. See [`docs/RECIPES.md`](docs/RECIPES.md) for the authoring grammar.
 
 
 Last updated: 2026-07-17 (**single attached Chrome, one tab per site** — Phases 1–5 done + auth
