@@ -54,7 +54,7 @@ pub fn build_adapter_registry(
     )));
     reg.register(Arc::new(AgentAdapter::with_completer("claude", completer)));
     // The full `claude -p` agent step (filesystem + tools), distinct from the single-turn `agent`.
-    // Absorbs book-promo and the paced LinkedIn/X commenting rounds with a daemon-owned cap (R1+R4).
+    // Absorbs content-drafting and paced commenting rounds with a daemon-owned cap (R1+R4).
     reg.register(Arc::new(
         pacewright_adapter_agent::claude_cli::ClaudeCliAdapter::new("claude_cli"),
     ));

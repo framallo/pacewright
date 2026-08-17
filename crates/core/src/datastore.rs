@@ -84,7 +84,7 @@ impl Datastore {
     }
 
     /// Every dataset in the store as `(name, row_count)`, sorted by name. Names are the `/`-nested
-    /// slugs (file stems), so `x/pool-ai.json` lists as `x/pool-ai`.
+    /// slugs (file stems), so `leads/warm.json` lists as `leads/warm`.
     pub fn list(&self) -> Vec<(String, usize)> {
         fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, usize)>) {
             let Ok(rd) = std::fs::read_dir(dir) else {
@@ -204,15 +204,15 @@ mod tests {
     fn append_dedups_on_key_across_calls() {
         let ds = tmp();
         let r1 = ds
-            .append("x/pool", &[json!({"h": "a"}), json!({"h": "b"})], Some("h"))
+            .append("demo/pool", &[json!({"h": "a"}), json!({"h": "b"})], Some("h"))
             .unwrap();
         assert_eq!((r1.added, r1.total), (2, 2));
         // Re-run with an overlap: only the new one lands.
         let r2 = ds
-            .append("x/pool", &[json!({"h": "b"}), json!({"h": "c"})], Some("h"))
+            .append("demo/pool", &[json!({"h": "b"}), json!({"h": "c"})], Some("h"))
             .unwrap();
         assert_eq!((r2.added, r2.duplicates, r2.total), (1, 1, 3));
-        let rows = ds.read("x/pool").unwrap();
+        let rows = ds.read("demo/pool").unwrap();
         let hs: Vec<&str> = rows.iter().filter_map(|r| r["h"].as_str()).collect();
         assert_eq!(hs, vec!["a", "b", "c"]);
     }

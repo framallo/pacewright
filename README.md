@@ -203,11 +203,11 @@ id resumes. A **fan-out** block turns a producer step's array result into paced,
 tasks, each keyed on an **all-time dedup ledger** (`touched`) so a target is never acted on twice.
 
 ```bash
-pcw run outreach/matchmaker --run-id 2026-08-10   # start/resume a pipeline run
+pcw run demo/pipeline --run-id 2026-08-10         # start/resume a pipeline run
 pcw runs                                          # list runs + step rollups
 pcw show 2026-08-10                               # one run's steps, in order
 pcw data list                                     # datasets task output was saved into
-pcw data show x/pool-ai --limit 20                # rows of one dataset
+pcw data show leads/warm --limit 20               # rows of one dataset
 pcw escalations --drain                           # pull the escalation outbox (failures / paused scopes)
 ```
 

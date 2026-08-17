@@ -165,7 +165,7 @@ pub fn tool_catalog() -> Value {
         { "name": "data_list", "description": "List saved JSON datasets (task output) with row counts.",
           "inputSchema": schema(json!({}), &[]) },
         { "name": "data_show", "description": "Print a saved dataset's rows. `limit` caps the count.",
-          "inputSchema": schema(json!({ "name": str_prop("Dataset name, e.g. `x/pool-ai`."), "limit": int_prop("Max rows to return.") }), &["name"]) },
+          "inputSchema": schema(json!({ "name": str_prop("Dataset name, e.g. `leads/warm`."), "limit": int_prop("Max rows to return.") }), &["name"]) },
         { "name": "ledger_stats", "description": "All-time dedup ledger: touched-target counts per scope (never-act-twice).",
           "inputSchema": schema(json!({}), &[]) },
         { "name": "anthropic_status", "description": "Whether a Claude Max/Pro subscription is signed in and its token freshness.",

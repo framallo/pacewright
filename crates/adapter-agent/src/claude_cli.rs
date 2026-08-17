@@ -4,9 +4,8 @@
 //!
 //! This is distinct from [`crate::AgentAdapter`] (`agent/ask`), which is a single-turn Anthropic
 //! Messages API call — no filesystem, no tools. `claude_cli/run` shells the real `claude` CLI, so it
-//! can read the brand dirs and write drafts (what `book-promo-run.sh` does) or drive a paced
-//! commenting round (`linkedin-comment-run.sh`, `x-engage-run.sh`) — but now as a scheduled,
-//! capped, escalating pacewright task instead of eight launchd agents each reimplementing the
+//! can read a working directory and write drafts, or drive a paced content round — but now as a
+//! scheduled, capped, escalating pacewright task instead of a launchd agent reimplementing the
 //! watchdog.
 //!
 //! The CLI invocation is behind a [`ClaudeRunner`] trait so the adapter's param-shaping + failure
