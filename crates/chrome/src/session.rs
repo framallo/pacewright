@@ -53,7 +53,9 @@ pub fn load_session() -> Result<SessionStore, SessionError> {
         return Ok(SessionStore::default());
     }
 
-    let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
 
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| SessionError(format!("Failed to read {}: {e}", path.display())))?;
@@ -71,9 +73,12 @@ pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
     // Detect concurrent modification (another chrome-agent process touched the file)
     if let Some(loaded_mtime) = store.loaded_mtime
         && let Ok(current_mtime) = std::fs::metadata(&path).and_then(|m| m.modified())
-            && current_mtime != loaded_mtime {
-                eprintln!("warning: session file was modified by another process. Use --browser <name> to isolate parallel agents.");
-            }
+        && current_mtime != loaded_mtime
+    {
+        eprintln!(
+            "warning: session file was modified by another process. Use --browser <name> to isolate parallel agents."
+        );
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| SessionError(format!("Failed to create dir: {e}")))?;
@@ -104,7 +109,9 @@ pub fn save_session(store: &mut SessionStore) -> Result<(), SessionError> {
 
     // Update loaded_mtime so subsequent saves in the same process don't
     // false-positive the concurrent modification warning.
-    store.loaded_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    store.loaded_mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
 
     Ok(())
 }
@@ -232,8 +239,7 @@ mod tests {
     #[test]
     fn session_roundtrip() {
         let mut store = SessionStore::default();
-        let browser =
-            ensure_browser(&mut store, "test", "ws://localhost:9222", Some(1234), true);
+        let browser = ensure_browser(&mut store, "test", "ws://localhost:9222", Some(1234), true);
         ensure_page(browser, "main", "target-abc");
 
         let json = serde_json::to_string(&store).unwrap();

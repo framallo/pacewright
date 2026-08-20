@@ -1,5 +1,5 @@
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 
@@ -57,7 +57,6 @@ pub async fn scroll_to_load(client: &CdpClient) -> Result<(), crate::BoxError> {
     Ok(())
 }
 
-
 /// Extract structured data using the accessibility tree instead of DOM.
 /// Delegates to inspect with a role filter. Works on React SPAs (X.com)
 /// where DOM structure is opaque but a11y roles are clean.
@@ -76,14 +75,21 @@ pub async fn run_a11y(
             super::inspect::run(client, false, None, None, Some(&filter)).await?
         };
 
-        let lines: Vec<&str> = snapshot.text.lines()
+        let lines: Vec<&str> = snapshot
+            .text
+            .lines()
             .filter(|l| l.trim().starts_with("uid="))
             .collect();
 
-        if lines.is_empty() { continue; }
-        if lines.len() < 3 && !scroll { continue; }
+        if lines.is_empty() {
+            continue;
+        }
+        if lines.len() < 3 && !scroll {
+            continue;
+        }
 
-        let items: Vec<Value> = lines.iter()
+        let items: Vec<Value> = lines
+            .iter()
             .take(limit)
             .map(|line| {
                 // Strip "uid=nXXX role " prefix to get the content text
@@ -111,7 +117,10 @@ pub async fn run_a11y(
         });
     }
 
-    Err("No repeating a11y pattern found. Try: extract (DOM mode) or inspect --filter \"article\"".into())
+    Err(
+        "No repeating a11y pattern found. Try: extract (DOM mode) or inspect --filter \"article\""
+            .into(),
+    )
 }
 
 pub async fn run(
@@ -402,9 +411,10 @@ pub async fn run(
 
     // If there's a hint (no pattern found), propagate as error.
     if let Some(hint) = parsed.get("hint").and_then(Value::as_str)
-        && items.is_empty() {
-            return Err(hint.into());
-        }
+        && items.is_empty()
+    {
+        return Err(hint.into());
+    }
 
     Ok(ExtractResult {
         items,

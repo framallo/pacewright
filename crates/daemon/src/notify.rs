@@ -52,7 +52,9 @@ pub fn repair_hint(ev: &EscalationEvent) -> String {
         ));
     }
     if let Some(run) = &ev.run_id {
-        lines.push(format!("Run: pcw show {run}  (resume with: pcw run <pipeline> --run-id {run} --retry-failed)"));
+        lines.push(format!(
+            "Run: pcw show {run}  (resume with: pcw run <pipeline> --run-id {run} --retry-failed)"
+        ));
     }
     lines.join("\n")
 }
@@ -112,8 +114,12 @@ fn spawn_claude(ev: &EscalationEvent) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     match cmd.spawn() {
-        Ok(_child) => tracing::warn!(task = %ev.task_id, "spawned `claude -p` to triage the failure"),
-        Err(e) => tracing::error!("could not spawn `claude -p`: {e} (the escalation is still in the outbox)"),
+        Ok(_child) => {
+            tracing::warn!(task = %ev.task_id, "spawned `claude -p` to triage the failure")
+        }
+        Err(e) => tracing::error!(
+            "could not spawn `claude -p`: {e} (the escalation is still in the outbox)"
+        ),
     }
 }
 

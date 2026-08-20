@@ -37,57 +37,59 @@ pub async fn run(
             .unwrap_or("")
             .to_string();
         if text.is_empty() {
-            return Err(format!("No element matches selector '{sel}' or element has no text.").into());
+            return Err(
+                format!("No element matches selector '{sel}' or element has no text.").into(),
+            );
         }
         text
     } else {
         match uid {
-        None => {
-            // Whole page text
-            let result: EvaluateResult = client
-                .call(
-                    "Runtime.evaluate",
-                    json!({
-                        "expression": "document.body.innerText",
-                        "returnByValue": true,
-                    }),
-                )
-                .await?;
-            result
-                .result
-                .value
-                .as_ref()
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        }
-        Some(uid) => {
-            let element_ref = uid_map.get(uid).ok_or_else(|| {
-                format!(
-                    "Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids."
-                )
-            })?;
-            let backend_node_id = element_ref.backend_node_id().ok_or_else(|| {
-                format!("Element uid={uid} has no resolvable backend node.")
-            })?;
+            None => {
+                // Whole page text
+                let result: EvaluateResult = client
+                    .call(
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": "document.body.innerText",
+                            "returnByValue": true,
+                        }),
+                    )
+                    .await?;
+                result
+                    .result
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+            Some(uid) => {
+                let element_ref = uid_map.get(uid).ok_or_else(|| {
+                    format!(
+                        "Element uid={uid} not found. Run 'chrome-agent inspect' to get fresh uids."
+                    )
+                })?;
+                let backend_node_id = element_ref
+                    .backend_node_id()
+                    .ok_or_else(|| format!("Element uid={uid} has no resolvable backend node."))?;
 
-            let resolve_result: ResolveNodeResult = client
-                .call(
-                    "DOM.resolveNode",
-                    ResolveNodeParams {
-                        node_id: None,
-                        backend_node_id: Some(backend_node_id),
-                        object_group: Some("chrome-agent".into()),
-                        execution_context_id: None,
-                    },
-                )
-                .await?;
+                let resolve_result: ResolveNodeResult = client
+                    .call(
+                        "DOM.resolveNode",
+                        ResolveNodeParams {
+                            node_id: None,
+                            backend_node_id: Some(backend_node_id),
+                            object_group: Some("chrome-agent".into()),
+                            execution_context_id: None,
+                        },
+                    )
+                    .await?;
 
-            let object_id = resolve_result.object.object_id.ok_or_else(|| {
-                format!("Element uid={uid} could not be resolved to a JS object.")
-            })?;
+                let object_id = resolve_result.object.object_id.ok_or_else(|| {
+                    format!("Element uid={uid} could not be resolved to a JS object.")
+                })?;
 
-            let result: serde_json::Value = client
+                let result: serde_json::Value = client
                 .call(
                     "Runtime.callFunctionOn",
                     json!({
@@ -98,14 +100,14 @@ pub async fn run(
                 )
                 .await?;
 
-            result
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
+                result
+                    .get("result")
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
         }
-    }
     };
 
     Ok(collapse_blank_lines(&raw))

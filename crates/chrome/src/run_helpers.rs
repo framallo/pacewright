@@ -20,10 +20,13 @@ pub async fn connect_page(
             Ok(page_ws) => match CdpClient::connect(&page_ws).await {
                 Ok(client) => {
                     // Verify connection is alive with a lightweight call
-                    if let Err(e) = client.call::<_, serde_json::Value>(
-                        "Runtime.evaluate",
-                        json!({"expression": "1", "returnByValue": true}),
-                    ).await {
+                    if let Err(e) = client
+                        .call::<_, serde_json::Value>(
+                            "Runtime.evaluate",
+                            json!({"expression": "1", "returnByValue": true}),
+                        )
+                        .await
+                    {
                         last_err = format!("Connection verify failed: {e}");
                         drop(client);
                         if attempt < 7 {
@@ -59,7 +62,6 @@ pub async fn connect_page(
     }
     Err(format!("Failed to connect to page after 8 attempts: {last_err}").into())
 }
-
 
 /// Execute a command, optionally inspect after, and output result.
 pub async fn output_action(
@@ -116,13 +118,11 @@ pub async fn output_goto(
     max_depth: Option<usize>,
     json_mode: bool,
 ) -> Result<(), crate::BoxError> {
-    let browser_session = store.browsers.get_mut(browser_name)
+    let browser_session = store
+        .browsers
+        .get_mut(browser_name)
         .ok_or_else(|| format!("Browser session '{browser_name}' not found in session store"))?;
-    let page = session::ensure_page(
-        browser_session,
-        page_name,
-        target_id,
-    );
+    let page = session::ensure_page(browser_session, page_name, target_id);
     if json_mode {
         let mut obj = json!({"ok": true, "url": url, "title": title});
         if inspect {
@@ -160,39 +160,60 @@ pub fn error_hint(msg: &str) -> Option<&'static str> {
     // started on the normal profile. Matched before the generic "Connection refused"
     // branch so the actionable hint wins.
     if msg.contains("Failed to connect to page") || msg.contains("DevToolsActivePort") {
-        Some("Could not attach over CDP. Chrome 136+ disables remote debugging on the default profile: drop --connect to let chrome-agent launch its own dedicated profile, or relaunch your Chrome with a separate --user-data-dir.")
+        Some(
+            "Could not attach over CDP. Chrome 136+ disables remote debugging on the default profile: drop --connect to let chrome-agent launch its own dedicated profile, or relaunch your Chrome with a separate --user-data-dir.",
+        )
     } else if msg.contains("Connection refused") || msg.contains("No such file") {
         Some("Is Chrome running? Try: chrome-agent goto <url>")
     } else if msg.contains("uid=") && msg.contains("not found") {
         Some("Run `chrome-agent inspect` to refresh element uids")
     } else if msg.contains("Navigation failed") {
         Some("Check the URL is valid and the page is reachable")
-    } else if msg.contains("No snapshot") || msg.contains("No inspect") || msg.contains("uid_map is empty") {
+    } else if msg.contains("No snapshot")
+        || msg.contains("No inspect")
+        || msg.contains("uid_map is empty")
+    {
         Some("Run 'chrome-agent inspect' first")
     } else if msg.contains("Timeout") || msg.contains("timeout") {
         Some("Use --timeout N for slow pages")
     } else if msg.contains("not interactable") || msg.contains("no visible box model") {
         Some("Element may be hidden. Try: chrome-agent scroll <uid>")
     } else if msg.contains("No element matches selector") {
-        Some("CSS selector didn't match. Check with: chrome-agent eval \"document.querySelector('...')\"")
+        Some(
+            "CSS selector didn't match. Check with: chrome-agent eval \"document.querySelector('...')\"",
+        )
     } else if msg.contains("backendDomNodeId") || msg.contains("response parse") {
         Some("Page structure issue. Try: chrome-agent click --selector or chrome-agent eval")
     } else if msg.contains("may not have an article") || msg.contains("Readability") {
-        Some("Page has no article structure. Try: chrome-agent text or chrome-agent text --selector \"main\"")
+        Some(
+            "Page has no article structure. Try: chrome-agent text or chrome-agent text --selector \"main\"",
+        )
     } else if msg.contains("Provide a uid") || msg.contains("Provide --uid") {
         Some("Specify what to target: uid (e.g. n47), --selector \"css\", or --xy x,y")
-    } else if msg.contains("Evaluation error") || msg.contains("TypeError") || msg.contains("ReferenceError") || msg.contains("SyntaxError") {
-        Some("JS error in page context. Check expression syntax. Use --selector to scope to an element.")
+    } else if msg.contains("Evaluation error")
+        || msg.contains("TypeError")
+        || msg.contains("ReferenceError")
+        || msg.contains("SyntaxError")
+    {
+        Some(
+            "JS error in page context. Check expression syntax. Use --selector to scope to an element.",
+        )
     } else if msg.contains("dispatcher task exited") || msg.contains("transport closed") {
         Some("Browser connection lost. Try running the command again.")
     } else if msg.contains("not an <iframe>") || msg.contains("not an <IFRAME>") {
-        Some("Only <iframe> is supported. For <frame>/<frameset>, use eval to access frame content.")
+        Some(
+            "Only <iframe> is supported. For <frame>/<frameset>, use eval to access frame content.",
+        )
     } else if msg.contains("No child frame found") {
         Some("Iframe not found. Check the selector matches an <iframe> element.")
     } else if msg.contains("not a <select>") {
-        Some("Element is not a <select>. For custom dropdowns, click to open then click the option.")
+        Some(
+            "Element is not a <select>. For custom dropdowns, click to open then click the option.",
+        )
     } else if msg.contains("No option matching") {
-        Some("No dropdown option matched. Use inspect --uid to check available options, or try the visible text.")
+        Some(
+            "No dropdown option matched. Use inspect --uid to check available options, or try the visible text.",
+        )
     } else if msg.contains("File not found") {
         Some("Check the file path exists on disk.")
     } else if msg.contains("expected a JSON array") {
@@ -203,7 +224,11 @@ pub fn error_hint(msg: &str) -> Option<&'static str> {
 }
 
 /// Get the `uid_map` from the current session, or empty if none.
-pub fn get_uid_map(store: &SessionStore, browser_name: &str, page_name: &str) -> HashMap<String, ElementRef> {
+pub fn get_uid_map(
+    store: &SessionStore,
+    browser_name: &str,
+    page_name: &str,
+) -> HashMap<String, ElementRef> {
     store
         .browsers
         .get(browser_name)
@@ -296,7 +321,11 @@ pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
                 } else {
                     "external".into()
                 };
-                let mode = if browser.headless { "headless" } else { "headed" };
+                let mode = if browser.headless {
+                    "headless"
+                } else {
+                    "headed"
+                };
                 println!(
                     "browser={name}  {status}  {mode}  pages={}  ws={}",
                     browser.pages.len(),
@@ -318,41 +347,42 @@ pub async fn cmd_stop(json_mode: bool) -> Result<(), crate::BoxError> {
     #[cfg(not(unix))]
     {
         let msg = "Daemon is not supported on this platform.";
-        if json_mode { json_output(&json!({"ok": true, "message": msg})); }
-        else { println!("{msg}"); }
+        if json_mode {
+            json_output(&json!({"ok": true, "message": msg}));
+        } else {
+            println!("{msg}");
+        }
         return Ok(());
     }
 
     #[cfg(unix)]
     {
-    let socket_path = session::daemon_socket_path()?;
-    if !socket_path.exists() {
-        if json_mode {
-            json_output(&json!({"ok": true, "message": "Daemon is not running."}));
-        } else {
-            println!("Daemon is not running.");
+        let socket_path = session::daemon_socket_path()?;
+        if !socket_path.exists() {
+            if json_mode {
+                json_output(&json!({"ok": true, "message": "Daemon is not running."}));
+            } else {
+                println!("Daemon is not running.");
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UnixStream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
 
-    let mut stream = UnixStream::connect(&socket_path).await?;
-    stream
-        .write_all(b"{\"command\":\"stop\"}\n")
-        .await?;
-    stream.shutdown().await?;
+        let mut stream = UnixStream::connect(&socket_path).await?;
+        stream.write_all(b"{\"command\":\"stop\"}\n").await?;
+        stream.shutdown().await?;
 
-    let mut buf = Vec::new();
-    let _ = stream.read_to_end(&mut buf).await;
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf).await;
 
-    if json_mode {
-        json_output(&json!({"ok": true, "message": "Daemon stopped."}));
-    } else {
-        println!("Daemon stopped.");
-    }
-    Ok(())
+        if json_mode {
+            json_output(&json!({"ok": true, "message": "Daemon stopped."}));
+        } else {
+            println!("Daemon stopped.");
+        }
+        Ok(())
     } // #[cfg(unix)]
 }
 
@@ -366,7 +396,10 @@ fn scan_launched_browsers() -> Vec<(String, u32)> {
         Some(h) => format!("{}/.chrome-agent/browsers/", h.display()),
         None => return Vec::new(),
     };
-    let out = match std::process::Command::new("ps").args(["-axo", "pid=,args="]).output() {
+    let out = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,args="])
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -374,12 +407,16 @@ fn scan_launched_browsers() -> Vec<(String, u32)> {
     let mut found = Vec::new();
     for line in text.lines() {
         let line = line.trim_start();
-        let Some((pid_str, args)) = line.split_once(char::is_whitespace) else { continue };
+        let Some((pid_str, args)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
         // Only the MAIN Chrome process, not renderer/gpu/utility helpers.
         if args.contains("--type=") {
             continue;
         }
-        let Some(rest) = args.split(&marker).nth(1) else { continue };
+        let Some(rest) = args.split(&marker).nth(1) else {
+            continue;
+        };
         let name = rest.split('/').next().unwrap_or("").to_string();
         if name.is_empty() {
             continue;
@@ -453,7 +490,12 @@ pub fn cmd_gc(idle_secs: u64, json_mode: bool) -> Result<(), crate::BoxError> {
     } else {
         println!("gc: closed {} idle/dead browser(s):", reaped.len());
         for r in &reaped {
-            println!("  {} (pid={}, {})", r["browser"].as_str().unwrap_or("?"), r["pid"], r["reason"].as_str().unwrap_or("?"));
+            println!(
+                "  {} (pid={}, {})",
+                r["browser"].as_str().unwrap_or("?"),
+                r["pid"],
+                r["reason"].as_str().unwrap_or("?")
+            );
         }
     }
     Ok(())
@@ -490,19 +532,21 @@ pub fn cmd_close(browser_name: &str, purge: bool, json_mode: bool) -> Result<(),
     };
 
     // Purge browser profile if requested
-    if purge
-        && let Some(home) = dirs::home_dir() {
-            let profile_dir = home.join(".chrome-agent").join("browsers").join(browser_name);
-            if profile_dir.exists() {
-                // Wait briefly for Chrome to exit after kill, then retry purge
-                for _ in 0..5 {
-                    if std::fs::remove_dir_all(&profile_dir).is_ok() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+    if purge && let Some(home) = dirs::home_dir() {
+        let profile_dir = home
+            .join(".chrome-agent")
+            .join("browsers")
+            .join(browser_name);
+        if profile_dir.exists() {
+            // Wait briefly for Chrome to exit after kill, then retry purge
+            for _ in 0..5 {
+                if std::fs::remove_dir_all(&profile_dir).is_ok() {
+                    break;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
+    }
 
     let message = if purge {
         format!("{message} (profile purged)")
@@ -559,8 +603,14 @@ mod tests {
             "DevToolsActivePort file doesn't exist",
         ] {
             let hint = error_hint(msg).expect("connect failure should have a hint");
-            assert!(hint.contains("136"), "hint should mention Chrome 136: {hint}");
-            assert!(hint.contains("--connect"), "hint should mention --connect: {hint}");
+            assert!(
+                hint.contains("136"),
+                "hint should mention Chrome 136: {hint}"
+            );
+            assert!(
+                hint.contains("--connect"),
+                "hint should mention --connect: {hint}"
+            );
         }
     }
 

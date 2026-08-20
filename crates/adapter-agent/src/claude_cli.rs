@@ -4,9 +4,8 @@
 //!
 //! This is distinct from [`crate::AgentAdapter`] (`agent/ask`), which is a single-turn Anthropic
 //! Messages API call — no filesystem, no tools. `claude_cli/run` shells the real `claude` CLI, so it
-//! can read the brand dirs and write drafts (what `book-promo-run.sh` does) or drive a paced
-//! commenting round (`linkedin-comment-run.sh`, `x-engage-run.sh`) — but now as a scheduled,
-//! capped, escalating pacewright task instead of eight launchd agents each reimplementing the
+//! can read a working directory and write drafts, or drive a paced content round — but now as a
+//! scheduled, capped, escalating pacewright task instead of a launchd agent reimplementing the
 //! watchdog.
 //!
 //! The CLI invocation is behind a [`ClaudeRunner`] trait so the adapter's param-shaping + failure
@@ -18,8 +17,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Default wall-clock cap: 2100s (35m) — the value the LinkedIn/X scripts settled on for a full
-/// paced round (a 25m cap was killing rounds mid-batch, per `linkedin-comment-run.sh`).
+/// Default wall-clock cap: 2100s (35m) — enough for a full paced round (a 25m cap was observed
+/// killing rounds mid-batch).
 pub const DEFAULT_CAP_SECS: u64 = 2100;
 /// A failure faster than this is treated as a startup/API error, not a finished round, so it is
 /// retryable (the engine backs off and retries) rather than a terminal give-up (R4).
@@ -260,7 +259,9 @@ impl Adapter for ClaudeCliAdapter {
             other => {
                 let msg = format!(
                     "claude -p exited {} after {}s",
-                    other.map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                    other
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".into()),
                     outcome.elapsed_secs
                 );
                 // Retry-on-fast-fail (R4): a quick death is a startup/API error worth one retry;
@@ -413,6 +414,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["preview"], "done");
-        assert_eq!(runner.last.lock().as_ref().unwrap().add_dirs, vec!["/x".to_string()]);
+        assert_eq!(
+            runner.last.lock().as_ref().unwrap().add_dirs,
+            vec!["/x".to_string()]
+        );
     }
 }

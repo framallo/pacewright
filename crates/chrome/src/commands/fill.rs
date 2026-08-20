@@ -23,5 +23,9 @@ pub async fn run_form(
         crate::element::fill(client, uid_map, uid, value).await?;
         filled.push(format!("uid={uid}"));
     }
-    Ok(format!("Filled {} fields: {}", filled.len(), filled.join(", ")))
+    Ok(format!(
+        "Filled {} fields: {}",
+        filled.len(),
+        filled.join(", ")
+    ))
 }

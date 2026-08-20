@@ -8,10 +8,10 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use pacewright_chrome::BoxError;
 use pacewright_chrome::recipe::engine::Solver;
+use pacewright_chrome::BoxError;
 
-use crate::{CompletionRequest, Completer};
+use crate::{Completer, CompletionRequest};
 
 /// Turns a [`Completer`] into a recipe [`Solver`]. `Send + Sync` (its `Completer` is), so it can be
 /// moved onto the recipe runner's worker thread.
@@ -69,8 +69,8 @@ mod tests {
     use super::*;
     use crate::CompletionRequest;
     use async_trait::async_trait;
-    use parking_lot::Mutex;
     use pacewright_core::model::AdapterError;
+    use parking_lot::Mutex;
 
     // Records the request it was given and returns a canned answer, so the solver's request shaping
     // (image attached, system prompt, trimming) is testable without a network.
@@ -94,11 +94,21 @@ mod tests {
         });
         let solver = ClaudeSolver::new(spy.clone());
         let answer = solver.solve("cG5n", "read the captcha").await.unwrap();
-        assert_eq!(answer, "AB12", "answer is trimmed of surrounding whitespace");
+        assert_eq!(
+            answer, "AB12",
+            "answer is trimmed of surrounding whitespace"
+        );
 
         let req = spy.last.lock().clone().unwrap();
-        assert_eq!(req.images, vec!["cG5n".to_string()], "the screenshot is attached");
+        assert_eq!(
+            req.images,
+            vec!["cG5n".to_string()],
+            "the screenshot is attached"
+        );
         assert_eq!(req.prompt, "read the captcha");
-        assert!(req.system.is_some(), "a system instruction constrains the reply");
+        assert!(
+            req.system.is_some(),
+            "a system instruction constrains the reply"
+        );
     }
 }

@@ -186,7 +186,9 @@ impl<'a> CdpBrowser<'a> {
                 .target_infos
                 .iter()
                 .filter(|t| t.target_type == "page" && t.target_id != active_id)
-                .filter(|t| !t.url.starts_with("devtools://") && !t.url.starts_with("chrome-extension://"))
+                .filter(|t| {
+                    !t.url.starts_with("devtools://") && !t.url.starts_with("chrome-extension://")
+                })
                 .collect();
             if let Some(t) = pages
                 .iter()
@@ -281,7 +283,8 @@ impl RecipeBrowser for CdpBrowser<'_> {
         c.enable("Page").await?;
         // A real CDP reload (not a fresh Page.navigate): some SPAs paint blank on first load but
         // render on reload of an already-open tab. `ignoreCache:false` = a normal (warm) reload.
-        c.send("Page.reload", json!({ "ignoreCache": false })).await?;
+        c.send("Page.reload", json!({ "ignoreCache": false }))
+            .await?;
         // Wait for the load event, then let the SPA settle (mirrors goto's post-load stabilization).
         let _ = c
             .wait_for_event(
@@ -299,14 +302,20 @@ impl RecipeBrowser for CdpBrowser<'_> {
              }))()",
         )
         .await;
-        let info = crate::commands::eval::run_raw(
-            &c,
-            "({ url: location.href, title: document.title })",
-        )
-        .await?;
+        let info =
+            crate::commands::eval::run_raw(&c, "({ url: location.href, title: document.title })")
+                .await?;
         Ok(NavInfo {
-            url: info.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
-            title: info.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
+            url: info
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            title: info
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 
@@ -442,7 +451,12 @@ impl RecipeBrowser for CdpBrowser<'_> {
         match crate::commands::download::run_native(&c, url, Some(out), timeout_secs).await {
             Ok(_) => Ok(true),
             // A "not rendered yet" preflight is not a failure — signal retry with Ok(false).
-            Err(e) if e.downcast_ref::<crate::commands::download::NotReady>().is_some() => Ok(false),
+            Err(e)
+                if e.downcast_ref::<crate::commands::download::NotReady>()
+                    .is_some() =>
+            {
+                Ok(false)
+            }
             Err(e) => Err(e),
         }
     }
@@ -471,7 +485,10 @@ impl NativeBrowser {
 }
 
 fn no_browser<T>(op: &str) -> Result<T, BoxError> {
-    Err(format!("recipe step `{op}` needs a browser, but this run is browser-less (api-only)").into())
+    Err(
+        format!("recipe step `{op}` needs a browser, but this run is browser-less (api-only)")
+            .into(),
+    )
 }
 
 impl RecipeBrowser for NativeBrowser {
@@ -573,7 +590,11 @@ fn native_api(
     let hdrs = resp
         .headers()
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
         .collect();
     let text = resp
         .body_mut()
@@ -594,9 +615,11 @@ fn native_api(
     _headers: &[(String, String)],
     _body: Option<&str>,
 ) -> Result<ApiResponse, BoxError> {
-    Err("chrome-agent was built without the `api` feature (native HTTPS disabled); \
+    Err(
+        "chrome-agent was built without the `api` feature (native HTTPS disabled); \
          rebuild with `--features api`"
-        .into())
+            .into(),
+    )
 }
 
 #[cfg(test)]
@@ -744,15 +767,11 @@ pub mod fake {
             Ok(())
         }
         async fn insert(&self, _spec: &Value, value: &str) -> Result<(), BoxError> {
-            self.actions
-                .borrow_mut()
-                .push(Action::Insert(value.into()));
+            self.actions.borrow_mut().push(Action::Insert(value.into()));
             Ok(())
         }
         async fn select(&self, _spec: &Value, value: &str) -> Result<(), BoxError> {
-            self.actions
-                .borrow_mut()
-                .push(Action::Select(value.into()));
+            self.actions.borrow_mut().push(Action::Select(value.into()));
             Ok(())
         }
         async fn upload(&self, _spec: &Value, paths: &[String]) -> Result<(), BoxError> {
@@ -761,7 +780,12 @@ pub mod fake {
                 .push(Action::Upload(paths.to_vec()));
             Ok(())
         }
-        async fn download(&self, url: &str, out: &str, _timeout_secs: u64) -> Result<bool, BoxError> {
+        async fn download(
+            &self,
+            url: &str,
+            out: &str,
+            _timeout_secs: u64,
+        ) -> Result<bool, BoxError> {
             self.actions.borrow_mut().push(Action::Download {
                 url: url.to_string(),
                 out: out.to_string(),

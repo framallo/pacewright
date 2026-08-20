@@ -58,10 +58,8 @@ fn format_ax_tree(
     role_filter: Option<&[&str]>,
 ) -> (String, HashMap<String, ElementRef>) {
     // Build lookup: nodeId → AXNode
-    let node_by_id: HashMap<&str, &AXNode> = nodes
-        .iter()
-        .map(|n| (n.node_id.as_str(), n))
-        .collect();
+    let node_by_id: HashMap<&str, &AXNode> =
+        nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
 
     // Find root (node with no parentId, or first node)
     let root_id = nodes
@@ -139,25 +137,38 @@ fn format_ax_tree(
     // Post-filter by role if requested
     let output = if let Some(roles) = role_filter {
         // Expand role aliases so agents don't need to know exact ARIA role names
-        let expanded: Vec<String> = roles.iter().flat_map(|&r| {
-            let mut v = vec![(*r).to_string()];
-            match r.to_lowercase().as_str() {
-                "textbox" => { v.push("searchbox".into()); v.push("combobox".into()); }
-                "input" => { v.push("textbox".into()); v.push("searchbox".into()); v.push("combobox".into()); }
-                "button" => { v.push("menuitem".into()); }
-                _ => {}
-            }
-            v
-        }).collect();
+        let expanded: Vec<String> = roles
+            .iter()
+            .flat_map(|&r| {
+                let mut v = vec![(*r).to_string()];
+                match r.to_lowercase().as_str() {
+                    "textbox" => {
+                        v.push("searchbox".into());
+                        v.push("combobox".into());
+                    }
+                    "input" => {
+                        v.push("textbox".into());
+                        v.push("searchbox".into());
+                        v.push("combobox".into());
+                    }
+                    "button" => {
+                        v.push("menuitem".into());
+                    }
+                    _ => {}
+                }
+                v
+            })
+            .collect();
         let filtered: String = output
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
                 if let Some(after_uid) = trimmed.strip_prefix("uid=")
-                    && let Some(rest) = after_uid.split_once(' ') {
-                        let role = rest.1.split([' ', '"']).next().unwrap_or("");
-                        return expanded.iter().any(|r| r.eq_ignore_ascii_case(role));
-                    }
+                    && let Some(rest) = after_uid.split_once(' ')
+                {
+                    let role = rest.1.split([' ', '"']).next().unwrap_or("");
+                    return expanded.iter().any(|r| r.eq_ignore_ascii_case(role));
+                }
                 false
             })
             .fold(String::new(), |mut acc, line| {
@@ -168,8 +179,11 @@ fn format_ax_tree(
         // Warn if filter matched nothing — likely the matching elements are deeper
         // than max_depth. This prevents silent empty output that confuses agents.
         if filtered.is_empty() && max_depth.is_some() {
-            format!("No elements matching filter {:?} found within --max-depth {}. Try increasing depth or removing --max-depth.\n",
-                roles, max_depth.unwrap_or(0))
+            format!(
+                "No elements matching filter {:?} found within --max-depth {}. Try increasing depth or removing --max-depth.\n",
+                roles,
+                max_depth.unwrap_or(0)
+            )
         } else {
             filtered
         }
@@ -192,7 +206,15 @@ fn format_node(
 ) {
     let mut discard: HashMap<String, String> = HashMap::new();
     format_node_with_tracking(
-        node_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, &mut discard,
+        node_id,
+        nodes,
+        depth,
+        verbose,
+        max_depth,
+        uid_counter,
+        uid_map,
+        output,
+        &mut discard,
     );
 }
 
@@ -216,7 +238,17 @@ fn format_node_with_tracking(
         // Still recurse into children — some ignored nodes have visible children
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
-                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id);
+                format_node_with_tracking(
+                    child_id,
+                    nodes,
+                    depth,
+                    verbose,
+                    max_depth,
+                    uid_counter,
+                    uid_map,
+                    output,
+                    uid_to_node_id,
+                );
             }
         }
         return;
@@ -230,31 +262,53 @@ fn format_node_with_tracking(
     if !verbose && NOISE_ROLES.contains(&role) {
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
-                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id);
+                format_node_with_tracking(
+                    child_id,
+                    nodes,
+                    depth,
+                    verbose,
+                    max_depth,
+                    uid_counter,
+                    uid_map,
+                    output,
+                    uid_to_node_id,
+                );
             }
         }
         return;
     }
 
     // If name is empty and we're filtering noise, pull text from StaticText children
-    if !verbose && name.is_empty()
-        && let Some(child_ids) = &node.child_ids {
-            let texts: Vec<&str> = child_ids
-                .iter()
-                .filter_map(|cid| nodes.get(cid.as_str()))
-                .filter(|n| n.role_name() == Some("StaticText"))
-                .filter_map(|n| n.name_value())
-                .collect();
-            if !texts.is_empty() {
-                name = texts.join(" ");
-            }
+    if !verbose
+        && name.is_empty()
+        && let Some(child_ids) = &node.child_ids
+    {
+        let texts: Vec<&str> = child_ids
+            .iter()
+            .filter_map(|cid| nodes.get(cid.as_str()))
+            .filter(|n| n.role_name() == Some("StaticText"))
+            .filter_map(|n| n.name_value())
+            .collect();
+        if !texts.is_empty() {
+            name = texts.join(" ");
         }
+    }
 
     // Skip generic containers with no name unless verbose
     if !verbose && role == "generic" && name.is_empty() {
         if let Some(child_ids) = &node.child_ids {
             for child_id in child_ids {
-                format_node_with_tracking(child_id, nodes, depth, verbose, max_depth, uid_counter, uid_map, output, uid_to_node_id);
+                format_node_with_tracking(
+                    child_id,
+                    nodes,
+                    depth,
+                    verbose,
+                    max_depth,
+                    uid_counter,
+                    uid_map,
+                    output,
+                    uid_to_node_id,
+                );
             }
         }
         return;
@@ -297,11 +351,12 @@ fn format_node_with_tracking(
     // Value (for inputs)
     if let Some(value_ax) = &node.value
         && let Some(val) = value_ax.value.as_ref().and_then(|v| v.as_str())
-            && !val.is_empty() {
-                output.push_str(" value=\"");
-                output.push_str(val);
-                output.push('"');
-            }
+        && !val.is_empty()
+    {
+        output.push_str(" value=\"");
+        output.push_str(val);
+        output.push('"');
+    }
 
     // Properties: focused, disabled, expanded, selected, level, checked
     if let Some(props) = &node.properties {
@@ -309,31 +364,44 @@ fn format_node_with_tracking(
             let prop_val = prop.value.value.as_ref();
             match prop.name.as_str() {
                 "focused" => {
-                    if prop_val.and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if prop_val
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         output.push_str(" focused");
                     }
                 }
                 "disabled" => {
-                    if prop_val.and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if prop_val
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         output.push_str(" disabled");
                     }
                 }
                 "expanded" => {
-                    if prop_val.and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if prop_val
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         output.push_str(" expanded");
                     }
                 }
                 "selected" => {
-                    if prop_val.and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if prop_val
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         output.push_str(" selected");
                     }
                 }
                 "checked" => {
                     if let Some(val) = prop_val.and_then(|v| v.as_str())
-                        && val != "false" {
-                            output.push_str(" checked=");
-                            output.push_str(val);
-                        }
+                        && val != "false"
+                    {
+                        output.push_str(" checked=");
+                        output.push_str(val);
+                    }
                 }
                 "level" => {
                     if let Some(level) = prop_val.and_then(serde_json::Value::as_u64) {
@@ -341,33 +409,38 @@ fn format_node_with_tracking(
                     }
                 }
                 "required" => {
-                    if prop_val.and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if prop_val
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         output.push_str(" required");
                     }
                 }
                 "readonly" => {
-                    if prop_val.and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                    if prop_val
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         output.push_str(" readonly");
                     }
                 }
                 _ => {
                     // Include all properties in verbose mode
-                    if verbose
-                        && let Some(val) = prop_val {
-                            output.push(' ');
-                            output.push_str(&prop.name);
-                            output.push('=');
-                            match val {
-                                serde_json::Value::Bool(b) => output.push_str(&b.to_string()),
-                                serde_json::Value::Number(n) => output.push_str(&n.to_string()),
-                                serde_json::Value::String(s) => {
-                                    output.push('"');
-                                    output.push_str(s);
-                                    output.push('"');
-                                }
-                                _ => output.push_str(&val.to_string()),
+                    if verbose && let Some(val) = prop_val {
+                        output.push(' ');
+                        output.push_str(&prop.name);
+                        output.push('=');
+                        match val {
+                            serde_json::Value::Bool(b) => output.push_str(&b.to_string()),
+                            serde_json::Value::Number(n) => output.push_str(&n.to_string()),
+                            serde_json::Value::String(s) => {
+                                output.push('"');
+                                output.push_str(s);
+                                output.push('"');
                             }
+                            _ => output.push_str(&val.to_string()),
                         }
+                    }
                 }
             }
         }
@@ -377,9 +450,10 @@ fn format_node_with_tracking(
 
     // Depth limit: skip children if we've reached max_depth
     if let Some(max) = max_depth
-        && depth >= max {
-            return;
-        }
+        && depth >= max
+    {
+        return;
+    }
 
     // Recurse children
     if let Some(child_ids) = &node.child_ids {
@@ -402,7 +476,7 @@ fn format_node_with_tracking(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cdp::types::{AXValue, AXProperty};
+    use crate::cdp::types::{AXProperty, AXValue};
 
     fn make_ax_value(s: &str) -> AXValue {
         AXValue {
@@ -441,28 +515,26 @@ mod tests {
 
     #[test]
     fn formats_simple_tree() {
-        let nodes = vec![
-            AXNode {
-                node_id: "1".into(),
-                ignored: false,
-                role: Some(make_ax_value("heading")),
-                name: Some(make_ax_value("Welcome")),
-                description: None,
-                value: None,
-                properties: Some(vec![AXProperty {
-                    name: "level".into(),
-                    value: AXValue {
-                        value_type: "integer".into(),
-                        value: Some(serde_json::json!(1)),
-                        related_nodes: None,
-                    },
-                }]),
-                child_ids: Some(vec![]),
-                backend_dom_node_id: Some(10),
-                frame_id: None,
-                parent_id: None,
-            },
-        ];
+        let nodes = vec![AXNode {
+            node_id: "1".into(),
+            ignored: false,
+            role: Some(make_ax_value("heading")),
+            name: Some(make_ax_value("Welcome")),
+            description: None,
+            value: None,
+            properties: Some(vec![AXProperty {
+                name: "level".into(),
+                value: AXValue {
+                    value_type: "integer".into(),
+                    value: Some(serde_json::json!(1)),
+                    related_nodes: None,
+                },
+            }]),
+            child_ids: Some(vec![]),
+            backend_dom_node_id: Some(10),
+            frame_id: None,
+            parent_id: None,
+        }];
 
         let (text, uid_map) = format_ax_tree(&nodes, false, None, None, None);
         assert!(text.contains("uid=n10 heading \"Welcome\" level=1"));
@@ -648,7 +720,7 @@ mod tests {
     fn bug_content_center_empty_quad() {
         use crate::cdp::types::BoxModel;
         let model = BoxModel {
-            content: vec![],  // empty quad
+            content: vec![], // empty quad
             padding: vec![],
             border: vec![],
             margin: vec![],

@@ -102,7 +102,8 @@ pub async fn run(
         ),
         other => return Err(format!(
             "Unknown wait type: {other}. Use \"text\", \"url\", \"selector\", or \"network-idle\"."
-        ).into()),
+        )
+        .into()),
     };
 
     loop {
@@ -152,7 +153,9 @@ async fn wait_network_idle(
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let idle = Duration::from_millis(idle_ms);
     // Poll cap so we re-check the idle timer even when no events arrive.
-    let poll = idle.min(Duration::from_millis(100)).max(Duration::from_millis(10));
+    let poll = idle
+        .min(Duration::from_millis(100))
+        .max(Duration::from_millis(10));
 
     let mut tracker = InFlightTracker::new();
     // Already quiet? Start the idle clock immediately.
@@ -281,20 +284,38 @@ mod tests {
     fn observe_reports_idle_transitions() {
         // This is the exact decision the wait loop drives its idle clock from.
         let mut t = InFlightTracker::new();
-        assert_eq!(t.observe("Network.requestWillBeSent", Some("a")), Transition::BecameBusy);
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", Some("a")),
+            Transition::BecameBusy
+        );
         // A second concurrent request does not re-trigger "busy".
-        assert_eq!(t.observe("Network.requestWillBeSent", Some("b")), Transition::NoChange);
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", Some("b")),
+            Transition::NoChange
+        );
         // First of two finishing keeps us busy.
-        assert_eq!(t.observe("Network.loadingFinished", Some("a")), Transition::NoChange);
+        assert_eq!(
+            t.observe("Network.loadingFinished", Some("a")),
+            Transition::NoChange
+        );
         // Last one finishing flips to idle exactly once.
-        assert_eq!(t.observe("Network.loadingFinished", Some("b")), Transition::BecameIdle);
+        assert_eq!(
+            t.observe("Network.loadingFinished", Some("b")),
+            Transition::BecameIdle
+        );
     }
 
     #[test]
     fn observe_ignores_noise_without_transition() {
         let mut t = InFlightTracker::new();
-        assert_eq!(t.observe("Network.responseReceived", Some("x")), Transition::NoChange);
-        assert_eq!(t.observe("Network.requestWillBeSent", None), Transition::NoChange);
+        assert_eq!(
+            t.observe("Network.responseReceived", Some("x")),
+            Transition::NoChange
+        );
+        assert_eq!(
+            t.observe("Network.requestWillBeSent", None),
+            Transition::NoChange
+        );
         assert!(t.is_idle());
     }
 }

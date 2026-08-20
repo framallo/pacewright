@@ -61,7 +61,9 @@ fn write_recipe() -> (std::path::PathBuf, std::path::PathBuf) {
 /// Liveness by TCP connect, not an HTTP client: the probe must not drag a new dependency into the
 /// crate just to ask whether something is listening.
 async fn endpoint_live(url: &str) -> bool {
-    let addr = url.trim_start_matches("http://").trim_start_matches("https://");
+    let addr = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::net::TcpStream::connect(addr),
@@ -107,7 +109,10 @@ async fn three_recipes_run_on_three_chromes_at_once() {
         }
     }
     assert_eq!(ok, 3, "all three runs must succeed");
-    eprintln!("3 concurrent runs over 3 Chromes in {:?}", started.elapsed());
+    eprintln!(
+        "3 concurrent runs over 3 Chromes in {:?}",
+        started.elapsed()
+    );
     let _ = std::fs::remove_file(&recipe);
     let _ = std::fs::remove_file(&page);
 }
@@ -118,10 +123,17 @@ async fn one_chrome_still_works_and_serializes() {
     let _live = LIVE.lock().await;
     // The regression guard for the other use case: a pool of one is the original behavior. Two runs
     // against a single Chrome must both succeed, one after the other, never sharing the tab.
-    assert!(endpoint_live(ENDPOINTS[0]).await, "{} not listening", ENDPOINTS[0]);
+    assert!(
+        endpoint_live(ENDPOINTS[0]).await,
+        "{} not listening",
+        ENDPOINTS[0]
+    );
     let (recipe, page) = write_recipe();
-    let runner =
-        std::sync::Arc::new(NativeRecipeRunner::new().connect(ENDPOINTS[0]).timeout_secs(60));
+    let runner = std::sync::Arc::new(
+        NativeRecipeRunner::new()
+            .connect(ENDPOINTS[0])
+            .timeout_secs(60),
+    );
     let mut set = tokio::task::JoinSet::new();
     for _ in 0..2 {
         let r = runner.clone();
@@ -129,7 +141,9 @@ async fn one_chrome_still_works_and_serializes() {
         set.spawn(async move { r.run(&p, "{}", &RunOpts::default()).await });
     }
     while let Some(joined) = set.join_next().await {
-        let v = joined.expect("task panicked").expect("run on the single Chrome failed");
+        let v = joined
+            .expect("task panicked")
+            .expect("run on the single Chrome failed");
         assert_eq!(v["ok"], true, "{v}");
     }
     let _ = std::fs::remove_file(&recipe);

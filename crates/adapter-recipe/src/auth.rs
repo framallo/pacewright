@@ -159,7 +159,10 @@ impl LoginLauncher for NativeLoginLauncher {
         let stealth = self.stealth;
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     let _ = tx.send(Err(format!("login runtime: {e}")));

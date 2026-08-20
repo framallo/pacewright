@@ -11,11 +11,11 @@
 pub mod anthropic_oauth;
 pub mod claude_cli;
 pub mod solver;
-pub use solver::ClaudeSolver;
 use async_trait::async_trait;
 use pacewright_core::adapter::{Adapter, RunCtx};
 use pacewright_core::model::{ActionSpec, AdapterError};
 use serde_json::{json, Value};
+pub use solver::ClaudeSolver;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -368,13 +368,17 @@ impl Completer for AnthropicCompleter {
             .filter(|s| !s.is_empty())
         {
             Some(t) => Some(t),
-            None => {
-                anthropic_oauth::resolve_access_token(&self.secrets_path, &*self.token_http, now_ms())
-                    .await
-                    .map_err(AdapterError::Terminal)?
-            }
+            None => anthropic_oauth::resolve_access_token(
+                &self.secrets_path,
+                &*self.token_http,
+                now_ms(),
+            )
+            .await
+            .map_err(AdapterError::Terminal)?,
         };
-        let key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty());
+        let key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let use_oauth = oauth.is_some();
         let headers: Vec<(String, String)> = if let Some(tok) = &oauth {
@@ -382,7 +386,10 @@ impl Completer for AnthropicCompleter {
                 ("authorization".into(), format!("Bearer {tok}")),
                 ("anthropic-beta".into(), anthropic_oauth::OAUTH_BETA.into()),
                 ("anthropic-version".into(), ANTHROPIC_VERSION.into()),
-                ("user-agent".into(), anthropic_oauth::INFERENCE_USER_AGENT.into()),
+                (
+                    "user-agent".into(),
+                    anthropic_oauth::INFERENCE_USER_AGENT.into(),
+                ),
             ]
         } else if let Some(k) = &key {
             vec![

@@ -25,7 +25,7 @@ pub use auth::{
 pub use pool::{ChromeLease, ChromePool};
 pub use registry::{RecipeMeta, RecipeRegistry, RecipeVar};
 pub use runner::{
-    chrome_agent_bin, recipe_subcommand_available, CliRecipeRunner, NativeRecipeRunner, RecipeRunner,
-    RunOpts,
+    chrome_agent_bin, recipe_subcommand_available, CliRecipeRunner, NativeRecipeRunner,
+    RecipeRunner, RunOpts,
 };
 pub use schedule::{partition, reconcile, validate, ReconcileReport, ScheduleEntry, Timing};

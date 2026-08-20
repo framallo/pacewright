@@ -100,10 +100,13 @@ async fn handle_client(stream: UnixStream, _activity: mpsc::Sender<()>) {
 
     while let Ok(Some(line)) = lines.next_line().await {
         let response = process_command(&line);
-        let json = serde_json::to_string(&response).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":"serialization failed"}"#.to_string()
-        });
-        if writer.write_all(format!("{json}\n").as_bytes()).await.is_err() {
+        let json = serde_json::to_string(&response)
+            .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_string());
+        if writer
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -128,7 +131,11 @@ fn process_command(line: &str) -> serde_json::Value {
 
         "status" => {
             let store = session::load_session().unwrap_or_default();
-            let browsers: Vec<&str> = store.browsers.keys().map(std::string::String::as_str).collect();
+            let browsers: Vec<&str> = store
+                .browsers
+                .keys()
+                .map(std::string::String::as_str)
+                .collect();
             serde_json::json!({
                 "ok": true,
                 "data": {
@@ -193,8 +200,7 @@ pub fn spawn_daemon() -> Result<(), DaemonError> {
 pub async fn ensure_daemon() -> Result<(), DaemonError> {
     if session::daemon_socket_exists() {
         // Try connecting to verify it's alive
-        let socket_path = session::daemon_socket_path()
-            .map_err(|e| DaemonError(e.to_string()))?;
+        let socket_path = session::daemon_socket_path().map_err(|e| DaemonError(e.to_string()))?;
         if try_ping_daemon(&socket_path).await {
             return Ok(());
         }
@@ -205,8 +211,7 @@ pub async fn ensure_daemon() -> Result<(), DaemonError> {
     spawn_daemon()?;
 
     // Wait for daemon to be ready
-    let socket_path = session::daemon_socket_path()
-        .map_err(|e| DaemonError(e.to_string()))?;
+    let socket_path = session::daemon_socket_path().map_err(|e| DaemonError(e.to_string()))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -227,7 +232,11 @@ async fn try_ping_daemon(socket_path: &Path) -> bool {
 
     use tokio::io::AsyncReadExt;
     let msg = r#"{"command":"ping"}"#;
-    if stream.write_all(format!("{msg}\n").as_bytes()).await.is_err() {
+    if stream
+        .write_all(format!("{msg}\n").as_bytes())
+        .await
+        .is_err()
+    {
         return false;
     }
     if stream.shutdown().await.is_err() {

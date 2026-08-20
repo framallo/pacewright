@@ -1,9 +1,9 @@
 use anyhow::Result;
+use pacewright_adapter_agent::{AnthropicCompleter, ClaudeSolver};
 use pacewright_adapter_recipe::{
     schedule, AuthManager, ChromePool, NativeLoginLauncher, NativeRecipeRunner, RecipeRegistry,
     RecipeRunner,
 };
-use pacewright_adapter_agent::{AnthropicCompleter, ClaudeSolver};
 use pacewright_core::clock::SystemClock;
 use pacewright_core::config::Config;
 use pacewright_core::engine::Engine;

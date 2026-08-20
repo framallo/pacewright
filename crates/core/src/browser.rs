@@ -403,12 +403,16 @@ mod connect_tests {
         // Not a hash-quality claim — just that eight accounts over four Chromes use more than one
         // of them. A hash that sent everything to slot 0 would pass every test above and defeat
         // the entire point of the pool.
-        let used: std::collections::BTreeSet<usize> =
-            ["acme", "globex", "initech", "umbrella", "soylent", "tyrell", "wayne", "stark"]
-                .iter()
-                .map(|a| slot_for_account(a, 4))
-                .collect();
-        assert!(used.len() > 1, "every account landed on the same Chrome: {used:?}");
+        let used: std::collections::BTreeSet<usize> = [
+            "acme", "globex", "initech", "umbrella", "soylent", "tyrell", "wayne", "stark",
+        ]
+        .iter()
+        .map(|a| slot_for_account(a, 4))
+        .collect();
+        assert!(
+            used.len() > 1,
+            "every account landed on the same Chrome: {used:?}"
+        );
     }
 
     #[test]

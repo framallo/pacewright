@@ -5,7 +5,8 @@ use serde_json::json;
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::{
-    DispatchMouseEventParams, GetBoxModelResult, MouseButton, MouseEventType, ResolveNodeParams, ResolveNodeResult,
+    DispatchMouseEventParams, GetBoxModelResult, MouseButton, MouseEventType, ResolveNodeParams,
+    ResolveNodeResult,
 };
 use crate::element_ref::ElementRef;
 
@@ -180,7 +181,10 @@ async fn js_click(client: &CdpClient, object_id: &str) -> Result<(), ElementErro
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(ElementError::Action(format!(
             "JS click threw: {}",
-            exception.get("text").and_then(|t| t.as_str()).unwrap_or("unknown")
+            exception
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("unknown")
         )));
     }
 
@@ -214,7 +218,8 @@ pub async fn fill(
             }
             this.dispatchEvent(new Event('input', {bubbles: true}));
             this.dispatchEvent(new Event('change', {bubbles: true}));
-        }".to_string();
+        }"
+    .to_string();
 
     let result: serde_json::Value = client
         .call(
@@ -246,10 +251,7 @@ pub async fn fill(
 }
 
 /// Type text character by character using Input.insertText.
-pub async fn type_text(
-    client: &CdpClient,
-    text: &str,
-) -> Result<(), ElementError> {
+pub async fn type_text(client: &CdpClient, text: &str) -> Result<(), ElementError> {
     client
         .send("Input.insertText", json!({ "text": text }))
         .await
@@ -260,10 +262,7 @@ pub async fn type_text(
 }
 
 /// Press a key (Enter, Tab, Escape, etc.).
-pub async fn press_key(
-    client: &CdpClient,
-    key: &str,
-) -> Result<(), ElementError> {
+pub async fn press_key(client: &CdpClient, key: &str) -> Result<(), ElementError> {
     // Map common key names to their virtual key codes and text values
     let (vk_code, text) = match key {
         "Enter" | "Return" => (13, Some("\r")),
@@ -321,9 +320,7 @@ pub async fn hover(
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
     let (x, y) = resolved.center.ok_or_else(|| {
-        ElementError::NotInteractable(format!(
-            "Element uid={uid} has no visible box model."
-        ))
+        ElementError::NotInteractable(format!("Element uid={uid} has no visible box model."))
     })?;
 
     client
@@ -382,11 +379,7 @@ pub enum ElementError {
 }
 
 /// Click at explicit (x, y) coordinates using Input.dispatchMouseEvent.
-pub async fn click_at_coords(
-    client: &CdpClient,
-    x: f64,
-    y: f64,
-) -> Result<(), ElementError> {
+pub async fn click_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
     // mousePressed
     client
         .send(
@@ -438,21 +431,21 @@ pub async fn click_at_coords(
 /// required by dialogs/submits that ignore a synthetic `element.click()` (e.g. the Spotify crop-modal
 /// "Save" and the final "Schedule" submit silently revert under a synthetic click). Falls back to a
 /// JS `.click()` only when the element has no box model (hidden / zero-size custom control).
-pub async fn click_selector(
-    client: &CdpClient,
-    selector: &str,
-) -> Result<(), ElementError> {
+pub async fn click_selector(client: &CdpClient, selector: &str) -> Result<(), ElementError> {
     // Verify the selector matches and scroll the element into view (so its box model is on-screen).
     let sel_json = serde_json::to_string(selector).unwrap_or_default();
     let check: serde_json::Value = client
-        .call("Runtime.evaluate", json!({
-            "expression": format!(
-                "(() => {{ const el = document.querySelector({sel_json}); \
-                 if (!el) throw new Error('No element matches selector: ' + {sel_json}); \
-                 el.scrollIntoView({{ block: 'center', inline: 'center' }}); return true; }})()"
-            ),
-            "returnByValue": true,
-        }))
+        .call(
+            "Runtime.evaluate",
+            json!({
+                "expression": format!(
+                    "(() => {{ const el = document.querySelector({sel_json}); \
+                     if (!el) throw new Error('No element matches selector: ' + {sel_json}); \
+                     el.scrollIntoView({{ block: 'center', inline: 'center' }}); return true; }})()"
+                ),
+                "returnByValue": true,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("click_selector failed: {e}")))?;
     if let Some(exception) = check.get("exceptionDetails") {
@@ -476,14 +469,19 @@ pub async fn click_selector(
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| ElementError::Action("Could not get root nodeId".into()))?;
     let qs: serde_json::Value = client
-        .call("DOM.querySelector", json!({ "nodeId": root_node_id, "selector": selector }))
+        .call(
+            "DOM.querySelector",
+            json!({ "nodeId": root_node_id, "selector": selector }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("DOM.querySelector failed: {e}")))?;
     let node_id = qs
         .get("nodeId")
         .and_then(serde_json::Value::as_i64)
         .filter(|id| *id != 0)
-        .ok_or_else(|| ElementError::NotFound(format!("No element matches selector: {selector}")))?;
+        .ok_or_else(|| {
+            ElementError::NotFound(format!("No element matches selector: {selector}"))
+        })?;
 
     let box_result: Result<GetBoxModelResult, _> = client
         .call("DOM.getBoxModel", json!({ "nodeId": node_id }))
@@ -507,7 +505,10 @@ async fn js_click_selector(client: &CdpClient, selector: &str) -> Result<(), Ele
         sel = serde_json::to_string(selector).unwrap_or_default()
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .call(
+            "Runtime.evaluate",
+            json!({ "expression": js, "returnByValue": true }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("click_selector failed: {e}")))?;
     if let Some(exception) = result.get("exceptionDetails") {
@@ -536,21 +537,24 @@ pub async fn insert_text_selector(
 ) -> Result<(), ElementError> {
     let sel_json = serde_json::to_string(selector).unwrap_or_default();
     let prep: serde_json::Value = client
-        .call("Runtime.evaluate", json!({
-            "expression": format!(
-                "(() => {{ const el = document.querySelector({sel_json}); \
-                 if (!el) throw new Error('No element matches selector: ' + {sel_json}); \
-                 el.focus(); \
-                 const range = document.createRange(); \
-                 range.selectNodeContents(el); \
-                 const sel = window.getSelection(); \
-                 sel.removeAllRanges(); \
-                 sel.addRange(range); \
-                 document.dispatchEvent(new Event('selectionchange')); \
-                 return true; }})()"
-            ),
-            "returnByValue": true,
-        }))
+        .call(
+            "Runtime.evaluate",
+            json!({
+                "expression": format!(
+                    "(() => {{ const el = document.querySelector({sel_json}); \
+                     if (!el) throw new Error('No element matches selector: ' + {sel_json}); \
+                     el.focus(); \
+                     const range = document.createRange(); \
+                     range.selectNodeContents(el); \
+                     const sel = window.getSelection(); \
+                     sel.removeAllRanges(); \
+                     sel.addRange(range); \
+                     document.dispatchEvent(new Event('selectionchange')); \
+                     return true; }})()"
+                ),
+                "returnByValue": true,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("insert_text_selector prep failed: {e}")))?;
     check_js_exception(&prep)?;
@@ -591,7 +595,10 @@ pub async fn fill_selector(
         val = serde_json::to_string(value).unwrap_or_default()
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .call(
+            "Runtime.evaluate",
+            json!({ "expression": js, "returnByValue": true }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("fill_selector failed: {e}")))?;
 
@@ -610,10 +617,7 @@ pub async fn fill_selector(
 }
 
 /// Focus an element matched by a CSS selector via Runtime.evaluate.
-pub async fn focus_selector(
-    client: &CdpClient,
-    selector: &str,
-) -> Result<(), ElementError> {
+pub async fn focus_selector(client: &CdpClient, selector: &str) -> Result<(), ElementError> {
     let js = format!(
         r"(() => {{
             const el = document.querySelector({sel});
@@ -623,7 +627,10 @@ pub async fn focus_selector(
         sel = serde_json::to_string(selector).unwrap_or_default()
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }))
+        .call(
+            "Runtime.evaluate",
+            json!({ "expression": js, "returnByValue": true }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("focus_selector failed: {e}")))?;
 
@@ -668,7 +675,10 @@ pub async fn dblclick(
         .await;
 
     let box_result: Result<GetBoxModelResult, _> = client
-        .call("DOM.getBoxModel", json!({ "backendNodeId": resolved.backend_node_id }))
+        .call(
+            "DOM.getBoxModel",
+            json!({ "backendNodeId": resolved.backend_node_id }),
+        )
         .await;
 
     let Some((cx, cy)) = box_result.ok().map(|r| r.model.content_center()) else {
@@ -677,26 +687,42 @@ pub async fn dblclick(
 
     for click_count in [1, 2] {
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MousePressed,
-                x: cx, y: cy,
-                button: Some(MouseButton::Left), buttons: Some(1),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
+            .send(
+                "Input.dispatchMouseEvent",
+                DispatchMouseEventParams {
+                    event_type: MouseEventType::MousePressed,
+                    x: cx,
+                    y: cy,
+                    button: Some(MouseButton::Left),
+                    buttons: Some(1),
+                    click_count: Some(click_count),
+                    modifiers: None,
+                    timestamp: None,
+                    delta_x: None,
+                    delta_y: None,
+                    pointer_type: Some("mouse".into()),
+                },
+            )
             .await
             .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
 
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MouseReleased,
-                x: cx, y: cy,
-                button: Some(MouseButton::Left), buttons: Some(0),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
+            .send(
+                "Input.dispatchMouseEvent",
+                DispatchMouseEventParams {
+                    event_type: MouseEventType::MouseReleased,
+                    x: cx,
+                    y: cy,
+                    button: Some(MouseButton::Left),
+                    buttons: Some(0),
+                    click_count: Some(click_count),
+                    modifiers: None,
+                    timestamp: None,
+                    delta_x: None,
+                    delta_y: None,
+                    pointer_type: Some("mouse".into()),
+                },
+            )
             .await
             .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
     }
@@ -726,24 +752,42 @@ async fn js_dblclick(client: &CdpClient, object_id: &str) -> Result<(), ElementE
 pub async fn dblclick_at_coords(client: &CdpClient, x: f64, y: f64) -> Result<(), ElementError> {
     for click_count in [1, 2] {
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MousePressed, x, y,
-                button: Some(MouseButton::Left), buttons: Some(1),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
+            .send(
+                "Input.dispatchMouseEvent",
+                DispatchMouseEventParams {
+                    event_type: MouseEventType::MousePressed,
+                    x,
+                    y,
+                    button: Some(MouseButton::Left),
+                    buttons: Some(1),
+                    click_count: Some(click_count),
+                    modifiers: None,
+                    timestamp: None,
+                    delta_x: None,
+                    delta_y: None,
+                    pointer_type: Some("mouse".into()),
+                },
+            )
             .await
             .map_err(|e| ElementError::Action(format!("mousePressed failed: {e}")))?;
 
         client
-            .send("Input.dispatchMouseEvent", DispatchMouseEventParams {
-                event_type: MouseEventType::MouseReleased, x, y,
-                button: Some(MouseButton::Left), buttons: Some(0),
-                click_count: Some(click_count),
-                modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-                pointer_type: Some("mouse".into()),
-            })
+            .send(
+                "Input.dispatchMouseEvent",
+                DispatchMouseEventParams {
+                    event_type: MouseEventType::MouseReleased,
+                    x,
+                    y,
+                    button: Some(MouseButton::Left),
+                    buttons: Some(0),
+                    click_count: Some(click_count),
+                    modifiers: None,
+                    timestamp: None,
+                    delta_x: None,
+                    delta_y: None,
+                    pointer_type: Some("mouse".into()),
+                },
+            )
             .await
             .map_err(|e| ElementError::Action(format!("mouseReleased failed: {e}")))?;
     }
@@ -774,17 +818,21 @@ pub async fn select_option(
         return opts[idx].text;
     }";
     let result: serde_json::Value = client
-        .call("Runtime.callFunctionOn", json!({
-            "objectId": resolved.object_id,
-            "functionDeclaration": js,
-            "arguments": [{"value": value}],
-            "returnByValue": true,
-        }))
+        .call(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": resolved.object_id,
+                "functionDeclaration": js,
+                "arguments": [{"value": value}],
+                "returnByValue": true,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("select_option failed: {e}")))?;
 
     check_js_exception(&result)?;
-    let text = result.get("result")
+    let text = result
+        .get("result")
         .and_then(|r| r.get("value"))
         .and_then(|v| v.as_str())
         .unwrap_or(value);
@@ -814,12 +862,16 @@ pub async fn select_option_selector(
         }})()"
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({"expression": js, "returnByValue": true}))
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": js, "returnByValue": true}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("select_option_selector failed: {e}")))?;
 
     check_js_exception(&result)?;
-    let text = result.get("result")
+    let text = result
+        .get("result")
         .and_then(|r| r.get("value"))
         .and_then(|v| v.as_str())
         .unwrap_or(value);
@@ -840,15 +892,19 @@ pub async fn set_checked(
     let resolved = resolve_uid(client, uid_map, uid).await?;
 
     let result: serde_json::Value = client
-        .call("Runtime.callFunctionOn", json!({
-            "objectId": resolved.object_id,
-            "functionDeclaration": "function() { return !!this.checked; }",
-            "returnByValue": true,
-        }))
+        .call(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": resolved.object_id,
+                "functionDeclaration": "function() { return !!this.checked; }",
+                "returnByValue": true,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("get checked state failed: {e}")))?;
 
-    let current = result.get("result")
+    let current = result
+        .get("result")
         .and_then(|r| r.get("value"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
@@ -859,7 +915,10 @@ pub async fn set_checked(
     }
 
     click(client, uid_map, uid).await?;
-    Ok(format!("{} uid={uid}", if desired { "Checked" } else { "Unchecked" }))
+    Ok(format!(
+        "{} uid={uid}",
+        if desired { "Checked" } else { "Unchecked" }
+    ))
 }
 
 /// Idempotent check/uncheck by CSS selector.
@@ -881,12 +940,16 @@ pub async fn set_checked_selector(
         }})()"
     );
     let result: serde_json::Value = client
-        .call("Runtime.evaluate", json!({"expression": js, "returnByValue": true}))
+        .call(
+            "Runtime.evaluate",
+            json!({"expression": js, "returnByValue": true}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("set_checked_selector failed: {e}")))?;
 
     check_js_exception(&result)?;
-    let action = result.get("result")
+    let action = result
+        .get("result")
         .and_then(|r| r.get("value"))
         .and_then(|v| v.as_str())
         .unwrap_or("toggled");
@@ -894,7 +957,10 @@ pub async fn set_checked_selector(
     if action == "already" {
         Ok(format!("Already {state_word} selector '{selector}'"))
     } else {
-        Ok(format!("{} selector '{selector}'", if desired { "Checked" } else { "Unchecked" }))
+        Ok(format!(
+            "{} selector '{selector}'",
+            if desired { "Checked" } else { "Unchecked" }
+        ))
     }
 }
 
@@ -916,10 +982,13 @@ pub async fn set_file_input(
     }
     let resolved = resolve_uid(client, uid_map, uid).await?;
     client
-        .send("DOM.setFileInputFiles", json!({
-            "files": files,
-            "backendNodeId": resolved.backend_node_id,
-        }))
+        .send(
+            "DOM.setFileInputFiles",
+            json!({
+                "files": files,
+                "backendNodeId": resolved.backend_node_id,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
     wait_for_stabilization(client).await;
@@ -951,24 +1020,32 @@ pub async fn set_file_input_selector(
         .call("DOM.getDocument", json!({"depth": 0}))
         .await
         .map_err(|e| ElementError::Action(format!("DOM.getDocument failed: {e}")))?;
-    let root_node_id = doc.get("root")
+    let root_node_id = doc
+        .get("root")
         .and_then(|r| r.get("nodeId"))
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| ElementError::Action("Could not get root nodeId".into()))?;
 
     let qs_result: serde_json::Value = client
-        .call("DOM.querySelector", json!({"nodeId": root_node_id, "selector": selector}))
+        .call(
+            "DOM.querySelector",
+            json!({"nodeId": root_node_id, "selector": selector}),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("DOM.querySelector failed: {e}")))?;
-    let node_id = qs_result.get("nodeId")
+    let node_id = qs_result
+        .get("nodeId")
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| ElementError::Action(format!("No element matches selector: {selector}")))?;
 
     client
-        .send("DOM.setFileInputFiles", json!({
-            "files": files,
-            "nodeId": node_id,
-        }))
+        .send(
+            "DOM.setFileInputFiles",
+            json!({
+                "files": files,
+                "nodeId": node_id,
+            }),
+        )
         .await
         .map_err(|e| ElementError::Action(format!("setFileInputFiles failed: {e}")))?;
     wait_for_stabilization(client).await;
@@ -996,37 +1073,79 @@ pub async fn drag(
         ElementError::NotInteractable(format!("Element uid={to_uid} has no visible box model."))
     })?;
 
-    let mouse = |et, x, y, btn: Option<MouseButton>, btns, cc| {
-        DispatchMouseEventParams {
-            event_type: et, x, y,
-            button: btn, buttons: btns, click_count: cc,
-            modifiers: None, timestamp: None, delta_x: None, delta_y: None,
-            pointer_type: Some("mouse".into()),
-        }
+    let mouse = |et, x, y, btn: Option<MouseButton>, btns, cc| DispatchMouseEventParams {
+        event_type: et,
+        x,
+        y,
+        button: btn,
+        buttons: btns,
+        click_count: cc,
+        modifiers: None,
+        timestamp: None,
+        delta_x: None,
+        delta_y: None,
+        pointer_type: Some("mouse".into()),
     };
 
-    client.send("Input.dispatchMouseEvent",
-        mouse(MouseEventType::MouseMoved, x1, y1, None, None, None))
-        .await.map_err(|e| ElementError::Action(format!("drag move failed: {e}")))?;
+    client
+        .send(
+            "Input.dispatchMouseEvent",
+            mouse(MouseEventType::MouseMoved, x1, y1, None, None, None),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("drag move failed: {e}")))?;
 
-    client.send("Input.dispatchMouseEvent",
-        mouse(MouseEventType::MousePressed, x1, y1, Some(MouseButton::Left), Some(1), Some(1)))
-        .await.map_err(|e| ElementError::Action(format!("drag press failed: {e}")))?;
+    client
+        .send(
+            "Input.dispatchMouseEvent",
+            mouse(
+                MouseEventType::MousePressed,
+                x1,
+                y1,
+                Some(MouseButton::Left),
+                Some(1),
+                Some(1),
+            ),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("drag press failed: {e}")))?;
 
     let steps = 5u32;
     for i in 1..=steps {
         let t = f64::from(i) / f64::from(steps);
         let x = (x2 - x1).mul_add(t, x1);
         let y = (y2 - y1).mul_add(t, y1);
-        client.send("Input.dispatchMouseEvent",
-            mouse(MouseEventType::MouseMoved, x, y, Some(MouseButton::Left), Some(1), None))
-            .await.map_err(|e| ElementError::Action(format!("drag step failed: {e}")))?;
+        client
+            .send(
+                "Input.dispatchMouseEvent",
+                mouse(
+                    MouseEventType::MouseMoved,
+                    x,
+                    y,
+                    Some(MouseButton::Left),
+                    Some(1),
+                    None,
+                ),
+            )
+            .await
+            .map_err(|e| ElementError::Action(format!("drag step failed: {e}")))?;
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
 
-    client.send("Input.dispatchMouseEvent",
-        mouse(MouseEventType::MouseReleased, x2, y2, Some(MouseButton::Left), Some(0), Some(1)))
-        .await.map_err(|e| ElementError::Action(format!("drag release failed: {e}")))?;
+    client
+        .send(
+            "Input.dispatchMouseEvent",
+            mouse(
+                MouseEventType::MouseReleased,
+                x2,
+                y2,
+                Some(MouseButton::Left),
+                Some(0),
+                Some(1),
+            ),
+        )
+        .await
+        .map_err(|e| ElementError::Action(format!("drag release failed: {e}")))?;
 
     wait_for_stabilization(client).await;
     Ok(())

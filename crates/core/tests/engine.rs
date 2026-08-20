@@ -642,9 +642,10 @@ async fn test_fanout_materializes_act_tasks_and_marks_ledger() {
     let mut ids: Vec<String> = acts.iter().filter_map(|t| t.touch_id.clone()).collect();
     ids.sort();
     assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
-    assert!(acts
-        .iter()
-        .all(|t| t.dedup_key.as_deref().is_some_and(|k| k.starts_with("touch:test.act:"))));
+    assert!(acts.iter().all(|t| t
+        .dedup_key
+        .as_deref()
+        .is_some_and(|k| k.starts_with("touch:test.act:"))));
     assert!(acts.iter().all(|t| t.status == TaskStatus::Succeeded));
     // Each act task's success recorded its target in the all-time ledger (R7).
     assert!(e.store.is_touched("test.act", "a").unwrap());

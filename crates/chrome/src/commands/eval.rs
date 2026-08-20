@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
@@ -25,10 +25,7 @@ fn maybe_block_scope(expression: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Evaluate JS and return the raw `serde_json::Value` (for JSON mode).
-pub async fn run_raw(
-    client: &CdpClient,
-    expression: &str,
-) -> Result<Value, crate::BoxError> {
+pub async fn run_raw(client: &CdpClient, expression: &str) -> Result<Value, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
         .call(
@@ -57,10 +54,7 @@ pub async fn run_raw(
 }
 
 /// Evaluate JS and return a display string (for text mode).
-pub async fn run(
-    client: &CdpClient,
-    expression: &str,
-) -> Result<String, crate::BoxError> {
+pub async fn run(client: &CdpClient, expression: &str) -> Result<String, crate::BoxError> {
     let expression = maybe_block_scope(expression);
     let result: EvaluateResult = client
         .call(

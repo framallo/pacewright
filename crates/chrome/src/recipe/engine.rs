@@ -270,7 +270,12 @@ async fn condition_holds<B: RecipeBrowser>(
                 .map_err(|e| RecipeError::retryable(e.to_string()))?;
             Ok(r.found)
         }
-        Condition::ValueMatches { value, equals, not_equals, non_empty } => {
+        Condition::ValueMatches {
+            value,
+            equals,
+            not_equals,
+            non_empty,
+        } => {
             // Needs no page: this is what lets a token-only `api` recipe assert on what it
             // captured. A null capture renders as "null"/"" and therefore FAILS a non-empty
             // or equals check, which is the behaviour verification depends on.
@@ -525,7 +530,11 @@ pub async fn run<B: RecipeBrowser>(
                     .map_err(|e| RecipeError::retryable(e.to_string()))?;
                 log_step(opts, &format!("step {n} upload {p} → done"));
             }
-            Step::Download { url, out, timeout_secs } => {
+            Step::Download {
+                url,
+                out,
+                timeout_secs,
+            } => {
                 let u = interpolate(url, &vars);
                 let o = interpolate(out, &vars);
                 // Videos are large; default generous. A recipe can override with `timeout=<secs>`.
@@ -580,7 +589,10 @@ pub async fn run<B: RecipeBrowser>(
                 // The bearer token is injected as an Authorization header (kept out of the recipe
                 // file — pacewright fills the `{{ token }}` var at run time).
                 if let Some(bearer) = &req.bearer {
-                    headers.push(("Authorization".into(), format!("Bearer {}", interpolate(bearer, &vars))));
+                    headers.push((
+                        "Authorization".into(),
+                        format!("Bearer {}", interpolate(bearer, &vars)),
+                    ));
                 }
                 let body = req.body.as_ref().map(|b| interpolate(b, &vars));
                 let resp = browser
@@ -645,7 +657,8 @@ mod tests {
     fn capture_response_indexes_arrays_by_numeric_segment() {
         // Verifying a video's privacy requires walking into `items[0]`. Before numeric
         // segments this silently captured null, which a caller reads as "fine".
-        let body = r#"{"items":[{"status":{"privacyStatus":"unlisted"}}],"pageInfo":{"totalResults":1}}"#;
+        let body =
+            r#"{"items":[{"status":{"privacyStatus":"unlisted"}}],"pageInfo":{"totalResults":1}}"#;
         assert_eq!(
             super::capture_response(body, Some("items.0.status.privacyStatus")),
             serde_json::json!("unlisted")
@@ -661,8 +674,14 @@ mod tests {
         // YouTube answers 200 with empty `items` for an unknown id, so this is the shape
         // an "it was never published" response actually takes.
         let body = r#"{"items":[],"pageInfo":{"totalResults":0}}"#;
-        assert_eq!(super::capture_response(body, Some("items.0.status.privacyStatus")), serde_json::Value::Null);
-        assert_eq!(super::capture_response(body, Some("pageInfo.totalResults")), serde_json::json!(0));
+        assert_eq!(
+            super::capture_response(body, Some("items.0.status.privacyStatus")),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            super::capture_response(body, Some("pageInfo.totalResults")),
+            serde_json::json!(0)
+        );
     }
 
     use super::{RunOptions, run};
@@ -894,14 +913,22 @@ mod tests {
             answer: "AB12".into(),
             seen: std::cell::RefCell::new(None),
         };
-        let out = run(&r, &novars(), &fb, &opts(), Some(&solver)).await.unwrap();
+        let out = run(&r, &novars(), &fb, &opts(), Some(&solver))
+            .await
+            .unwrap();
         // Typed the solver's answer into the locator, and captured it under `key`.
-        assert_eq!(fb.actions.borrow().as_slice(), [Action::Fill("AB12".into())]);
+        assert_eq!(
+            fb.actions.borrow().as_slice(),
+            [Action::Fill("AB12".into())]
+        );
         assert_eq!(out.result["answer"], json!("AB12"));
         // The solver saw the page screenshot and the interpolated prompt.
         let seen = solver.seen.borrow();
         let (image, prompt) = seen.as_ref().unwrap();
-        assert_eq!(image, "ZmFrZQ==", "the page screenshot is handed to the solver");
+        assert_eq!(
+            image, "ZmFrZQ==",
+            "the page screenshot is handed to the solver"
+        );
         assert_eq!(prompt, "read the captcha", "prompt is interpolated");
     }
 
@@ -912,7 +939,10 @@ mod tests {
         let err = run(&r, &novars(), &fb, &opts(), None).await.unwrap_err();
         assert_eq!(err.class, ErrorClass::Terminal);
         assert!(err.message.contains("no solver"), "got: {}", err.message);
-        assert!(fb.actions.borrow().is_empty(), "never filled without an answer");
+        assert!(
+            fb.actions.borrow().is_empty(),
+            "never filled without an answer"
+        );
     }
 
     #[tokio::test]
@@ -991,9 +1021,11 @@ mod tests {
         );
         let fb = FakeBrowser::new().api_responder(|_m, _u, headers, _b| {
             // The engine must have folded bearer into an Authorization header.
-            assert!(headers
-                .iter()
-                .any(|(k, v)| k == "Authorization" && v == "Bearer t0ken"));
+            assert!(
+                headers
+                    .iter()
+                    .any(|(k, v)| k == "Authorization" && v == "Bearer t0ken")
+            );
             ApiResponse {
                 status: 201,
                 body: "{}".into(),
@@ -1019,7 +1051,11 @@ mod tests {
         let r = recipe(r#"recipe "x/y" { step { goto "https://a.test/" } }"#);
         let nb = crate::recipe::browser::NativeBrowser::new();
         let err = run(&r, &novars(), &nb, &opts(), None).await.unwrap_err();
-        assert!(err.message.to_lowercase().contains("browser"), "got: {}", err.message);
+        assert!(
+            err.message.to_lowercase().contains("browser"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
@@ -1107,9 +1143,13 @@ mod tests {
         assert_eq!(
             fb.actions.borrow().as_slice(),
             [
-                Action::Tab { action: "follow".into() },
+                Action::Tab {
+                    action: "follow".into()
+                },
                 Action::Fill("hi".into()),
-                Action::Tab { action: "back".into() },
+                Action::Tab {
+                    action: "back".into()
+                },
             ]
         );
     }

@@ -51,9 +51,15 @@ impl HttpSend for ReqwestHttpSend {
         if let Some(b) = &req.body {
             rb = rb.json(b);
         }
-        let resp = rb.send().await.map_err(|e| format!("request failed: {e}"))?;
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status().as_u16();
-        let text = resp.text().await.map_err(|e| format!("body read failed: {e}"))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("body read failed: {e}"))?;
         Ok((status, text))
     }
 }
@@ -170,7 +176,9 @@ fn value_to_query(v: &Value) -> String {
 fn coerce_obj(params: &Value, key: &str) -> Option<Value> {
     match params.get(key) {
         Some(Value::Object(o)) => Some(Value::Object(o.clone())),
-        Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok().filter(Value::is_object),
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s)
+            .ok()
+            .filter(Value::is_object),
         _ => None,
     }
 }
@@ -179,7 +187,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -252,7 +262,10 @@ impl Adapter for HttpAdapter {
         let ok = (200..300).contains(&status);
         if !ok {
             // 4xx is a config/permission error (terminal); 5xx/429 transient.
-            let msg = format!("http {status}: {}", text.chars().take(300).collect::<String>());
+            let msg = format!(
+                "http {status}: {}",
+                text.chars().take(300).collect::<String>()
+            );
             return Err(if status >= 500 || status == 429 {
                 AdapterError::Retryable(msg)
             } else {
@@ -293,20 +306,29 @@ mod tests {
 
     #[test]
     fn injects_secret_as_header_query_body_bearer() {
-        let secrets = FakeSecrets(HashMap::from([("APOLLO_API_KEY".to_string(), "sk".to_string())]));
+        let secrets = FakeSecrets(HashMap::from([(
+            "APOLLO_API_KEY".to_string(),
+            "sk".to_string(),
+        )]));
         let hdr = build_request(
             &json!({ "url": "u", "secret": { "env": "APOLLO_API_KEY", "as": "header:x-api-key" } }),
             &secrets,
         )
         .unwrap();
-        assert!(hdr.headers.iter().any(|(k, v)| k == "x-api-key" && v == "sk"));
+        assert!(hdr
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "sk"));
 
         let bearer = build_request(
             &json!({ "url": "u", "secret": { "env": "APOLLO_API_KEY", "as": "bearer" } }),
             &secrets,
         )
         .unwrap();
-        assert!(bearer.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk"));
+        assert!(bearer
+            .headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer sk"));
 
         let body = build_request(
             &json!({ "method": "POST", "url": "u", "json": { "q": "x" }, "secret": { "env": "APOLLO_API_KEY", "as": "body:api_key" } }),
@@ -354,11 +376,15 @@ mod tests {
             .await
             .is_ok());
         assert!(matches!(
-            mk(404).execute(&ctx, "request", json!({ "url": "u" })).await,
+            mk(404)
+                .execute(&ctx, "request", json!({ "url": "u" }))
+                .await,
             Err(AdapterError::Terminal(_))
         ));
         assert!(matches!(
-            mk(503).execute(&ctx, "request", json!({ "url": "u" })).await,
+            mk(503)
+                .execute(&ctx, "request", json!({ "url": "u" }))
+                .await,
             Err(AdapterError::Retryable(_))
         ));
     }

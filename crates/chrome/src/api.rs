@@ -63,7 +63,9 @@ pub async fn run_recipe_attached(
 
     let client = run_helpers::connect_page(&http_endpoint, &target_id, at.stealth).await?;
     if at.activate {
-        let _ = client.send("Page.bringToFront", serde_json::json!({})).await;
+        let _ = client
+            .send("Page.bringToFront", serde_json::json!({}))
+            .await;
     }
 
     let src = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
@@ -106,7 +108,8 @@ pub async fn open_page(at: &RecipeAttach<'_>, url: &str) -> Result<(), BoxError>
         .clone()
         .ok_or("no HTTP endpoint on the browser connection")?;
     let target_id = {
-        let bs = session::ensure_browser(&mut store, at.browser, &conn.ws_endpoint, conn.pid, false);
+        let bs =
+            session::ensure_browser(&mut store, at.browser, &conn.ws_endpoint, conn.pid, false);
         run_helpers::resolve_page_target(&browser_client, bs, at.page).await?
     };
     let _ = session::save_session(&mut store);
@@ -115,6 +118,8 @@ pub async fn open_page(at: &RecipeAttach<'_>, url: &str) -> Result<(), BoxError>
         .send("Page.navigate", serde_json::json!({ "url": url }))
         .await
         .map_err(|e| format!("navigate {url}: {e}"))?;
-    let _ = client.send("Page.bringToFront", serde_json::json!({})).await;
+    let _ = client
+        .send("Page.bringToFront", serde_json::json!({}))
+        .await;
     Ok(())
 }

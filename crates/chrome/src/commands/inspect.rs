@@ -13,7 +13,8 @@ pub async fn run(
     focus_uid: Option<&str>,
     role_filter: Option<&[&str]>,
 ) -> Result<Snapshot, crate::BoxError> {
-    let snapshot = crate::snapshot::take_snapshot(client, verbose, max_depth, focus_uid, role_filter).await?;
+    let snapshot =
+        crate::snapshot::take_snapshot(client, verbose, max_depth, focus_uid, role_filter).await?;
     Ok(snapshot)
 }
 
@@ -34,7 +35,8 @@ pub async fn scroll_collect(
     let mut stale_count = 0;
 
     for _ in 0..max_scrolls {
-        let snapshot = crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
+        let snapshot =
+            crate::snapshot::take_snapshot(client, verbose, None, focus_uid, role_filter).await?;
         let prev_len = collected.len();
         for line in snapshot.text.lines() {
             let trimmed = line.trim();
@@ -44,12 +46,16 @@ pub async fn scroll_collect(
         }
         uid_map.extend(snapshot.uid_map);
 
-        if collected.len() >= limit { break; }
+        if collected.len() >= limit {
+            break;
+        }
 
         // If no new items found after scroll, stop (end of list)
         if collected.len() == prev_len {
             stale_count += 1;
-            if stale_count >= 3 { break; }
+            if stale_count >= 3 {
+                break;
+            }
         } else {
             stale_count = 0;
         }
@@ -76,7 +82,11 @@ pub async fn scroll_collect(
     }
 
     collected.truncate(limit);
-    let text = format!("{}\n({} items collected)", collected.join("\n"), collected.len());
+    let text = format!(
+        "{}\n({} items collected)",
+        collected.join("\n"),
+        collected.len()
+    );
     Ok(Snapshot { text, uid_map })
 }
 
@@ -92,16 +102,18 @@ pub async fn resolve_urls(
         // Match lines like "uid=n42 link "Some text""
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("uid=")
-            && let Some((uid, after_uid)) = rest.split_once(' ') {
-                let role = after_uid.split([' ', '"']).next().unwrap_or("");
-                if role == "link"
-                    && let Some(element_ref) = uid_map.get(uid)
-                        && let Some(backend_id) = element_ref.backend_node_id()
-                            && let Ok(href) = resolve_href(client, backend_id).await
-                                && !href.is_empty() {
-                                    result.push_str(&format!(" url=\"{href}\""));
-                                }
+            && let Some((uid, after_uid)) = rest.split_once(' ')
+        {
+            let role = after_uid.split([' ', '"']).next().unwrap_or("");
+            if role == "link"
+                && let Some(element_ref) = uid_map.get(uid)
+                && let Some(backend_id) = element_ref.backend_node_id()
+                && let Ok(href) = resolve_href(client, backend_id).await
+                && !href.is_empty()
+            {
+                result.push_str(&format!(" url=\"{href}\""));
             }
+        }
         result.push('\n');
     }
     result
@@ -133,17 +145,28 @@ pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
     let total_chars = text.chars().count();
 
     if offset == 0 && max_chars.is_none() {
-        return Paged { text: text.to_string(), total_chars, truncated: false, next_offset: None };
+        return Paged {
+            text: text.to_string(),
+            total_chars,
+            truncated: false,
+            next_offset: None,
+        };
     }
 
     // Byte index of the offset-th char (clamped to end).
-    let start_byte = text.char_indices().nth(offset).map_or(text.len(), |(i, _)| i);
+    let start_byte = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(i, _)| i);
     let window = &text[start_byte..];
     let window_chars = total_chars.saturating_sub(offset);
 
     let (shown, kept) = match max_chars {
         Some(max) if window_chars > max => {
-            let end_byte = window.char_indices().nth(max).map_or(window.len(), |(i, _)| i);
+            let end_byte = window
+                .char_indices()
+                .nth(max)
+                .map_or(window.len(), |(i, _)| i);
             (&window[..end_byte], max)
         }
         _ => (window, window_chars),
@@ -169,12 +192,15 @@ pub fn paginate(text: &str, offset: usize, max_chars: Option<usize>) -> Paged {
 
 async fn resolve_href(client: &CdpClient, backend_node_id: i64) -> Result<String, crate::BoxError> {
     let resolved: crate::cdp::types::ResolveNodeResult = client
-        .call("DOM.resolveNode", crate::cdp::types::ResolveNodeParams {
-            node_id: None,
-            backend_node_id: Some(backend_node_id),
-            object_group: Some("chrome-agent-urls".into()),
-            execution_context_id: None,
-        })
+        .call(
+            "DOM.resolveNode",
+            crate::cdp::types::ResolveNodeParams {
+                node_id: None,
+                backend_node_id: Some(backend_node_id),
+                object_group: Some("chrome-agent-urls".into()),
+                execution_context_id: None,
+            },
+        )
         .await?;
     let object_id = resolved.object.object_id.ok_or("no objectId")?;
     let result: serde_json::Value = client
@@ -184,7 +210,8 @@ async fn resolve_href(client: &CdpClient, backend_node_id: i64) -> Result<String
             "returnByValue": true,
         }))
         .await?;
-    let href = result.get("result")
+    let href = result
+        .get("result")
         .and_then(|r| r.get("value"))
         .and_then(|v| v.as_str())
         .unwrap_or("");

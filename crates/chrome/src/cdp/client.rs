@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 
 use super::transport::{self, CdpSender, CdpTransportError};
 use super::types::{CdpEvent, CdpMessage, CdpRequest, CdpResponse};
@@ -80,8 +80,7 @@ impl CdpClient {
         session_id: Option<String>,
     ) -> Result<R, CdpClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let params_value =
-            serde_json::to_value(params).map_err(CdpClientError::Serialization)?;
+        let params_value = serde_json::to_value(params).map_err(CdpClientError::Serialization)?;
 
         let request = CdpRequest {
             id,
@@ -176,7 +175,11 @@ impl CdpClient {
                         let _ = sender.send(request.to_string()).await;
                         eprintln!(
                             "dialog auto-{}: {dtype} {message:?}",
-                            if decision.accept { "accepted" } else { "dismissed" }
+                            if decision.accept {
+                                "accepted"
+                            } else {
+                                "dismissed"
+                            }
                         );
                     }
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -197,10 +200,9 @@ impl CdpClient {
             loop {
                 match rx.recv().await {
                     Ok(event) if event.method == method => return Ok(event),
-                    Ok(_)
-                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        return Err(CdpClientError::DispatcherGone)
+                        return Err(CdpClientError::DispatcherGone);
                     }
                 }
             }
@@ -227,7 +229,7 @@ impl CdpClient {
                 return Err(CdpClientError::Protocol {
                     code: -1,
                     message: format!("Unknown domain: {domain}"),
-                })
+                });
             }
         };
 

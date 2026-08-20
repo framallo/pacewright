@@ -313,9 +313,7 @@ impl Default for NativeRecipeRunner {
 impl NativeRecipeRunner {
     pub fn new() -> Self {
         Self {
-            pool: crate::pool::ChromePool::new(
-                pacewright_core::browser::default_connect_pool(),
-            ),
+            pool: crate::pool::ChromePool::new(pacewright_core::browser::default_connect_pool()),
             browser_name: "pacewright".to_string(),
             page_name: "pacewright".to_string(),
             stealth: true,
@@ -373,7 +371,10 @@ impl RecipeRunner for NativeRecipeRunner {
         // Per-slot bookkeeping name: chrome-agent caches a page's CDP target id under
         // `--browser <name>`, so N Chromes under one name would look up each other's tabs.
         let browser_name = lease.browser_name(&self.browser_name);
-        let page = opts.account.clone().unwrap_or_else(|| self.page_name.clone());
+        let page = opts
+            .account
+            .clone()
+            .unwrap_or_else(|| self.page_name.clone());
         let activate = opts.foreground;
         let path = recipe_path.to_string_lossy().to_string();
 
@@ -381,7 +382,14 @@ impl RecipeRunner for NativeRecipeRunner {
         // path never got it, and the pool made it matter: more Chromes means more cached tabs, and
         // a tab closed since chrome-agent recorded it is otherwise a permanent task failure.
         let outcome = self
-            .attached(&connect, &browser_name, &page, &path, vars.clone(), activate)
+            .attached(
+                &connect,
+                &browser_name,
+                &page,
+                &path,
+                vars.clone(),
+                activate,
+            )
             .await;
         if is_stale_outcome(&outcome) {
             pacewright_core::browser::prune_stale_page(&browser_name, &page);
@@ -420,7 +428,10 @@ impl NativeRecipeRunner {
         let solver = self.solver.clone();
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Value, AdapterError>>();
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     let _ = tx.send(Err(AdapterError::Terminal(format!("recipe runtime: {e}"))));
@@ -444,7 +455,8 @@ impl NativeRecipeRunner {
                     timeout_secs,
                     activate,
                 };
-                match pacewright_chrome::api::run_recipe_attached(&at, &path, vars, solver_ref).await
+                match pacewright_chrome::api::run_recipe_attached(&at, &path, vars, solver_ref)
+                    .await
                 {
                     Ok(o) => Ok(serde_json::json!({
                         "ok": true, "result": o.result, "unexpected": o.unexpected,

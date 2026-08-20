@@ -51,7 +51,7 @@ impl Adapter for DataAdapter {
                 name: "append".into(),
                 limit_keys: vec![],
                 params_schema: json!({
-                    "dataset": "string (e.g. x/pool-ai)",
+                    "dataset": "string (e.g. leads/warm)",
                     "items": "array|object of rows to add",
                     "key?": "field to dedup on; omit to dedup on whole rows"
                 }),
@@ -175,7 +175,11 @@ mod tests {
     async fn append_accepts_a_lone_object() {
         let a = adapter();
         let r = a
-            .execute(&ctx(), "append", json!({ "dataset": "d", "items": {"h":"x"}, "key": "h" }))
+            .execute(
+                &ctx(),
+                "append",
+                json!({ "dataset": "d", "items": {"h":"x"}, "key": "h" }),
+            )
             .await
             .unwrap();
         assert_eq!(r["added"], 1);

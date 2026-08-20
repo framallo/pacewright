@@ -84,7 +84,11 @@ pub fn diff_stats(diff: &str) -> DiffStats {
             changed += 1;
         }
     }
-    DiffStats { added, removed, changed }
+    DiffStats {
+        added,
+        removed,
+        changed,
+    }
 }
 
 /// Extract uid -> trimmed line from snapshot text.
@@ -153,7 +157,8 @@ mod tests {
     #[test]
     fn mixed_changes() {
         let old = "uid=n1 heading \"Title\"\nuid=n2 button \"Submit\"\nuid=n3 textbox value=\"\"\n";
-        let new = "uid=n1 heading \"Title\"\nuid=n3 textbox value=\"done\"\nuid=n4 heading \"Success\"\n";
+        let new =
+            "uid=n1 heading \"Title\"\nuid=n3 textbox value=\"done\"\nuid=n4 heading \"Success\"\n";
         let result = diff_snapshots(old, new);
         assert!(result.contains("+ uid=n4"));
         assert!(result.contains("- uid=n2"));

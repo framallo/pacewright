@@ -121,9 +121,13 @@ pub async fn run_recipe(
         }
         Err(e) => {
             if repair.enabled {
-                let ctx =
-                    repair_context(&browser.active_client(), &src, &recipe, &format!("run failed: {e}"))
-                        .await;
+                let ctx = repair_context(
+                    &browser.active_client(),
+                    &src,
+                    &recipe,
+                    &format!("run failed: {e}"),
+                )
+                .await;
                 emit_repair(&ctx, repair.out.as_deref())?;
             }
             Err(Box::new(e))

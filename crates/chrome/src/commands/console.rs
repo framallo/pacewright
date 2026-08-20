@@ -66,14 +66,9 @@ pub async fn inject(client: &CdpClient) {
         .await;
 
     // Bootstrap on the current page (guard prevents double-init)
-    let guarded = format!(
-        "if (!window.__chrome_agent_console) {{ {INTERCEPTOR_JS} }}"
-    );
+    let guarded = format!("if (!window.__chrome_agent_console) {{ {INTERCEPTOR_JS} }}");
     let _ = client
-        .send(
-            "Runtime.evaluate",
-            json!({ "expression": guarded }),
-        )
+        .send("Runtime.evaluate", json!({ "expression": guarded }))
         .await;
 }
 
@@ -114,8 +109,8 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .unwrap_or("[]");
 
-    let entries: Vec<ConsoleEntry> = serde_json::from_str(raw)
-        .map_err(|e| format!("Failed to parse console buffer: {e}"))?;
+    let entries: Vec<ConsoleEntry> =
+        serde_json::from_str(raw).map_err(|e| format!("Failed to parse console buffer: {e}"))?;
 
     let filtered: Vec<ConsoleEntry> = if let Some(level) = level_filter {
         entries.into_iter().filter(|e| e.level == level).collect()

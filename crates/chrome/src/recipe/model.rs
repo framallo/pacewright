@@ -99,9 +99,16 @@ pub struct Expectation {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Condition {
-    SettledUrlMatches { pattern: String },
-    Visible { locator: Locator },
-    TextMatches { pattern: String, locator: Locator },
+    SettledUrlMatches {
+        pattern: String,
+    },
+    Visible {
+        locator: Locator,
+    },
+    TextMatches {
+        pattern: String,
+        locator: Locator,
+    },
     /// Compare a RENDERED value (typically an earlier `capture`) against an expectation.
     /// The only condition that needs no page, so a token-only `api` recipe can assert on
     /// what it captured. Without it such a recipe can observe but never fail, and a check
@@ -401,7 +408,12 @@ fn parse_condition(node: &KdlNode) -> Result<Condition, BoxError> {
             if equals.is_none() && not_equals.is_none() && !non_empty {
                 return Err("value requires equals=, not-equals= or non-empty=#true".into());
             }
-            Ok(Condition::ValueMatches { value, equals, not_equals, non_empty })
+            Ok(Condition::ValueMatches {
+                value,
+                equals,
+                not_equals,
+                non_empty,
+            })
         }
         other => Err(format!("unknown expect condition `{other}`").into()),
     }
@@ -492,7 +504,9 @@ fn parse_step(node: &KdlNode) -> Result<Step, BoxError> {
         }),
         "solve" => Ok(Step::Solve {
             prompt: first_arg_str(verb)
-                .ok_or("solve requires a prompt string (what to ask the solver about the challenge)")?
+                .ok_or(
+                    "solve requires a prompt string (what to ask the solver about the challenge)",
+                )?
                 .to_string(),
             locator: required_locator(verb)?,
             key: prop_str(verb, "key").map(str::to_string),
@@ -774,7 +788,13 @@ impl Recipe {
                     {
                         push(pattern);
                     }
-                    if let Condition::ValueMatches { value, equals, not_equals, .. } = condition {
+                    if let Condition::ValueMatches {
+                        value,
+                        equals,
+                        not_equals,
+                        ..
+                    } = condition
+                    {
                         push(value);
                         if let Some(e) = equals {
                             push(e);
@@ -867,7 +887,13 @@ recipe "t/x" {
 }"#;
         let r = super::Recipe::parse(src).expect("value condition must parse");
         let has = r.steps.iter().any(|s| {
-            matches!(s, super::Step::Expect { condition: super::Condition::ValueMatches { .. }, .. })
+            matches!(
+                s,
+                super::Step::Expect {
+                    condition: super::Condition::ValueMatches { .. },
+                    ..
+                }
+            )
         });
         assert!(has, "expected a ValueMatches condition");
     }
@@ -878,7 +904,10 @@ recipe "t/x" {
 recipe "t/x" {
     step { expect on-fail="terminal" message="m" { value "{{ a }}" } }
 }"#;
-        assert!(super::Recipe::parse(src).is_err(), "bare `value` with no comparison must be rejected");
+        assert!(
+            super::Recipe::parse(src).is_err(),
+            "bare `value` with no comparison must be rejected"
+        );
     }
 
     use super::{ErrorClass, Format, Recipe, Step};
@@ -1093,7 +1122,10 @@ recipe "t/x" {
         assert_eq!(req.expect_status, Some(201));
         assert_eq!(req.headers.len(), 1);
         assert_eq!(req.headers[0], ("LinkedIn-Version".into(), "202606".into()));
-        assert_eq!(req.body.as_deref(), Some(r#"{"commentary":"{{ commentary }}"}"#));
+        assert_eq!(
+            req.body.as_deref(),
+            Some(r#"{"commentary":"{{ commentary }}"}"#)
+        );
         assert_eq!(req.capture_key, "post_urn");
         assert_eq!(req.capture_header.as_deref(), Some("x-restli-id"));
         assert_eq!(req.capture_path, None);

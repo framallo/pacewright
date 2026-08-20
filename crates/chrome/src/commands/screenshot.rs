@@ -19,7 +19,9 @@ impl ImgFormat {
         match s.to_ascii_lowercase().as_str() {
             "png" => Ok(Self::Png),
             "jpeg" | "jpg" => Ok(Self::Jpeg),
-            other => Err(format!("Unknown screenshot format {other:?}. Use \"png\" or \"jpeg\".").into()),
+            other => {
+                Err(format!("Unknown screenshot format {other:?}. Use \"png\" or \"jpeg\".").into())
+            }
         }
     }
 
@@ -68,9 +70,9 @@ pub async fn run(client: &CdpClient, opts: &ScreenshotOpts<'_>) -> Result<String
 
     let scale = geometry::compute_scale(base_width, opts.max_width);
 
-    let clip_value = clip.map(|r| {
-        json!({ "x": r.x, "y": r.y, "width": r.width, "height": r.height, "scale": scale })
-    });
+    let clip_value = clip.map(
+        |r| json!({ "x": r.x, "y": r.y, "width": r.width, "height": r.height, "scale": scale }),
+    );
 
     // JPEG quality only applies to JPEG; PNG is lossless so CDP ignores/rejects it.
     let quality = match opts.format {
@@ -146,10 +148,25 @@ async fn full_page_rect(client: &CdpClient) -> Result<Rect, crate::BoxError> {
             }),
         )
         .await?;
-    let dims = eval.result.value.and_then(|v| v.as_array().cloned()).unwrap_or_default();
-    let width = dims.first().and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-    let height = dims.get(1).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-    Ok(Rect { x: 0.0, y: 0.0, width, height })
+    let dims = eval
+        .result
+        .value
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let width = dims
+        .first()
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let height = dims
+        .get(1)
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    Ok(Rect {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+    })
 }
 
 fn screenshot_dir() -> Result<PathBuf, crate::BoxError> {
@@ -187,7 +204,10 @@ mod tests {
         // Already-correct extension is preserved, not doubled.
         assert_eq!(output_name(Some("shot.jpg"), ImgFormat::Jpeg), "shot.jpg");
         // A png name captured as jpeg gets the jpeg extension appended.
-        assert_eq!(output_name(Some("shot.png"), ImgFormat::Jpeg), "shot.png.jpg");
+        assert_eq!(
+            output_name(Some("shot.png"), ImgFormat::Jpeg),
+            "shot.png.jpg"
+        );
     }
 
     #[test]

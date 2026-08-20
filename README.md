@@ -131,6 +131,26 @@ The socket path defaults to `~/.pacewright/pw.sock`; override it with the `PACEW
 (useful for a non-default daemon). A call made while the daemon is down returns a tool error with an
 actionable message rather than failing the protocol.
 
+## Teach an agent to drive it (skill)
+
+MCP gives an agent the **tools**; the bundled **skill** gives it the **know-how** — the mental model
+(pacing, pipelines, fan-out, the all-time ledger, escalations) and the workflows the raw tool schemas
+don't teach. It ships in this repo at [`.claude/skills/pacewright/SKILL.md`](.claude/skills/pacewright/SKILL.md).
+
+For a new user on Claude Code / omp, install it once:
+
+```bash
+# user-level (available in every project):
+mkdir -p ~/.claude/skills && cp -R .claude/skills/pacewright ~/.claude/skills/
+# or project-level: it's already discovered when you work inside a checkout of this repo.
+```
+
+With the skill installed and the MCP server registered, the agent picks it up automatically when you
+say "pacewright" / "queue a task" / "run a recipe" and drives the daemon for you. To **author** new
+recipes, point the agent at [`docs/RECIPES.md`](docs/RECIPES.md) (the KDL grammar); recipes and
+schedules themselves are best kept in a **private** repo (`pcw recipe add <owner>/<repo>` installs
+them — private repos work through your git auth).
+
 ## Configure limits & pacing
 
 `~/.pacewright/config.toml` — every `(platform, action)` that needs throttling gets a limit key. Keys not listed are unrestricted.
@@ -183,11 +203,11 @@ id resumes. A **fan-out** block turns a producer step's array result into paced,
 tasks, each keyed on an **all-time dedup ledger** (`touched`) so a target is never acted on twice.
 
 ```bash
-pcw run outreach/matchmaker --run-id 2026-08-10   # start/resume a pipeline run
+pcw run demo/pipeline --run-id 2026-08-10         # start/resume a pipeline run
 pcw runs                                          # list runs + step rollups
 pcw show 2026-08-10                               # one run's steps, in order
 pcw data list                                     # datasets task output was saved into
-pcw data show x/pool-ai --limit 20                # rows of one dataset
+pcw data show leads/warm --limit 20               # rows of one dataset
 pcw escalations --drain                           # pull the escalation outbox (failures / paused scopes)
 ```
 
@@ -296,7 +316,6 @@ Proven live, not just in unit tests:
 ./packaging/chrome-pool.sh up 3
 cargo test -p pacewright-adapter-recipe --test pool_live -- --ignored --nocapture
 ```
-
 ## Install as a background service (macOS launchd)
 
 ```bash
@@ -329,6 +348,7 @@ Intentionally deferred to later milestones, not oversights:
 
 ## Design docs
 
+- Recipe authoring (KDL grammar): [`docs/RECIPES.md`](docs/RECIPES.md)
 - Spec: [`docs/specs/2026-07-07-core-engine-design.md`](docs/specs/2026-07-07-core-engine-design.md)
 - M1 implementation plan: [`docs/plans/2026-07-07-m1-core-engine.md`](docs/plans/2026-07-07-m1-core-engine.md)
 

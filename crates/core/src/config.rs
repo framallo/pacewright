@@ -247,8 +247,8 @@ active = "09:00-18:00"
         // `browser_connect()` still answers for callers that only ever wanted one.
         assert_eq!(c.browser_connect(), Some("http://127.0.0.1:9222"));
         // Blank entries are dropped instead of becoming an endpoint nothing listens on.
-        let c =
-            Config::from_toml("[browser]\nconnect = [\"http://127.0.0.1:9222\", \"  \"]\n").unwrap();
+        let c = Config::from_toml("[browser]\nconnect = [\"http://127.0.0.1:9222\", \"  \"]\n")
+            .unwrap();
         assert_eq!(c.browser_pool, ["http://127.0.0.1:9222"]);
     }
 

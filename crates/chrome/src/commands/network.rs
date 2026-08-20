@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::client::CdpClient;
 use crate::cdp::types::EvaluateResult;
@@ -84,9 +84,10 @@ pub async fn run_retroactive(
         .filter_map(|e| {
             let url = e.get("url")?.as_str()?.to_string();
             if let Some(ref f) = filter_lower
-                && !url.to_ascii_lowercase().contains(f.as_str()) {
-                    return None;
-                }
+                && !url.to_ascii_lowercase().contains(f.as_str())
+            {
+                return None;
+            }
             let initiator = e.get("type").and_then(Value::as_str).unwrap_or("other");
             let duration = e.get("duration").and_then(Value::as_u64).unwrap_or(0);
             let size = e.get("size").and_then(Value::as_u64).unwrap_or(0);
@@ -164,7 +165,9 @@ pub async fn run_live(
             continue;
         }
 
-        let Some(response) = event.params.get("response") else { continue };
+        let Some(response) = event.params.get("response") else {
+            continue;
+        };
 
         let url = response
             .get("url")
@@ -174,14 +177,12 @@ pub async fn run_live(
 
         // Apply filter
         if let Some(ref f) = filter_lower
-            && !url.to_ascii_lowercase().contains(f.as_str()) {
-                continue;
-            }
+            && !url.to_ascii_lowercase().contains(f.as_str())
+        {
+            continue;
+        }
 
-        let status = response
-            .get("status")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u16;
+        let status = response.get("status").and_then(Value::as_u64).unwrap_or(0) as u16;
         let content_type = response
             .get("mimeType")
             .and_then(Value::as_str)
@@ -235,12 +236,20 @@ pub fn format_text(entries: &[NetworkEntry]) -> String {
     }
     let mut out = format!(
         "{:<70} {:>6} {:<14} {:>8} {:>6}\n{}\n",
-        "URL", "STATUS", "TYPE", "SIZE", "MS",
+        "URL",
+        "STATUS",
+        "TYPE",
+        "SIZE",
+        "MS",
         "-".repeat(110)
     );
     for e in entries {
         let url_display = crate::truncate::truncate_str(&e.url, 67, "...");
-        let status_str = if e.status == 0 { "-".to_string() } else { e.status.to_string() };
+        let status_str = if e.status == 0 {
+            "-".to_string()
+        } else {
+            e.status.to_string()
+        };
         let size_str = if e.size == 0 {
             "-".to_string()
         } else if e.size >= 1024 {
@@ -282,30 +291,46 @@ pub async fn run_route_abort(
     pattern: &str,
     timeout_secs: u64,
 ) -> Result<Vec<String>, crate::BoxError> {
-    client.send("Fetch.enable", serde_json::json!({
-        "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
-    })).await?;
+    client
+        .send(
+            "Fetch.enable",
+            serde_json::json!({
+                "patterns": [{"urlPattern": pattern, "requestStage": "Request"}]
+            }),
+        )
+        .await?;
 
     let mut blocked = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let event = client.wait_for_event("Fetch.requestPaused", remaining).await;
+        let event = client
+            .wait_for_event("Fetch.requestPaused", remaining)
+            .await;
         match event {
             Ok(ev) => {
-                let request_id = ev.params.get("requestId")
+                let request_id = ev
+                    .params
+                    .get("requestId")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let url = ev.params.get("request")
+                let url = ev
+                    .params
+                    .get("request")
                     .and_then(|r| r.get("url"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let _ = client.send("Fetch.failRequest", serde_json::json!({
-                    "requestId": request_id,
-                    "reason": "BlockedByClient",
-                })).await;
+                let _ = client
+                    .send(
+                        "Fetch.failRequest",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "reason": "BlockedByClient",
+                        }),
+                    )
+                    .await;
                 if !url.is_empty() {
                     blocked.push(url);
                 }
@@ -361,7 +386,7 @@ mod tests {
             content_type: "application/json".to_string(),
             size: 5000,
             duration_ms: 50,
-            body: Some("é".repeat(3000)),  // each é is 2 bytes
+            body: Some("é".repeat(3000)), // each é is 2 bytes
         };
         let text = format_text(&[entry]);
         assert!(!text.is_empty());
@@ -377,7 +402,7 @@ mod tests {
             content_type: "application/json".to_string(),
             size: 500,
             duration_ms: 50,
-            body: Some("日本語テスト".repeat(100)),  // multi-byte Japanese
+            body: Some("日本語テスト".repeat(100)), // multi-byte Japanese
         };
         let text = format_text(&[entry]);
         assert!(!text.is_empty());

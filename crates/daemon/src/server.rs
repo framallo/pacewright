@@ -54,7 +54,7 @@ pub fn build_adapter_registry(
     )));
     reg.register(Arc::new(AgentAdapter::with_completer("claude", completer)));
     // The full `claude -p` agent step (filesystem + tools), distinct from the single-turn `agent`.
-    // Absorbs book-promo and the paced LinkedIn/X commenting rounds with a daemon-owned cap (R1+R4).
+    // Absorbs content-drafting and paced commenting rounds with a daemon-owned cap (R1+R4).
     reg.register(Arc::new(
         pacewright_adapter_agent::claude_cli::ClaudeCliAdapter::new("claude_cli"),
     ));
@@ -68,9 +68,7 @@ pub fn build_adapter_registry(
     // from a REST API with env-injected secrets. Together they let scan/sourcing/generation jobs run
     // without Chrome (Apollo, personalize-hooks, gen-*).
     reg.register(Arc::new(crate::data_adapter::DataAdapter::new(
-        pacewright_core::datastore::Datastore::new(
-            pacewright_core::run::home_dir().join("data"),
-        ),
+        pacewright_core::datastore::Datastore::new(pacewright_core::run::home_dir().join("data")),
     )));
     reg.register(Arc::new(crate::http_adapter::HttpAdapter::new()));
     for adapter_name in recipe_registry.adapters() {
@@ -578,8 +576,7 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 // account recipes stay on the boot registry the AuthManager holds (needs a restart).
                 let fresh = Arc::new(RecipeRegistry::load_dir(&srv.recipes_dir));
                 let adapters = fresh.adapters();
-                e.registry =
-                    build_adapter_registry(&fresh, &srv.recipe_runner, &e.store, &e.clock);
+                e.registry = build_adapter_registry(&fresh, &srv.recipe_runner, &e.store, &e.clock);
                 *srv.registry.write().unwrap() = fresh;
                 Ok(serde_json::json!({ "reloaded": true, "adapters": adapters }))
             }
@@ -646,15 +643,13 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                     let claimed = {
                         let e = engine.lock().await;
                         match e.claim_one() {
-                            Ok(Some(c)) => {
-                                Some((
-                                    c,
-                                    e.store.clone(),
-                                    e.clock.clone(),
-                                    e.browser.clone(),
-                                    e.notifier.clone(),
-                                ))
-                            }
+                            Ok(Some(c)) => Some((
+                                c,
+                                e.store.clone(),
+                                e.clock.clone(),
+                                e.browser.clone(),
+                                e.notifier.clone(),
+                            )),
                             Ok(None) => None,
                             Err(err) => {
                                 tracing::error!("claim error: {err}");

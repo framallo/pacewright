@@ -223,7 +223,11 @@ mod tests {
         for account in ["acme", "globex", "initech"] {
             let expected = p.endpoint_of(Some(account)).to_string();
             let l = p.lease(Some(account)).await;
-            assert_eq!(l.endpoint(), expected, "login and run disagreed on {account}");
+            assert_eq!(
+                l.endpoint(),
+                expected,
+                "login and run disagreed on {account}"
+            );
         }
     }
 
@@ -248,7 +252,11 @@ mod tests {
     async fn an_accountless_burst_spreads_over_the_pool() {
         // The whole point of the scale case: three concurrent invoices occupy three browsers.
         let p = ChromePool::new(["http://a:9222", "http://b:9222", "http://c:9222"]);
-        let leases = [p.lease(None).await, p.lease(None).await, p.lease(None).await];
+        let leases = [
+            p.lease(None).await,
+            p.lease(None).await,
+            p.lease(None).await,
+        ];
         let used: std::collections::BTreeSet<&str> = leases.iter().map(|l| l.endpoint()).collect();
         assert_eq!(used.len(), 3, "runs did not spread: {used:?}");
         // And the pool is now full, so a fourth waits rather than doubling up.

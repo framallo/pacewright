@@ -21,7 +21,11 @@ pub struct NotReady {
 }
 impl std::fmt::Display for NotReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "not ready: HTTP {} (target not downloadable yet)", self.status)
+        write!(
+            f,
+            "not ready: HTTP {} (target not downloadable yet)",
+            self.status
+        )
     }
 }
 impl std::error::Error for NotReady {}
@@ -57,8 +61,14 @@ pub async fn run_native(
         )
         .await?;
     if let Some(v) = pf.result.value {
-        let status = v.get("status").and_then(serde_json::Value::as_i64).unwrap_or(-1);
-        let kind = v.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+        let status = v
+            .get("status")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(-1);
+        let kind = v
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         // Opaque redirect (signed URL) or any 2xx → downloadable. A 4xx/5xx → not ready yet.
         let ready = kind == "opaqueredirect" || (200..400).contains(&status);
         if !ready && status >= 400 {
@@ -74,14 +84,18 @@ pub async fn run_native(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = home.join(".chrome-agent").join("tmp").join(format!("dl-{stamp}"));
+    let dir = home
+        .join(".chrome-agent")
+        .join("tmp")
+        .join(format!("dl-{stamp}"));
     std::fs::create_dir_all(&dir)?;
 
     // 3. Point Chrome's downloads at that dir. Browser-level is current; fall back to the (deprecated)
     //    page-level command for older builds.
     let behavior = json!({ "behavior": "allow", "downloadPath": dir.to_string_lossy() });
-    let set_browser: Result<serde_json::Value, _> =
-        client.call("Browser.setDownloadBehavior", behavior.clone()).await;
+    let set_browser: Result<serde_json::Value, _> = client
+        .call("Browser.setDownloadBehavior", behavior.clone())
+        .await;
     if set_browser.is_err() {
         let _: serde_json::Value = client
             .call("Page.setDownloadBehavior", behavior)
@@ -91,8 +105,7 @@ pub async fn run_native(
 
     // 4. Trigger it with a real navigation. Navigating to an attachment downloads it and aborts the
     //    navigation (net::ERR_ABORTED) while leaving the current page — so we ignore navigate errors.
-    let _: Result<serde_json::Value, _> =
-        client.call("Page.navigate", json!({ "url": url })).await;
+    let _: Result<serde_json::Value, _> = client.call("Page.navigate", json!({ "url": url })).await;
 
     // 5. Poll the isolated dir until the `.crdownload` resolves to a finished file.
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -102,17 +115,24 @@ pub async fn run_native(
         }
         if Instant::now() >= deadline {
             let _ = std::fs::remove_dir_all(&dir);
-            return Err(format!("download did not complete within {timeout_secs}s for {url}").into());
+            return Err(
+                format!("download did not complete within {timeout_secs}s for {url}").into(),
+            );
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     };
 
     // 6. Move to the requested path (or leave it under the tmp tree with its real name).
-    let bytes = std::fs::metadata(&finished).map(|m| m.len() as usize).unwrap_or(0);
+    let bytes = std::fs::metadata(&finished)
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
     let dest = match out {
         Some(o) => PathBuf::from(o),
         None => home.join(".chrome-agent").join("tmp").join(
-            finished.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default(),
+            finished
+                .file_name()
+                .map(std::ffi::OsStr::to_os_string)
+                .unwrap_or_default(),
         ),
     };
     if let Some(parent) = dest.parent() {
@@ -145,11 +165,7 @@ fn finished_download(dir: &Path) -> Option<PathBuf> {
             final_file = Some(path);
         }
     }
-    if has_partial {
-        None
-    } else {
-        final_file
-    }
+    if has_partial { None } else { final_file }
 }
 
 /// Download `url` by fetching it inside the page, so the request inherits the
@@ -198,8 +214,15 @@ pub async fn run(
     }
 
     let obj = eval.result.value.ok_or("download: page returned no data")?;
-    let data = obj.get("data").and_then(|v| v.as_str()).ok_or("download: missing data")?;
-    let mime = obj.get("mime").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let data = obj
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or("download: missing data")?;
+    let mime = obj
+        .get("mime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let cd = obj.get("cd").and_then(|v| v.as_str()).unwrap_or("");
 
     let bytes = crate::base64::decode(data)?;
@@ -226,7 +249,11 @@ pub async fn run(
 /// Resolve the destination path. `--out` (if given) is honoured verbatim as a
 /// user-chosen path; otherwise the name is derived from the Content-Disposition
 /// header, then the URL, then a fallback, and placed under `~/.chrome-agent/tmp`.
-fn resolve_out_path(out: Option<&str>, content_disposition: &str, url: &str) -> Result<PathBuf, crate::BoxError> {
+fn resolve_out_path(
+    out: Option<&str>,
+    content_disposition: &str,
+    url: &str,
+) -> Result<PathBuf, crate::BoxError> {
     if let Some(o) = out {
         return Ok(PathBuf::from(o));
     }
@@ -244,10 +271,17 @@ fn resolve_out_path(out: Option<&str>, content_disposition: &str, url: &str) -> 
 pub fn filename_from_url(url: &str) -> String {
     let no_query = url.split(['?', '#']).next().unwrap_or(url);
     // Drop the scheme so the host isn't mistaken for a path segment.
-    let after_scheme = no_query.split_once("://").map_or(no_query, |(_, rest)| rest);
+    let after_scheme = no_query
+        .split_once("://")
+        .map_or(no_query, |(_, rest)| rest);
     // Everything after the first '/' is the path; host-only URLs have none.
     let path = after_scheme.split_once('/').map_or("", |(_, p)| p);
-    let last = path.trim_end_matches('/').rsplit('/').next().unwrap_or("").trim();
+    let last = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim();
     if last.is_empty() {
         "download".to_string()
     } else {
@@ -275,7 +309,12 @@ pub fn filename_from_content_disposition(header: &str) -> Option<String> {
     }
     if let Some(pos) = lower.find("filename=") {
         let raw = &header[pos + "filename=".len()..];
-        let value = raw.split(';').next().unwrap_or(raw).trim().trim_matches('"');
+        let value = raw
+            .split(';')
+            .next()
+            .unwrap_or(raw)
+            .trim()
+            .trim_matches('"');
         let cleaned = sanitize_name(value);
         if !cleaned.is_empty() {
             return Some(cleaned);
@@ -299,12 +338,18 @@ mod tests {
 
     #[test]
     fn url_filename_basic() {
-        assert_eq!(filename_from_url("https://x.com/files/report.pdf"), "report.pdf");
+        assert_eq!(
+            filename_from_url("https://x.com/files/report.pdf"),
+            "report.pdf"
+        );
     }
 
     #[test]
     fn url_filename_strips_query_and_fragment() {
-        assert_eq!(filename_from_url("https://x.com/a/b/data.csv?v=2&x=1"), "data.csv");
+        assert_eq!(
+            filename_from_url("https://x.com/a/b/data.csv?v=2&x=1"),
+            "data.csv"
+        );
         assert_eq!(filename_from_url("https://x.com/a/img.png#frag"), "img.png");
     }
 
@@ -341,7 +386,9 @@ mod tests {
     #[test]
     fn cd_extended_filename_preferred() {
         assert_eq!(
-            filename_from_content_disposition("attachment; filename=\"fallback.bin\"; filename*=UTF-8''real.pdf"),
+            filename_from_content_disposition(
+                "attachment; filename=\"fallback.bin\"; filename*=UTF-8''real.pdf"
+            ),
             Some("real.pdf".to_string())
         );
     }
@@ -386,7 +433,8 @@ mod tests {
     fn cd_preserves_percent_escapes_literally() {
         // Contract: no percent-decoding — %2f must NOT become '/', or the
         // path-traversal guarantee would break. It stays a literal segment.
-        let n = filename_from_content_disposition("attachment; filename*=UTF-8''a%2fb.pdf").unwrap();
+        let n =
+            filename_from_content_disposition("attachment; filename*=UTF-8''a%2fb.pdf").unwrap();
         assert_eq!(n, "a%2fb.pdf");
         assert!(!n.contains('/'));
     }
@@ -405,7 +453,12 @@ mod tests {
 
     #[test]
     fn resolve_out_prefers_cd_over_url() {
-        let p = resolve_out_path(None, "attachment; filename=from-cd.pdf", "https://x/from-url.pdf").unwrap();
+        let p = resolve_out_path(
+            None,
+            "attachment; filename=from-cd.pdf",
+            "https://x/from-url.pdf",
+        )
+        .unwrap();
         assert!(p.ends_with("from-cd.pdf"));
     }
 

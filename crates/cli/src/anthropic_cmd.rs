@@ -31,10 +31,13 @@ pub async fn login(paste: bool) -> Result<()> {
     let (code, ret_state) = if paste {
         println!("Open this URL, approve access, then paste the code (or the whole redirect URL):\n\n{url}\n");
         let pasted = prompt_line("code/redirect URL> ")?;
-        let code = extract_code(&pasted).ok_or_else(|| anyhow!("could not find a code in the pasted value"))?;
+        let code = extract_code(&pasted)
+            .ok_or_else(|| anyhow!("could not find a code in the pasted value"))?;
         (code, state.clone())
     } else {
-        println!("Opening your browser to approve Claude access…\nIf it doesn't open, visit:\n\n{url}\n");
+        println!(
+            "Opening your browser to approve Claude access…\nIf it doesn't open, visit:\n\n{url}\n"
+        );
         let _ = open_browser(&url);
         // One-shot loopback capture of the redirect.
         let got = tokio::task::spawn_blocking(capture_callback)
@@ -131,7 +134,9 @@ struct Callback {
 fn capture_callback() -> Result<Callback> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", oauth::CALLBACK_PORT))
         .with_context(|| format!("binding loopback :{}", oauth::CALLBACK_PORT))?;
-    let (mut stream, _) = listener.accept().context("waiting for the OAuth redirect")?;
+    let (mut stream, _) = listener
+        .accept()
+        .context("waiting for the OAuth redirect")?;
     let mut buf = [0u8; 8192];
     let n = stream.read(&mut buf).unwrap_or(0);
     let req = String::from_utf8_lossy(&buf[..n]);
@@ -174,13 +179,15 @@ fn parse_callback_query(target: &str) -> Option<(String, String)> {
 fn extract_code(pasted: &str) -> Option<String> {
     let pasted = pasted.trim();
     if pasted.contains("://") || pasted.starts_with("/") || pasted.contains("?code=") {
-        return parse_callback_query(pasted).map(|(c, s)| {
-            if s.is_empty() {
-                c
-            } else {
-                format!("{c}#{s}")
-            }
-        });
+        return parse_callback_query(pasted).map(
+            |(c, s)| {
+                if s.is_empty() {
+                    c
+                } else {
+                    format!("{c}#{s}")
+                }
+            },
+        );
     }
     (!pasted.is_empty()).then(|| pasted.to_string())
 }

@@ -59,11 +59,7 @@ pub async fn run(
         .await?;
 
     if let Some(exception) = &result.exception_details {
-        return Err(format!(
-            "Readability failed: {}",
-            exception.text
-        )
-        .into());
+        return Err(format!("Readability failed: {}", exception.text).into());
     }
 
     let raw = result
@@ -90,9 +86,11 @@ pub async fn run(
     }
 
     if let Some(max) = truncate
-        && parsed.text_content.chars().count() > max {
-            parsed.text_content = crate::truncate::truncate_str(&parsed.text_content, max, "...").into_owned();
-        }
+        && parsed.text_content.chars().count() > max
+    {
+        parsed.text_content =
+            crate::truncate::truncate_str(&parsed.text_content, max, "...").into_owned();
+    }
 
     // Warn when Readability extracted very little — page likely isn't an article
     if parsed.text_content.len() < 200 {

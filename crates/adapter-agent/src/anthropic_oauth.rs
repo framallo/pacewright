@@ -36,7 +36,8 @@ pub const INFERENCE_USER_AGENT: &str = "claude-cli/2.1.220 (external, claude-des
 /// User-Agent Claude Code sends specifically on the refresh call.
 pub const REFRESH_USER_AGENT: &str = "anthropic-sdk-typescript/0.94.0 userOAuthProvider";
 /// The identity Anthropic requires as the FIRST system block of an OAuth inference request.
-pub const CLAUDE_CODE_SYSTEM: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+pub const CLAUDE_CODE_SYSTEM: &str =
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 /// The `SecretStore` provider key these tokens live under.
 pub const PROVIDER: &str = "anthropic";
 /// Refresh (or reject as expired) a token within this window of its expiry. Matches the 5-minute
@@ -82,7 +83,10 @@ pub fn generate_pkce() -> Pkce {
     rand::thread_rng().fill_bytes(&mut bytes);
     let verifier = b64url(&bytes);
     let challenge = pkce_challenge(&verifier);
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 /// The full authorize URL to open in a browser.
@@ -160,7 +164,11 @@ struct Account {
 /// `(status, body)`.
 #[async_trait]
 pub trait TokenHttp: Send + Sync {
-    async fn post(&self, body: Value, headers: Vec<(String, String)>) -> Result<(u16, String), String>;
+    async fn post(
+        &self,
+        body: Value,
+        headers: Vec<(String, String)>,
+    ) -> Result<(u16, String), String>;
 }
 
 /// The real transport.
@@ -178,7 +186,11 @@ impl Default for ReqwestTokenHttp {
 
 #[async_trait]
 impl TokenHttp for ReqwestTokenHttp {
-    async fn post(&self, body: Value, headers: Vec<(String, String)>) -> Result<(u16, String), String> {
+    async fn post(
+        &self,
+        body: Value,
+        headers: Vec<(String, String)>,
+    ) -> Result<(u16, String), String> {
         let mut rb = self
             .client
             .post(TOKEN_URL)
@@ -192,7 +204,10 @@ impl TokenHttp for ReqwestTokenHttp {
             .await
             .map_err(|e| format!("token request failed: {e}"))?;
         let status = resp.status().as_u16();
-        let text = resp.text().await.map_err(|e| format!("token body read failed: {e}"))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("token body read failed: {e}"))?;
         Ok((status, text))
     }
 }
@@ -206,7 +221,9 @@ fn tokens_from_response(
     prior_refresh: Option<&str>,
 ) -> Result<Tokens, String> {
     if !(200..300).contains(&status) {
-        return Err(format!("anthropic oauth token endpoint returned {status}: {body}"));
+        return Err(format!(
+            "anthropic oauth token endpoint returned {status}: {body}"
+        ));
     }
     let r: TokenResponse =
         serde_json::from_str(body).map_err(|e| format!("invalid token JSON: {e}; body={body}"))?;
@@ -245,7 +262,11 @@ pub async fn exchange_code(
 }
 
 /// Refresh an access token. Sends the same beta + User-Agent Claude Code uses on refresh.
-pub async fn refresh(http: &dyn TokenHttp, refresh_token: &str, now_ms: i64) -> Result<Tokens, String> {
+pub async fn refresh(
+    http: &dyn TokenHttp,
+    refresh_token: &str,
+    now_ms: i64,
+) -> Result<Tokens, String> {
     let body = json!({
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
@@ -299,7 +320,10 @@ pub async fn resolve_access_token(
     let refresh_token = store
         .get(PROVIDER)
         .and_then(|r| r.refresh_token.clone())
-        .ok_or_else(|| "anthropic token expired and no refresh_token stored; run `pcw anthropic login`".to_string())?;
+        .ok_or_else(|| {
+            "anthropic token expired and no refresh_token stored; run `pcw anthropic login`"
+                .to_string()
+        })?;
     let fresh = refresh(http, &refresh_token, now_ms).await.map_err(|e| {
         format!("anthropic token refresh failed ({e}); the grant may have expired — run `pcw anthropic login`")
     })?;
@@ -373,7 +397,8 @@ mod tests {
 
     #[test]
     fn tokens_from_response_keeps_prior_refresh_and_applies_skew() {
-        let body = r#"{"access_token":"acc","expires_in":3600,"account":{"email_address":"a@b.c"}}"#;
+        let body =
+            r#"{"access_token":"acc","expires_in":3600,"account":{"email_address":"a@b.c"}}"#;
         let t = tokens_from_response(200, body, 1_000_000, Some("old-refresh")).unwrap();
         assert_eq!(t.access, "acc");
         assert_eq!(t.refresh, "old-refresh"); // response omitted it -> keep prior
@@ -422,7 +447,9 @@ mod tests {
         assert_eq!(body["grant_type"], "refresh_token");
         assert_eq!(body["client_id"], CLIENT_ID);
         let headers = http.last_headers.lock().clone();
-        assert!(headers.iter().any(|(k, v)| k == "anthropic-beta" && v == OAUTH_BETA));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "anthropic-beta" && v == OAUTH_BETA));
         assert!(headers.iter().any(|(k, _)| k == "user-agent"));
     }
 
@@ -436,9 +463,16 @@ mod tests {
             last_body: Mutex::new(None),
             last_headers: Mutex::new(vec![]),
         };
-        let t = exchange_code(&http, "the-code#the-state", "unused", REDIRECT_URI, "verif", 0)
-            .await
-            .unwrap();
+        let t = exchange_code(
+            &http,
+            "the-code#the-state",
+            "unused",
+            REDIRECT_URI,
+            "verif",
+            0,
+        )
+        .await
+        .unwrap();
         assert_eq!(t.access, "a");
         let body = http.last_body.lock().clone().unwrap();
         assert_eq!(body["code"], "the-code");

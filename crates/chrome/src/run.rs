@@ -4,23 +4,44 @@ use crate::BoxError;
 use crate::browser::{self, BrowserOptions};
 use crate::cdp::client::CdpClient;
 use crate::cli::{Cli, Command, DaemonAction, RecipeAction};
-use crate::run_helpers::{cmd_close, cmd_gc, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, output_action, output_goto, resolve_page_target};
+use crate::run_helpers::{
+    cmd_close, cmd_gc, cmd_status, cmd_stop, connect_page, get_uid_map, json_output, output_action,
+    output_goto, resolve_page_target,
+};
 use crate::{commands, pipe, session};
 
 pub async fn run(cli: Cli) -> Result<(), BoxError> {
     // Browser-optional: an `api`-only recipe (no page steps) runs with **no Chrome launch** and no
     // session. Decide from the parsed recipe before the by-value dispatch below claims the command.
     if let Command::Recipe {
-        action: RecipeAction::Run { file, var, vars_json, log, repair, repair_out },
+        action:
+            RecipeAction::Run {
+                file,
+                var,
+                vars_json,
+                log,
+                repair,
+                repair_out,
+            },
     } = &cli.command
     {
         let src = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
         let recipe = crate::recipe::model::Recipe::parse(&src)?;
         if !recipe.needs_browser() {
             let vars = crate::recipe::parse_vars(var, vars_json.as_deref())?;
-            let repair_opts = crate::recipe::RepairOpts { enabled: *repair, out: repair_out.clone() };
-            return crate::recipe::run_recipe_native(recipe, src, vars, *log, repair_opts, cli.json)
-                .await;
+            let repair_opts = crate::recipe::RepairOpts {
+                enabled: *repair,
+                out: repair_out.clone(),
+            };
+            return crate::recipe::run_recipe_native(
+                recipe,
+                src,
+                vars,
+                *log,
+                repair_opts,
+                cli.json,
+            )
+            .await;
         }
     }
 
@@ -35,7 +56,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     }
                     #[cfg(not(unix))]
                     {
-                        return Err("Daemon is not supported on Windows. Commands work without a daemon.".into());
+                        return Err(
+                            "Daemon is not supported on Windows. Commands work without a daemon."
+                                .into(),
+                        );
                     }
                 }
             }
@@ -87,7 +111,9 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         // `check` is a pure parse/validate — no browser. `run` falls through to the
         // page-connected path below (it navigates, so it can bootstrap a browser like `goto`).
-        Command::Recipe { action: RecipeAction::Check { file } } => {
+        Command::Recipe {
+            action: RecipeAction::Check { file },
+        } => {
             return crate::recipe::check(&file, cli.json);
         }
 
@@ -102,7 +128,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     // Otherwise a prior headless run (e.g. a daemon signed-in *check*, which never passes --headed)
     // traps a later `--headed goto` (the login window) in headless mode, so no window ever appears.
     // Without --headed, mode stays sticky to the existing browser (or defaults headless).
-    let want_headless = if cli.headed { false } else { existing_mode.unwrap_or(true) };
+    let want_headless = if cli.headed {
+        false
+    } else {
+        existing_mode.unwrap_or(true)
+    };
 
     let (conn, browser_client) = if let Some(existing) = store.browsers.get(&cli.browser) {
         let mode_matches = existing.headless == want_headless;
@@ -158,13 +188,18 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
     } else {
         let needs_existing = !matches!(
             cli.command,
-            Command::Goto { .. } | Command::Pipe | Command::Recipe { action: RecipeAction::Run { .. } }
+            Command::Goto { .. }
+                | Command::Pipe
+                | Command::Recipe {
+                    action: RecipeAction::Run { .. }
+                }
         );
         if needs_existing {
             return Err(format!(
                 "No browser session '{}'. Run `chrome-agent --browser {} goto <url>` first.",
                 cli.browser, cli.browser
-            ).into());
+            )
+            .into());
         }
         let opts = BrowserOptions {
             name: cli.browser.clone(),
@@ -179,9 +214,10 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         (conn, client)
     };
 
-    let http_endpoint = conn.http_endpoint.as_deref().ok_or(
-        "No HTTP endpoint available. Cannot resolve page WebSocket URL."
-    )?;
+    let http_endpoint = conn
+        .http_endpoint
+        .as_deref()
+        .ok_or("No HTTP endpoint available. Cannot resolve page WebSocket URL.")?;
 
     let target_id = {
         let browser_session = session::ensure_browser(
@@ -206,7 +242,13 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
     let json_mode = cli.json;
     match cli.command {
-        Command::Goto { url, inspect, max_depth, wait_for, headers } => {
+        Command::Goto {
+            url,
+            inspect,
+            max_depth,
+            wait_for,
+            headers,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             let parsed_headers = headers
                 .iter()
@@ -217,14 +259,35 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::wait::run(&client, "selector", selector, cli.timeout, 500).await?;
             }
             let _ = commands::history::append(&result.url, &result.title, &cli.page);
-            output_goto(&client, &mut store, &cli.browser, &cli.page, &target_id, &result.url, &result.title, inspect, depth, json_mode).await?;
+            output_goto(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                &result.url,
+                &result.title,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Click { uid, selector, xy, inspect, max_depth } => {
+        Command::Click {
+            uid,
+            selector,
+            xy,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
+            let provided =
+                u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
             if provided == 0 {
-                return Err("Provide a uid, --selector, or --xy to identify the click target.".into());
+                return Err(
+                    "Provide a uid, --selector, or --xy to identify the click target.".into(),
+                );
             }
             if provided > 1 {
                 return Err("Only one of uid, --selector, or --xy can be provided.".into());
@@ -245,10 +308,27 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::click::run(&client, &uid_map, uid).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Fill { uid, selector, value, inspect, max_depth } => {
+        Command::Fill {
+            uid,
+            selector,
+            value,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
             if provided == 0 {
@@ -267,10 +347,25 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::fill::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::FillForm { pairs, inspect, max_depth } => {
+        Command::FillForm {
+            pairs,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             let parsed: Result<Vec<(&str, &str)>, _> = pairs
@@ -282,22 +377,42 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 .collect();
             let parsed = parsed?;
             let msg = commands::fill::run_form(&client, &uid_map, &parsed).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Text { uid, selector, truncate } => {
+        Command::Text {
+            uid,
+            selector,
+            truncate,
+        } => {
             if uid.is_some() && selector.is_some() {
                 return Err("Only one of uid or --selector can be provided.".into());
             }
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
-            let text = commands::text::run(&client, uid.as_deref(), selector.as_deref(), &uid_map).await?;
+            let text =
+                commands::text::run(&client, uid.as_deref(), selector.as_deref(), &uid_map).await?;
             let full_length = text.chars().count();
             let (text, truncated) = if let Some(n) = truncate
-                && full_length > n {
-                    (crate::truncate::truncate_str(&text, n, "...").into_owned(), true)
-                } else {
-                    (text, false)
-                };
+                && full_length > n
+            {
+                (
+                    crate::truncate::truncate_str(&text, n, "...").into_owned(),
+                    true,
+                )
+            } else {
+                (text, false)
+            };
             if json_mode {
                 let mut obj = json!({"ok": true, "text": text});
                 if truncated {
@@ -313,7 +428,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         Command::Read { html, truncate } => {
             let result = commands::read::run(&client, html, truncate).await?;
             if json_mode {
-                let mut obj = json!({"ok": true, "title": result.title, "text": result.text_content});
+                let mut obj =
+                    json!({"ok": true, "title": result.title, "text": result.text_content});
                 if let Some(excerpt) = &result.excerpt {
                     obj["excerpt"] = json!(excerpt);
                 }
@@ -337,12 +453,24 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         Command::Back => {
-            client.send("Runtime.evaluate", json!({"expression": "history.back()"})).await?;
-            let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-            let title: crate::cdp::types::EvaluateResult = client
-                .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
+            client
+                .send("Runtime.evaluate", json!({"expression": "history.back()"}))
                 .await?;
-            let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+            let _ = client
+                .wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5))
+                .await;
+            let title: crate::cdp::types::EvaluateResult = client
+                .call(
+                    "Runtime.evaluate",
+                    json!({"expression": "document.title", "returnByValue": true}),
+                )
+                .await?;
+            let title_str = title
+                .result
+                .value
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if json_mode {
                 json_output(&json!({"ok": true, "title": title_str}));
             } else {
@@ -352,10 +480,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
 
         Command::Forward { inspect, max_depth } => {
             let depth = max_depth.or(cli.max_depth);
-            let history: serde_json::Value = client
-                .call("Page.getNavigationHistory", json!({}))
-                .await?;
-            let current_index = history.get("currentIndex").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let history: serde_json::Value =
+                client.call("Page.getNavigationHistory", json!({})).await?;
+            let current_index = history
+                .get("currentIndex")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
             let entries = history.get("entries").and_then(serde_json::Value::as_array);
             let entry_count = entries.map_or(0, Vec::len) as i64;
             if current_index >= entry_count - 1 {
@@ -371,20 +501,53 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                     .and_then(|e| e.get("id"))
                     .and_then(serde_json::Value::as_i64)
                     .ok_or("Could not find next history entry")?;
-                client.send("Page.navigateToHistoryEntry", json!({"entryId": next_entry_id})).await?;
-                let _ = client.wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5)).await;
-                let title: crate::cdp::types::EvaluateResult = client
-                    .call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
+                client
+                    .send(
+                        "Page.navigateToHistoryEntry",
+                        json!({"entryId": next_entry_id}),
+                    )
                     .await?;
-                let title_str = title.result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                let _ = client
+                    .wait_for_event("Page.loadEventFired", std::time::Duration::from_secs(5))
+                    .await;
+                let title: crate::cdp::types::EvaluateResult = client
+                    .call(
+                        "Runtime.evaluate",
+                        json!({"expression": "document.title", "returnByValue": true}),
+                    )
+                    .await?;
+                let title_str = title
+                    .result
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let msg = format!("Navigated forward — {title_str}");
-                output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+                output_action(
+                    &client,
+                    &mut store,
+                    &cli.browser,
+                    &cli.page,
+                    &target_id,
+                    msg,
+                    inspect,
+                    depth,
+                    json_mode,
+                )
+                .await?;
             }
         }
 
-        Command::Dblclick { uid, selector, xy, inspect, max_depth } => {
+        Command::Dblclick {
+            uid,
+            selector,
+            xy,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
-            let provided = u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
+            let provided =
+                u8::from(uid.is_some()) + u8::from(selector.is_some()) + u8::from(xy.is_some());
             if provided == 0 {
                 return Err("Provide a uid, --selector, or --xy.".into());
             }
@@ -407,10 +570,27 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::dblclick::run(&client, &uid_map, uid).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Select { value, uid, selector, inspect, max_depth } => {
+        Command::Select {
+            value,
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             let provided = u8::from(uid.is_some()) + u8::from(selector.is_some());
             if provided == 0 {
@@ -429,10 +609,26 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 commands::select::run(&client, &uid_map, uid, &value).await?
             };
 
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Check { uid, selector, inspect, max_depth } => {
+        Command::Check {
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             if uid.is_none() && selector.is_none() {
                 return Err("Provide a uid or --selector.".into());
@@ -444,10 +640,26 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, true).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Uncheck { uid, selector, inspect, max_depth } => {
+        Command::Uncheck {
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             if uid.is_none() && selector.is_none() {
                 return Err("Provide a uid or --selector.".into());
@@ -459,10 +671,27 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::check::run(&client, &uid_map, uid, false).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Upload { files, uid, selector, inspect, max_depth } => {
+        Command::Upload {
+            files,
+            uid,
+            selector,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             if uid.is_none() && selector.is_none() {
                 return Err("Provide --uid or --selector to identify the file input.".into());
@@ -475,26 +704,79 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
                 commands::upload::run(&client, &uid_map, uid, &files).await?
             };
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Drag { from, to, inspect, max_depth } => {
+        Command::Drag {
+            from,
+            to,
+            inspect,
+            max_depth,
+        } => {
             let depth = max_depth.or(cli.max_depth);
             let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
             let msg = commands::drag::run(&client, &uid_map, &from, &to).await?;
-            output_action(&client, &mut store, &cli.browser, &cli.page, &target_id, msg, inspect, depth, json_mode).await?;
+            output_action(
+                &client,
+                &mut store,
+                &cli.browser,
+                &cli.page,
+                &target_id,
+                msg,
+                inspect,
+                depth,
+                json_mode,
+            )
+            .await?;
         }
 
-        Command::Inspect { verbose, max_depth, uid, filter, scroll, limit, urls, max_chars, offset } => {
+        Command::Inspect {
+            verbose,
+            max_depth,
+            uid,
+            filter,
+            scroll,
+            limit,
+            urls,
+            max_chars,
+            offset,
+        } => {
             if scroll {
                 commands::extract::scroll_to_load(&client).await?;
             }
-            let role_filter: Option<Vec<&str>> = filter.as_deref().map(|f| f.split(',').map(str::trim).collect());
+            let role_filter: Option<Vec<&str>> = filter
+                .as_deref()
+                .map(|f| f.split(',').map(str::trim).collect());
             let (mut text, uid_map) = if let Some(max) = limit {
-                let result = commands::inspect::scroll_collect(&client, verbose, uid.as_deref(), role_filter.as_deref(), max).await?;
+                let result = commands::inspect::scroll_collect(
+                    &client,
+                    verbose,
+                    uid.as_deref(),
+                    role_filter.as_deref(),
+                    max,
+                )
+                .await?;
                 (result.text, result.uid_map)
             } else {
-                let s = commands::inspect::run(&client, verbose, max_depth, uid.as_deref(), role_filter.as_deref()).await?;
+                let s = commands::inspect::run(
+                    &client,
+                    verbose,
+                    max_depth,
+                    uid.as_deref(),
+                    role_filter.as_deref(),
+                )
+                .await?;
                 (s.text, s.uid_map)
             };
             if urls {
@@ -527,7 +809,8 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 .get(&cli.browser)
                 .and_then(|b| b.pages.get(&cli.page))
                 .and_then(|p| p.last_snapshot.clone());
-            let old_text = old_snapshot.ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
+            let old_text =
+                old_snapshot.ok_or("No previous snapshot. Run 'chrome-agent inspect' first.")?;
             let snapshot = commands::inspect::run(&client, false, None, None, None).await?;
             let diff = commands::diff::diff_snapshots(&old_text, &snapshot.text);
             let stats = commands::diff::diff_stats(&diff);
@@ -549,9 +832,18 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Screenshot { filename, format, quality, max_width, uid, selector } => {
+        Command::Screenshot {
+            filename,
+            format,
+            quality,
+            max_width,
+            uid,
+            selector,
+        } => {
             if uid.is_some() && selector.is_some() {
-                return Err("Provide only one of uid or --selector for an element screenshot.".into());
+                return Err(
+                    "Provide only one of uid or --selector for an element screenshot.".into(),
+                );
             }
             let clip = if let Some(ref u) = uid {
                 let uid_map = get_uid_map(&store, &cli.browser, &cli.page);
@@ -576,7 +868,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Download { url, out, timeout, native } => {
+        Command::Download {
+            url,
+            out,
+            timeout,
+            native,
+        } => {
             let result = if native {
                 commands::download::run_native(&client, &url, out.as_deref(), timeout).await?
             } else {
@@ -594,7 +891,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Pdf { filename, landscape, background } => {
+        Command::Pdf {
+            filename,
+            landscape,
+            background,
+        } => {
             let opts = commands::pdf::PdfOpts {
                 filename: filename.as_deref(),
                 landscape,
@@ -608,7 +909,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Extract { selector, limit, scroll, a11y } => {
+        Command::Extract {
+            selector,
+            limit,
+            scroll,
+            a11y,
+        } => {
             let result = if a11y {
                 commands::extract::run_a11y(&client, limit, scroll).await?
             } else {
@@ -624,10 +930,15 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Eval { expression, selector } => {
+        Command::Eval {
+            expression,
+            selector,
+        } => {
             let expr = if let Some(ref sel) = selector {
                 let escaped = serde_json::to_string(sel).unwrap_or_default();
-                format!("((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); return {expression} }})(document.querySelector({escaped}))")
+                format!(
+                    "((el) => {{ if (!el) throw new Error('No element matches selector ' + {escaped}); return {expression} }})(document.querySelector({escaped}))"
+                )
             } else {
                 expression
             };
@@ -640,7 +951,12 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Wait { what, pattern, timeout, idle_ms } => {
+        Command::Wait {
+            what,
+            pattern,
+            timeout,
+            idle_ms,
+        } => {
             let msg = commands::wait::run(&client, &what, &pattern, timeout, idle_ms).await?;
             if json_mode {
                 json_output(&json!({"ok": true, "message": msg}));
@@ -680,19 +996,25 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             let msg = match target.as_str() {
                 "down" => {
                     let _: serde_json::Value = client
-                        .call("Runtime.evaluate", json!({
-                            "expression": format!("window.scrollBy(0, {px})"),
-                            "returnByValue": true,
-                        }))
+                        .call(
+                            "Runtime.evaluate",
+                            json!({
+                                "expression": format!("window.scrollBy(0, {px})"),
+                                "returnByValue": true,
+                            }),
+                        )
                         .await?;
                     format!("Scrolled down {px}px")
                 }
                 "up" => {
                     let _: serde_json::Value = client
-                        .call("Runtime.evaluate", json!({
-                            "expression": format!("window.scrollBy(0, -{px})"),
-                            "returnByValue": true,
-                        }))
+                        .call(
+                            "Runtime.evaluate",
+                            json!({
+                                "expression": format!("window.scrollBy(0, -{px})"),
+                                "returnByValue": true,
+                            }),
+                        )
                         .await?;
                     format!("Scrolled up {px}px")
                 }
@@ -749,10 +1071,17 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Network { filter, body, live, limit, abort } => {
+        Command::Network {
+            filter,
+            body,
+            live,
+            limit,
+            abort,
+        } => {
             if let Some(ref pattern) = abort {
                 let timeout_secs = live.unwrap_or(30);
-                let blocked = commands::network::run_route_abort(&client, pattern, timeout_secs).await?;
+                let blocked =
+                    commands::network::run_route_abort(&client, pattern, timeout_secs).await?;
                 if json_mode {
                     json_output(&json!({"ok": true, "blocked": blocked.len(), "urls": blocked}));
                 } else {
@@ -764,8 +1093,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
                 }
             } else {
                 let entries = if let Some(secs) = live {
-                    if cli.stealth { eprintln!("warning: --live enables Network domain (detectable)"); }
-                    commands::network::run_live(&client, filter.as_deref(), body, limit, secs).await?
+                    if cli.stealth {
+                        eprintln!("warning: --live enables Network domain (detectable)");
+                    }
+                    commands::network::run_live(&client, filter.as_deref(), body, limit, secs)
+                        .await?
                 } else {
                     commands::network::run_retroactive(&client, filter.as_deref(), limit).await?
                 };
@@ -777,7 +1109,11 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             }
         }
 
-        Command::Console { level, clear, limit } => {
+        Command::Console {
+            level,
+            clear,
+            limit,
+        } => {
             let entries = commands::console::run(&client, level.as_deref(), clear, limit).await?;
             if json_mode {
                 let messages: Vec<serde_json::Value> = entries
@@ -820,18 +1156,38 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
             let mut results = Vec::with_capacity(cmds.len());
             for cmd in &cmds {
                 let response = crate::pipe_dispatch::dispatch_single(
-                    &client, &browser_client, &mut store,
-                    &cli.browser, &cli.page, &target_id,
-                    cli.timeout, cli.max_depth, cmd,
-                ).await;
+                    &client,
+                    &browser_client,
+                    &mut store,
+                    &cli.browser,
+                    &cli.page,
+                    &target_id,
+                    cli.timeout,
+                    cli.max_depth,
+                    cmd,
+                )
+                .await;
                 results.push(response);
             }
             json_output(&json!({"ok": true, "results": results}));
         }
 
-        Command::Recipe { action: RecipeAction::Run { file, var, vars_json, log, repair, repair_out } } => {
+        Command::Recipe {
+            action:
+                RecipeAction::Run {
+                    file,
+                    var,
+                    vars_json,
+                    log,
+                    repair,
+                    repair_out,
+                },
+        } => {
             let vars = crate::recipe::parse_vars(&var, vars_json.as_deref())?;
-            let repair = crate::recipe::RepairOpts { enabled: repair, out: repair_out };
+            let repair = crate::recipe::RepairOpts {
+                enabled: repair,
+                out: repair_out,
+            };
             crate::recipe::run_recipe(
                 client,
                 target_id.clone(),
@@ -849,10 +1205,17 @@ pub async fn run(cli: Cli) -> Result<(), BoxError> {
         }
 
         // Already handled above
-        Command::Daemon { .. } | Command::Status | Command::Stop | Command::Close { .. }
+        Command::Daemon { .. }
+        | Command::Status
+        | Command::Stop
+        | Command::Close { .. }
         | Command::Gc { .. }
-        | Command::Pipe | Command::Replay { .. } | Command::History { .. }
-        | Command::Recipe { action: RecipeAction::Check { .. } } => {
+        | Command::Pipe
+        | Command::Replay { .. }
+        | Command::History { .. }
+        | Command::Recipe {
+            action: RecipeAction::Check { .. },
+        } => {
             unreachable!()
         }
     }
