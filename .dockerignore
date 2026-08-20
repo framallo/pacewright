@@ -1,0 +1,10 @@
+# El build de la imagen solo necesita las fuentes; todo esto pesa y no aporta.
+target/
+**/target/
+.git/
+docs/
+e2e/
+donut-sync/
+packaging/
+.github/
+*.md
