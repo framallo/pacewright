@@ -2,7 +2,7 @@
 name = "pacewright-chrome"
 version = "0.5.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "Vendored chrome-agent: CDP browser driver + KDL recipe engine, linked in-process by pacewright (no external chrome-agent binary)."
 
 # Vendored from framallo/chrome-agent (MIT). Kept as its own crate so pacewright links the CDP driver

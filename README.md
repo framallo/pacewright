@@ -354,4 +354,8 @@ Intentionally deferred to later milestones, not oversights:
 
 ## License
 
-MIT
+GNU Affero General Public License v3.0 only (AGPL-3.0-only) — see [`LICENSE`](LICENSE).
+
+The vendored `crates/chrome` originates from framallo/chrome-agent (MIT) and
+`crates/chrome/src/vendor/Readability.js` from Arc90 (Apache-2.0); both permit
+relicensing as part of this AGPL work, and their upstream notices are kept.

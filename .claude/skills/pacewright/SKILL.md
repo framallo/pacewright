@@ -8,7 +8,7 @@ description: >
   this", "pause/resume the daemon", or asks to render/publish/download through
   the automation daemon.
 user-invokable: true
-license: MIT
+license: AGPL-3.0-only
 metadata:
   author: pacewright
   version: "1.0.0"

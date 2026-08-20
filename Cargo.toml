@@ -5,7 +5,7 @@ members = ["crates/core", "crates/proto", "crates/daemon", "crates/cli", "crates
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
