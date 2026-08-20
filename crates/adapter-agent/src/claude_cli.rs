@@ -74,6 +74,14 @@ impl ClaudeCliRunner {
     }
 }
 
+/// A model provider (gateway/proxy) is configured when `ANTHROPIC_BASE_URL` is set and non-empty.
+/// In that mode `claude -p` keeps `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` so it bills through the
+/// provider; otherwise both are stripped and the round rides the `claude` CLI's own Claude Code
+/// subscription login (the default). Pure so the decision is unit-tested without spawning.
+pub(crate) fn use_model_provider(base_url: Option<&str>) -> bool {
+    matches!(base_url, Some(v) if !v.trim().is_empty())
+}
+
 #[async_trait]
 impl ClaudeRunner for ClaudeCliRunner {
     async fn run(&self, spec: &ClaudeRun) -> Result<ClaudeOutcome, AdapterError> {
@@ -90,12 +98,14 @@ impl ClaudeRunner for ClaudeCliRunner {
         }
         cmd.stdin(std::process::Stdio::null());
         cmd.kill_on_drop(true);
-        // Force the Max/Pro subscription: if the daemon env carries ANTHROPIC_API_KEY, the `claude`
-        // CLI would bill the pay-per-token API instead of the logged-in subscription. Strip it (and
-        // the raw auth token) so `claude -p` uses its own Claude Code login — the whole point of
-        // running the round through the CLI rather than the API completer.
-        cmd.env_remove("ANTHROPIC_API_KEY");
-        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        // Model provider vs subscription: with a provider configured (`ANTHROPIC_BASE_URL`), keep
+        // the API key so `claude -p` bills through the provider. Without one, strip the key and the
+        // raw auth token so the round uses the `claude` CLI's own Claude Code login (the default —
+        // otherwise a daemon-env `ANTHROPIC_API_KEY` would silently bill the pay-per-token API).
+        if !use_model_provider(std::env::var("ANTHROPIC_BASE_URL").ok().as_deref()) {
+            cmd.env_remove("ANTHROPIC_API_KEY");
+            cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        }
 
         let start = Instant::now();
         let output = cmd.output();
@@ -331,6 +341,14 @@ mod tests {
     #[test]
     fn build_run_requires_a_prompt_source() {
         assert!(build_run(&json!({ "model": "x" })).is_err());
+    }
+
+    #[test]
+    fn model_provider_is_the_base_url_presence() {
+        assert!(use_model_provider(Some("https://gateway.example/v1")));
+        assert!(!use_model_provider(None));
+        assert!(!use_model_provider(Some("")));
+        assert!(!use_model_provider(Some("   ")));
     }
 
     #[tokio::test]
