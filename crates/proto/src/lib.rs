@@ -141,6 +141,18 @@ pub enum Request {
     LedgerStats,
     /// Whether a Claude Max/Pro subscription is signed in, its freshness, and email.
     AnthropicStatus,
+    /// Empieza el login OAuth de Claude SIN loopback: devuelve la URL a abrir y
+    /// el PKCE (`verifier`+`state`) que el cliente guarda para el submit. El
+    /// daemon no guarda estado entre las dos llamadas.
+    AnthropicLoginUrl,
+    /// Termina el login: intercambia el código pegado (`code` o `code#state`)
+    /// por los tokens y los guarda. `verifier`/`state` son los que devolvió
+    /// [`Request::AnthropicLoginUrl`].
+    AnthropicLoginSubmit {
+        pasted: String,
+        verifier: String,
+        state: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

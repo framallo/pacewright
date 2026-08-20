@@ -179,8 +179,65 @@ fn set_enabled(
     Ok(serde_json::json!({ "id": id, "enabled": enabled }))
 }
 
+/// Login OAuth de Claude en dos pasos, SIN loopback — para producción, donde el
+/// server no tiene navegador ni acceso a localhost. Va antes del cierre
+/// síncrono de `handle_request` porque el intercambio del código es asíncrono.
+///   - `AnthropicLoginUrl`: arma la URL a abrir + el PKCE (`verifier`+`state`)
+///     que el cliente guarda; el daemon no guarda estado entre pasos.
+///   - `AnthropicLoginSubmit`: cambia el código pegado por tokens y los guarda
+///     en `~/.pacewright/secrets.json` (0600, auto-refresh al usarlos).
+async fn handle_anthropic_login(req: &Request) -> Option<Response> {
+    use pacewright_adapter_agent::anthropic_oauth as oauth;
+    let res: Result<serde_json::Value, String> = match req {
+        Request::AnthropicLoginUrl => {
+            let pkce = oauth::generate_pkce();
+            let state = oauth::generate_pkce().verifier;
+            let url = oauth::build_authorize_url(&state, oauth::REDIRECT_URI, &pkce.challenge);
+            Ok(serde_json::json!({
+                "authorize_url": url,
+                "verifier": pkce.verifier,
+                "state": state,
+            }))
+        }
+        Request::AnthropicLoginSubmit {
+            pasted,
+            verifier,
+            state,
+        } => {
+            let (code, ret_state) = oauth::split_code_state(pasted.trim(), state);
+            let http = oauth::ReqwestTokenHttp::default();
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            match oauth::exchange_code(
+                &http,
+                code,
+                ret_state,
+                oauth::REDIRECT_URI,
+                verifier,
+                now_ms,
+            )
+            .await
+            {
+                Ok(tokens) => {
+                    let path = pacewright_core::run::home_dir().join("secrets.json");
+                    oauth::store_login(&path, &tokens)
+                        .map(|()| serde_json::json!({ "signed_in": true, "email": tokens.email }))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        _ => return None,
+    };
+    Some(match res {
+        Ok(v) => Response::Ok(v),
+        Err(message) => Response::Error { message },
+    })
+}
+
 pub async fn handle_request(srv: &Server, req: Request) -> Response {
     if let Some(resp) = handle_auth(srv, &req).await {
+        return resp;
+    }
+    if let Some(resp) = handle_anthropic_login(&req).await {
         return resp;
     }
     let mut e = srv.engine.lock().await;
@@ -585,6 +642,9 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
             | Request::AuthRecheck { .. }
             | Request::AuthLogin { .. }
             | Request::AuthLoginAll => unreachable!("auth requests are handled by handle_auth"),
+            Request::AnthropicLoginUrl | Request::AnthropicLoginSubmit { .. } => {
+                unreachable!("anthropic login is handled by handle_anthropic_login")
+            }
         }
     })();
     match res {
