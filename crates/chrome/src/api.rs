@@ -32,9 +32,29 @@ pub fn parse_vars(
 /// Attach, run the recipe at `file` with `vars`, return its [`recipe::engine::Outcome`]
 /// (`result` JSON + any `unexpected` notes). Never prints. In-process equivalent of
 /// `chrome-agent --connect <c> --browser <b> --page <p> recipe run <file> --vars-json …`.
+///
+/// Thin wrapper over [`run_recipe_attached_src`]: reads the file, then delegates. Callers that
+/// already hold the recipe text (a database row, a spool entry) should call that one directly
+/// instead of writing a temp file just to have a path.
 pub async fn run_recipe_attached(
     at: &RecipeAttach<'_>,
     file: &str,
+    vars: BTreeMap<String, String>,
+    solver: Option<&dyn recipe::engine::Solver>,
+) -> Result<recipe::engine::Outcome, BoxError> {
+    let src = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
+    run_recipe_attached_src(at, &src, vars, solver).await
+}
+
+/// Same as [`run_recipe_attached`], but takes the recipe **source** instead of a path.
+///
+/// Exists because a recipe does not have to live in a file: cazafacturas keeps them as rows in
+/// its own database so an authored or self-healed recipe can be stored, versioned and rolled back
+/// like any other record. Materialising such a row to a temp file just to hand back a path was the
+/// alternative, and it buys nothing — the engine only ever needed the text.
+pub async fn run_recipe_attached_src(
+    at: &RecipeAttach<'_>,
+    src: &str,
     vars: BTreeMap<String, String>,
     solver: Option<&dyn recipe::engine::Solver>,
 ) -> Result<recipe::engine::Outcome, BoxError> {
@@ -68,8 +88,7 @@ pub async fn run_recipe_attached(
             .await;
     }
 
-    let src = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
-    let rec = recipe::model::Recipe::parse(&src)?;
+    let rec = recipe::model::Recipe::parse(src)?;
     let rb = recipe::browser::CdpBrowser::new(
         client,
         target_id,

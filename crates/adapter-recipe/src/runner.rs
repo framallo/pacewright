@@ -355,9 +355,27 @@ impl RecipeRunner for NativeRecipeRunner {
         vars_json: &str,
         opts: &RunOpts,
     ) -> Result<Value, AdapterError> {
+        let src = std::fs::read_to_string(recipe_path)
+            .map_err(|e| AdapterError::Terminal(format!("reading {}: {e}", recipe_path.display())))?;
+        self.run_src(&src, vars_json, opts).await
+    }
+}
+
+impl NativeRecipeRunner {
+    /// Run a recipe from its **source** rather than a path.
+    ///
+    /// This is the real body; [`RecipeRunner::run`] reads the file and delegates here. Splitting it
+    /// this way also removed a double read that was here from the start: the source was loaded to
+    /// inject OAuth vars, thrown away, and the *path* handed to the worker — which opened and read
+    /// the very same file again.
+    pub async fn run_src(
+        &self,
+        src: &str,
+        vars_json: &str,
+        opts: &RunOpts,
+    ) -> Result<Value, AdapterError> {
         // Inject OAuth secrets exactly as the CLI path did, then resolve to a var map — all on the
         // caller thread (Send), before crossing to the recipe worker.
-        let src = std::fs::read_to_string(recipe_path).unwrap_or_default();
         let store = SecretStore::load(secrets_path()).unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let injected = inject_oauth_vars(&src, vars_json, &store, now_ms);
@@ -376,7 +394,6 @@ impl RecipeRunner for NativeRecipeRunner {
             .clone()
             .unwrap_or_else(|| self.page_name.clone());
         let activate = opts.foreground;
-        let path = recipe_path.to_string_lossy().to_string();
 
         // First attempt, then the same stale-page recovery the CLI runner already had. The native
         // path never got it, and the pool made it matter: more Chromes means more cached tabs, and
@@ -386,7 +403,7 @@ impl RecipeRunner for NativeRecipeRunner {
                 &connect,
                 &browser_name,
                 &page,
-                &path,
+                src,
                 vars.clone(),
                 activate,
             )
@@ -394,7 +411,7 @@ impl RecipeRunner for NativeRecipeRunner {
         if is_stale_outcome(&outcome) {
             pacewright_core::browser::prune_stale_page(&browser_name, &page);
             return self
-                .attached(&connect, &browser_name, &page, &path, vars, activate)
+                .attached(&connect, &browser_name, &page, src, vars, activate)
                 .await;
         }
         outcome
@@ -413,15 +430,17 @@ impl NativeRecipeRunner {
         connect: &str,
         browser_name: &str,
         page: &str,
-        path: &str,
+        src: &str,
         vars: std::collections::BTreeMap<String, String>,
         activate: bool,
     ) -> Result<Value, AdapterError> {
-        let (connect, browser_name, page, path) = (
+        // Todo lo que cruza al worker es dueño de sus datos: el future del motor es `!Send` y
+        // corre en otro hilo, así que no puede quedarse con préstamos de este.
+        let (connect, browser_name, page, src) = (
             connect.to_string(),
             browser_name.to_string(),
             page.to_string(),
-            path.to_string(),
+            src.to_string(),
         );
         let stealth = self.stealth;
         let timeout_secs = self.timeout_secs;
@@ -455,7 +474,7 @@ impl NativeRecipeRunner {
                     timeout_secs,
                     activate,
                 };
-                match pacewright_chrome::api::run_recipe_attached(&at, &path, vars, solver_ref)
+                match pacewright_chrome::api::run_recipe_attached_src(&at, &src, vars, solver_ref)
                     .await
                 {
                     Ok(o) => Ok(serde_json::json!({
