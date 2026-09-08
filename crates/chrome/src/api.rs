@@ -75,44 +75,15 @@ pub async fn run_recipe_attached_src(
         .clone()
         .ok_or("no HTTP endpoint on the browser connection")?;
 
-    let target_id = {
+    // `we_created_tab` decides cleanup. pacewright shares the operator's always-on Chrome with
+    // humans and other agents, and for `page = "default"` resolve_page_target *adopts* the first
+    // unclaimed tab it finds, which may be someone else's. Closing an adopted tab would destroy
+    // their work, so only a tab we created ourselves is ever closed.
+    let (target_id, we_created_tab) = {
         let bs = session::ensure_browser(&mut store, at.browser, &conn.ws_endpoint, conn.pid, true);
-        run_helpers::resolve_page_target(&browser_client, bs, at.page).await?
+        run_helpers::resolve_page_target_ext(&browser_client, bs, at.page).await?
     };
     let _ = session::save_session(&mut store);
-
-    // Reap orphaned automation tabs before the run: close any about:blank page target
-    // that no session page claims and that is not the tab we are about to use. This is
-    // the dedicated automation Chrome, so a stray about:blank is a leftover from a run
-    // that did not clean up (or an older build), never operator content. Claimed tabs
-    // are skipped so nothing a recipe depends on is ever closed. Best-effort.
-    {
-        let claimed: std::collections::HashSet<String> = store
-            .browsers
-            .get(at.browser)
-            .map(|bs| bs.pages.values().map(|p| p.target_id.clone()).collect())
-            .unwrap_or_default();
-        let got: Result<crate::cdp::types::GetTargetsResult, _> = browser_client
-            .call("Target.getTargets", serde_json::json!({}))
-            .await;
-        if let Ok(targets) = got {
-            for t in targets.target_infos {
-                if t.target_type == "page"
-                    && t.url == "about:blank"
-                    && t.target_id != target_id
-                    && !claimed.contains(&t.target_id)
-                {
-                    let _: serde_json::Value = browser_client
-                        .call(
-                            "Target.closeTarget",
-                            serde_json::json!({ "targetId": t.target_id }),
-                        )
-                        .await
-                        .unwrap_or_default();
-                }
-            }
-        }
-    }
 
     let client = run_helpers::connect_page(&http_endpoint, &target_id, at.stealth).await?;
     // Auto-answer native JS dialogs for the whole run. Without this, the Chrome
@@ -159,12 +130,14 @@ pub async fn run_recipe_attached_src(
     };
     let outcome = recipe::engine::run(&rec, &vars, &rb, &run_opts, solver).await;
 
-    // Tab hygiene: close the tab this run used so tabs do not pile up across scheduled
-    // runs, then unregister it so the next run recreates a fresh one. Skip "default",
-    // which reuses the operator's own tab rather than one we created here. Runs on both
-    // success and failure. Dropping `rb` first releases its borrow of `browser_client`.
+    // Tab hygiene: close the tab this run used so tabs do not pile up across scheduled runs,
+    // then unregister it so the next run creates a fresh one. Gated on `we_created_tab`, NOT on
+    // the page name: this Chrome is shared with the operator and other agents, and a "default"
+    // run may have adopted a tab that a human opened. Closing only what we created is the only
+    // safe rule. Runs on both success and failure. Dropping `rb` first releases its borrow of
+    // `browser_client`.
     drop(rb);
-    if at.page != "default" {
+    if we_created_tab {
         let _: serde_json::Value = browser_client
             .call(
                 "Target.closeTarget",

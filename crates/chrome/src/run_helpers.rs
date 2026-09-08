@@ -243,8 +243,25 @@ pub async fn resolve_page_target(
     browser_session: &mut BrowserSession,
     page_name: &str,
 ) -> Result<String, crate::BoxError> {
+    resolve_page_target_ext(client, browser_session, page_name)
+        .await
+        .map(|(id, _)| id)
+}
+
+/// Same as [`resolve_page_target`], but also reports whether this call **created** the tab
+/// (`true`) or reused/adopted an existing one (`false`).
+///
+/// Callers need this to clean up safely. pacewright shares the operator's always-on Chrome with
+/// other tools, and for `page = "default"` this function *adopts* the first unclaimed page target
+/// it finds, which can be a tab a human or another agent opened. Closing that on completion would
+/// destroy someone else's work, so only tabs we created ourselves may be closed.
+pub async fn resolve_page_target_ext(
+    client: &CdpClient,
+    browser_session: &mut BrowserSession,
+    page_name: &str,
+) -> Result<(String, bool), crate::BoxError> {
     if let Some(page) = browser_session.pages.get(page_name) {
-        return Ok(page.target_id.clone());
+        return Ok((page.target_id.clone(), false));
     }
 
     if page_name == "default" {
@@ -266,7 +283,7 @@ pub async fn resolve_page_target(
         if let Some(target) = available {
             let target_id = target.target_id.clone();
             session::ensure_page(browser_session, page_name, &target_id);
-            return Ok(target_id);
+            return Ok((target_id, false));
         }
     }
 
@@ -285,7 +302,7 @@ pub async fn resolve_page_target(
 
     let target_id = create_result.target_id;
     session::ensure_page(browser_session, page_name, &target_id);
-    Ok(target_id)
+    Ok((target_id, true))
 }
 
 pub fn cmd_status(json_mode: bool) -> Result<(), crate::BoxError> {
