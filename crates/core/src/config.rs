@@ -9,6 +9,11 @@ pub struct LimitConfig {
     pub jitter: f64,
     pub active_start_min: i32,
     pub active_end_min: i32,
+    /// Per-day time spread (ms) added to a window-open deferral so a daily-capped drip fires at a
+    /// slightly different clock time each day instead of exactly at the window open. `0` = off
+    /// (byte-identical to pre-spread behavior). The offset is derived deterministically per
+    /// `(limit_key, local_date)` in `limits.rs`, never drawn from the shared rng.
+    pub spread_ms: i64,
 }
 
 impl LimitConfig {
@@ -19,6 +24,7 @@ impl LimitConfig {
             jitter: 0.0,
             active_start_min: 0,
             active_end_min: 1440,
+            spread_ms: 0,
         }
     }
 
@@ -44,6 +50,9 @@ impl LimitConfig {
             jitter: jitter.unwrap_or(0.0),
             active_start_min: astart,
             active_end_min: aend,
+            // `set_limit` (the runtime-override path) does not carry spread; spread is a
+            // config.toml feature for daily drips. Defaults to off here.
+            spread_ms: 0,
         })
     }
 }
@@ -114,6 +123,8 @@ struct RawLimit {
     jitter: Option<f64>,
     #[serde(default)]
     active: Option<String>,
+    #[serde(default)]
+    spread: Option<String>,
 }
 
 fn parse_duration_ms(s: &str) -> Result<i64> {
@@ -170,6 +181,10 @@ impl Config {
                     jitter: v.jitter.unwrap_or(0.0),
                     active_start_min: astart,
                     active_end_min: aend,
+                    spread_ms: match v.spread {
+                        Some(sp) => parse_duration_ms(&sp)?,
+                        None => 0,
+                    },
                 },
             );
         }
@@ -268,6 +283,22 @@ active = "09:00-18:00"
         let l = c.limit_for("anything");
         assert_eq!(l, LimitConfig::permissive());
     }
+    #[test]
+    fn test_spread_parses_and_defaults_to_zero() {
+        // Present → parsed as a duration.
+        let c = Config::from_toml(
+            "[limits.\"x.post\"]\ndaily_cap = 1\nactive = \"09:00-20:00\"\nspread = \"45m\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.limit_for("x.post").spread_ms, 45 * 60_000);
+        // Absent → 0 (backward compatible: behaves exactly as before spread existed).
+        let c = Config::from_toml("[limits.\"x.post\"]\ndaily_cap = 1\n").unwrap();
+        assert_eq!(c.limit_for("x.post").spread_ms, 0);
+        // Bare-seconds form is accepted too.
+        let c = Config::from_toml("[limits.\"x.post\"]\nspread = \"90s\"\n").unwrap();
+        assert_eq!(c.limit_for("x.post").spread_ms, 90_000);
+    }
+
     #[test]
     fn test_duration_units() {
         assert_eq!(parse_duration_ms("20s").unwrap(), 20_000);

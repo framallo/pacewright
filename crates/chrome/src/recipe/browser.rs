@@ -214,6 +214,10 @@ impl<'a> CdpBrowser<'a> {
         let new_client = crate::run_helpers::connect_page(http, &new_id, self.stealth).await?;
         // Inject the locator runtime into the followed tab (on future docs and the current one).
         new_client.enable("Page").await?;
+        // A followed tab needs the same dialog auto-answer as the primary page, or a
+        // beforeunload/alert/confirm raised in it would hang the run. Page is enabled
+        // above, so `Page.javascriptDialogOpening` fires; `Accept` = proceed/accept.
+        new_client.spawn_dialog_handler(crate::setup::DialogPolicy::Accept, None);
         new_client
             .send(
                 "Page.addScriptToEvaluateOnNewDocument",

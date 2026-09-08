@@ -43,6 +43,10 @@ pub struct ScheduleEntry {
     pub timing: Timing,
     pub priority: Option<i64>,
     pub max_attempts: Option<i64>,
+    /// Optional per-schedule time jitter, in milliseconds, for `Timing::Every` entries. When
+    /// set, the materialized recurrence string carries a `|jitter=<ms>` suffix and each firing
+    /// is offset by a random amount in `[-jitter_ms, +jitter_ms]` (human-like timing).
+    pub jitter_ms: Option<i64>,
     /// The file-declared default; a runtime override in `schedule_state` wins over it.
     pub enabled: bool,
     /// The file this entry came from (for error messages).
@@ -64,7 +68,9 @@ impl ScheduleEntry {
     /// slot; one-shot `at` → its time if still future; on-apply → none.
     pub fn next_fire(&self, now_ms: i64) -> Option<i64> {
         match &self.timing {
-            Timing::Every(cron) => next_occurrence_ms(cron, now_ms),
+            // Route through the (possibly `|jitter=`-suffixed) recurrence string so the displayed
+            // next fire reflects the same jitter the queued task will get.
+            Timing::Every(_) => recurrence_of(self).and_then(|s| next_occurrence_ms(&s, now_ms)),
             Timing::At(ms) => (*ms > now_ms).then_some(*ms),
             Timing::OnApply => None,
         }
@@ -93,12 +99,35 @@ struct RawEntry {
     priority: Option<i64>,
     #[serde(default)]
     max_attempts: Option<i64>,
+    /// Optional per-schedule time jitter: `Nm` (minutes), `Ns` (seconds), or a bare integer
+    /// (seconds). Only meaningful with `every`.
+    #[serde(default)]
+    jitter: Option<String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Parse a jitter duration into milliseconds. Accepts `Nm` (minutes), `Ns` (seconds), or a
+/// bare integer (seconds): `"6m"` → 360000, `"90s"` → 90000, `"300"` → 300000. Rejects
+/// negative or non-numeric values.
+fn parse_jitter(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    let (num, mult) = if let Some(m) = s.strip_suffix('m') {
+        (m.trim(), 60_000i64)
+    } else if let Some(sec) = s.strip_suffix('s') {
+        (sec.trim(), 1_000i64)
+    } else {
+        (s, 1_000i64)
+    };
+    let n: i64 = num.parse().map_err(|_| format!("invalid jitter {s:?}"))?;
+    if n < 0 {
+        return Err(format!("jitter must be non-negative, got {s:?}"));
+    }
+    Ok(n * mult)
 }
 
 /// Parse one schedule file's text into entries. `Err` = the file itself is malformed
@@ -139,6 +168,16 @@ pub fn parse_file(text: &str, source: &Path) -> Result<Vec<ScheduleEntry>, Strin
             },
             None => serde_json::Map::new(),
         };
+        let jitter_ms = match r.jitter.as_deref() {
+            Some(j) => Some(parse_jitter(j).map_err(|e| {
+                format!(
+                    "{}: task `{}` has an invalid `jitter`: {e}",
+                    source.display(),
+                    r.id
+                )
+            })?),
+            None => None,
+        };
         out.push(ScheduleEntry {
             id: r.id,
             recipe: r.recipe,
@@ -146,6 +185,7 @@ pub fn parse_file(text: &str, source: &Path) -> Result<Vec<ScheduleEntry>, Strin
             timing,
             priority: r.priority,
             max_attempts: r.max_attempts,
+            jitter_ms,
             enabled: r.enabled,
             source: source.to_path_buf(),
         });
@@ -315,7 +355,11 @@ pub fn reconcile(
             (true, None) => {
                 let scheduled_for = match &e.timing {
                     Timing::At(ms) => *ms,
-                    Timing::Every(cron) => next_occurrence_ms(cron, now).unwrap_or(now),
+                    // Compute from the (possibly `|jitter=`-suffixed) recurrence so even the first
+                    // firing is jittered, matching every subsequent re-queued occurrence.
+                    Timing::Every(_) => recurrence_of(e)
+                        .and_then(|s| next_occurrence_ms(&s, now))
+                        .unwrap_or(now),
                     Timing::OnApply => now,
                 };
                 let mut t = Task::new_now(
@@ -386,7 +430,12 @@ pub fn reconcile(
 
 fn recurrence_of(e: &ScheduleEntry) -> Option<String> {
     match &e.timing {
-        Timing::Every(c) => Some(c.clone()),
+        // Encode the jitter inside the recurrence string (no schema/Task changes): the runner
+        // splits `<cron>|jitter=<ms>` back apart when computing the next occurrence.
+        Timing::Every(c) => Some(match e.jitter_ms {
+            Some(ms) => format!("{c}|jitter={ms}"),
+            None => c.clone(),
+        }),
         _ => None,
     }
 }
@@ -511,6 +560,7 @@ mod tests {
             timing,
             priority: None,
             max_attempts: None,
+            jitter_ms: None,
             enabled: true,
             source: p(id),
         };
@@ -546,6 +596,7 @@ mod tests {
             timing,
             priority: None,
             max_attempts: None,
+            jitter_ms: None,
             enabled,
             source: p(id),
         }

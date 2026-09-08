@@ -7,6 +7,7 @@ use crate::notify::{EscalationEvent, EscalationKind, Notifier};
 use crate::store::Store;
 use croner::Cron;
 use futures_util::FutureExt;
+use rand::Rng;
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -17,14 +18,31 @@ pub fn backoff_ms(attempts: i64) -> i64 {
 }
 
 pub fn next_occurrence_ms(cron: &str, after_ms: i64) -> Option<i64> {
+    // A recurrence string may carry an optional `|jitter=<ms>` suffix (encoded by the
+    // scheduler so nothing in the schema/Task struct changes). Split it off: the left part
+    // is the real croner pattern; the right part, if it parses, is a +/- spread in ms.
+    let (clean, jitter_ms) = match cron.split_once("|jitter=") {
+        Some((c, j)) => (c, j.trim().parse::<i64>().ok()),
+        None => (cron, None),
+    };
     // `Cron::from_str` (via FromStr) constructs but does not parse the pattern, so
     // fields stay unset and never match. Parse explicitly, allowing an optional
     // leading seconds field (5- or 6-part patterns), per croner 2.x semantics.
-    let c = Cron::new(cron).with_seconds_optional().parse().ok()?;
+    let c = Cron::new(clean).with_seconds_optional().parse().ok()?;
     let after = chrono::Utc.timestamp_millis_opt(after_ms).single()?;
-    c.find_next_occurrence(&after, false)
+    let base = c
+        .find_next_occurrence(&after, false)
         .ok()
-        .map(|dt| dt.timestamp_millis())
+        .map(|dt| dt.timestamp_millis())?;
+    match jitter_ms {
+        // Apply a random offset in the CLOSED range [-jitter, +jitter], then clamp so the
+        // result never lands in the past / immediately (never earlier than after_ms + 1s).
+        Some(jitter) if jitter > 0 => {
+            let offset = rand::thread_rng().gen_range(-jitter..=jitter);
+            Some((base + offset).max(after_ms + 1000))
+        }
+        _ => Some(base),
+    }
 }
 
 fn event(

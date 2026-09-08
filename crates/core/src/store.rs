@@ -498,6 +498,9 @@ impl Store {
                     jitter: r.get(3)?,
                     active_start_min: r.get(4)?,
                     active_end_min: r.get(5)?,
+                    // spread is a config.toml-only feature and is not persisted in the override
+                    // table; runtime overrides carry no spread. Default to off.
+                    spread_ms: 0,
                 },
             ))
         })?;
@@ -629,6 +632,7 @@ mod tests {
             jitter: 0.25,
             active_start_min: 540,
             active_end_min: 1080,
+            spread_ms: 0,
         };
         s.limit_override_set("acme.post", &cfg, 100).unwrap();
         let all = s.limit_overrides_all().unwrap();

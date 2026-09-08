@@ -66,6 +66,31 @@ fn next_local_midnight_ms(now_ms: i64) -> i64 {
     resolve_local(Local.from_local_datetime(&next), || next).timestamp_millis()
 }
 
+/// Deterministic per-`(key, date)` time offset in `[0, spread_ms]`, added to a window-open
+/// deferral so a daily-capped drip fires at a slightly different clock time each day.
+///
+/// Stability is the whole point: on any given local date every backlog candidate for the same
+/// limit key must resolve to the SAME release time, so exactly one fires at `window_open + offset`.
+/// Drawing from the shared `rng` per-check would give each candidate its own offset and the
+/// earliest would always win (min-bias clustering right back at window open). Hashing
+/// `(key, date)` with a fixed seed gives a stable, rng-free value that varies day to day.
+///
+/// Returns `0` when `spread_ms <= 0`, making spread-off behavior byte-identical to before.
+fn day_spread_offset_ms(key: &str, date: &str, spread_ms: i64) -> i64 {
+    if spread_ms <= 0 {
+        return 0;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Length-prefix-free but delimited: hashing the two &str separately (Hash for str folds in the
+    // length) keeps ("ab","c") distinct from ("a","bc").
+    key.hash(&mut h);
+    date.hash(&mut h);
+    // Map the 64-bit hash uniformly into the inclusive range [0, spread_ms].
+    let span = (spread_ms as u64).saturating_add(1);
+    (h.finish() % span) as i64
+}
+
 fn local_time_at_minute_ms(now_ms: i64, minute_of_day: i32) -> i64 {
     let dt = local_from_millis(now_ms);
     let base = dt
@@ -104,18 +129,24 @@ pub fn check_limits(
             );
             continue;
         }
-        // 2. active hours -> defer to window open (today or next day)
+        // 2. active hours -> defer to window open (today or next day), plus a stable per-day
+        //    spread offset so a daily-capped drip does not fire at the exact same clock time
+        //    every day. The offset is 0 when spread is unset (byte-identical to before).
         if now_min < lc.active_start_min {
+            let offset = day_spread_offset_ms(key, &date, lc.spread_ms);
             consider(
-                local_time_at_minute_ms(now, lc.active_start_min),
+                local_time_at_minute_ms(now, lc.active_start_min) + offset,
                 format!("before_active:{key}"),
                 &mut worst,
             );
             continue;
         }
         if now_min >= lc.active_end_min {
-            let open_next =
-                local_time_at_minute_ms(next_local_midnight_ms(now), lc.active_start_min);
+            // Deferring to tomorrow's window open: derive the offset from tomorrow's local date
+            // so it matches what a `before_active` check will compute once that day arrives.
+            let next_mid = next_local_midnight_ms(now);
+            let offset = day_spread_offset_ms(key, &local_date_str(next_mid), lc.spread_ms);
+            let open_next = local_time_at_minute_ms(next_mid, lc.active_start_min) + offset;
             consider(open_next, format!("after_active:{key}"), &mut worst);
             continue;
         }
@@ -231,6 +262,71 @@ active = "09:00-18:00"
             }
             _ => panic!("expected defer"),
         }
+    }
+
+    // 2026-07-07 07:00 local — before a 09:00 window open.
+    fn morning_ms() -> i64 {
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 7, 7)
+            .unwrap()
+            .and_hms_opt(7, 0, 0)
+            .unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    fn cfg_with_spread() -> Config {
+        Config::from_toml(
+            r#"
+[limits."dummy.capped"]
+daily_cap = 3
+min_gap = "8m"
+jitter = 0.0
+active = "09:00-18:00"
+spread = "45m"
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_before_active_release_is_offset_within_spread_and_stable() {
+        let store = Store::open_in_memory().unwrap();
+        let clock = TestClock::new(morning_ms());
+        let rng = TestRng::fixed(0);
+        let cfg = cfg_with_spread();
+        let key = "dummy.capped".to_string();
+
+        // window open at 09:00 on the same local day as `morning_ms()`
+        let window_open = local_time_at_minute_ms(morning_ms(), 9 * 60);
+        let spread_ms = 45 * 60_000i64;
+
+        let d1 = check_limits(&store, &cfg, &clock, &rng, &[key.clone()]).unwrap();
+        let until1 = match &d1 {
+            LimitDecision::Defer { until_ms, reason } => {
+                assert!(reason.starts_with("before_active"));
+                *until_ms
+            }
+            _ => panic!("expected before_active defer"),
+        };
+
+        // Offset from the exact window open, and inside [open, open+spread].
+        assert!(until1 > window_open, "expected a nonzero spread offset");
+        assert!(until1 <= window_open + spread_ms);
+
+        // Stable: a second check on the same (key, date) yields the identical release time —
+        // this is what guarantees exactly one backlog candidate fires per day at window+offset.
+        let d2 = check_limits(&store, &cfg, &clock, &rng, &[key]).unwrap();
+        let until2 = match d2 {
+            LimitDecision::Defer { until_ms, .. } => until_ms,
+            _ => panic!("expected before_active defer"),
+        };
+        assert_eq!(until1, until2);
+
+        // And spread=0 collapses back to the exact window open (byte-identical to old behavior).
+        assert_eq!(day_spread_offset_ms("dummy.capped", &local_date_str(morning_ms()), 0), 0);
     }
 
     #[test]

@@ -81,7 +81,62 @@ pub async fn run_recipe_attached_src(
     };
     let _ = session::save_session(&mut store);
 
+    // Reap orphaned automation tabs before the run: close any about:blank page target
+    // that no session page claims and that is not the tab we are about to use. This is
+    // the dedicated automation Chrome, so a stray about:blank is a leftover from a run
+    // that did not clean up (or an older build), never operator content. Claimed tabs
+    // are skipped so nothing a recipe depends on is ever closed. Best-effort.
+    {
+        let claimed: std::collections::HashSet<String> = store
+            .browsers
+            .get(at.browser)
+            .map(|bs| bs.pages.values().map(|p| p.target_id.clone()).collect())
+            .unwrap_or_default();
+        let got: Result<crate::cdp::types::GetTargetsResult, _> = browser_client
+            .call("Target.getTargets", serde_json::json!({}))
+            .await;
+        if let Ok(targets) = got {
+            for t in targets.target_infos {
+                if t.target_type == "page"
+                    && t.url == "about:blank"
+                    && t.target_id != target_id
+                    && !claimed.contains(&t.target_id)
+                {
+                    let _: serde_json::Value = browser_client
+                        .call(
+                            "Target.closeTarget",
+                            serde_json::json!({ "targetId": t.target_id }),
+                        )
+                        .await
+                        .unwrap_or_default();
+                }
+            }
+        }
+    }
+
     let client = run_helpers::connect_page(&http_endpoint, &target_id, at.stealth).await?;
+    // Auto-answer native JS dialogs for the whole run. Without this, the Chrome
+    // "Leave site? Changes you made may not be saved." beforeunload dialog that
+    // X/Twitter raises when navigating away from a compose box (and any
+    // alert/confirm/prompt) blocks the page with no DOM signal, so the recipe's
+    // next CDP command hangs until the run times out. `connect_page` already
+    // enabled the Page domain, so `Page.javascriptDialogOpening` fires. `Accept`
+    // matches the CLI default intent: beforeunload → proceed (click Leave),
+    // alert/confirm/prompt → accept. The handler lives as long as this client.
+    client.spawn_dialog_handler(crate::setup::DialogPolicy::Accept, None);
+    // Belt-and-suspenders for the "Leave site?" beforeunload prompt: on top of the
+    // dialog handler above, neutralize beforeunload on every document so navigating
+    // away from a page that set onbeforeunload (e.g. X's compose box) never raises
+    // the prompt at all. Registered for future documents (survives navigations) and
+    // run once on the current one. try/catch so a hardened page can never break the run.
+    const BEFOREUNLOAD_JS: &str = "try{window.addEventListener('beforeunload',function(e){e.stopImmediatePropagation();delete e['returnValue'];},true);Object.defineProperty(window,'onbeforeunload',{configurable:true,get:function(){return null;},set:function(){}});}catch(e){}";
+    let _ = client
+        .send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({ "source": BEFOREUNLOAD_JS }),
+        )
+        .await;
+    let _ = crate::commands::eval::run_raw(&client, BEFOREUNLOAD_JS).await;
     if at.activate {
         let _ = client
             .send("Page.bringToFront", serde_json::json!({}))
@@ -91,7 +146,7 @@ pub async fn run_recipe_attached_src(
     let rec = recipe::model::Recipe::parse(src)?;
     let rb = recipe::browser::CdpBrowser::new(
         client,
-        target_id,
+        target_id.clone(),
         at.timeout_secs,
         Some(&browser_client),
         Some(http_endpoint),
@@ -102,9 +157,30 @@ pub async fn run_recipe_attached_src(
         step_timeout_ms: at.timeout_secs.saturating_mul(1000).max(1000),
         repair: false,
     };
-    recipe::engine::run(&rec, &vars, &rb, &run_opts, solver)
-        .await
-        .map_err(|e| Box::new(e) as BoxError)
+    let outcome = recipe::engine::run(&rec, &vars, &rb, &run_opts, solver).await;
+
+    // Tab hygiene: close the tab this run used so tabs do not pile up across scheduled
+    // runs, then unregister it so the next run recreates a fresh one. Skip "default",
+    // which reuses the operator's own tab rather than one we created here. Runs on both
+    // success and failure. Dropping `rb` first releases its borrow of `browser_client`.
+    drop(rb);
+    if at.page != "default" {
+        let _: serde_json::Value = browser_client
+            .call(
+                "Target.closeTarget",
+                serde_json::json!({ "targetId": target_id }),
+            )
+            .await
+            .unwrap_or_default();
+        if let Ok(mut s) = session::load_session() {
+            if let Some(bs) = s.browsers.get_mut(at.browser) {
+                bs.pages.remove(at.page);
+            }
+            let _ = session::save_session(&mut s);
+        }
+    }
+
+    outcome.map_err(|e| Box::new(e) as BoxError)
 }
 
 /// Attach and navigate the named page to `url`, raising the window — the in-process equivalent of
