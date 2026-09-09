@@ -184,16 +184,45 @@ impl ClaudeCliAdapter {
         self
     }
 
-    /// The environment this round should carry. Empty when no setup token is
-    /// stored — and empty is the right answer there, not an empty-string
+    /// The environment this round should carry. Empty when there is no usable
+    /// credential — and empty is the right answer there, not an empty-string
     /// variable, which would shadow whatever the daemon's own environment has.
-    fn env_for_run(&self) -> BTreeMap<String, String> {
+    ///
+    /// Two sources, in order:
+    ///
+    /// 1. A token pasted from `claude setup-token`, stored under `claude_code`.
+    /// 2. **The `anthropic` OAuth login itself.** `pcw anthropic login` already
+    ///    runs the Claude Code OAuth client, and what it stores is an
+    ///    `sk-ant-oat01-…` with the `user:sessions:claude_code` scope — the same
+    ///    thing `claude setup-token` prints, because that command is this flow
+    ///    with the result shown on screen. Verified against the real CLI: with
+    ///    a stale one it answers "OAuth access token has expired", not "invalid
+    ///    token", so the shape is accepted and only freshness was missing.
+    ///
+    /// Going through `resolve_access_token` matters for (2): it refreshes and
+    /// persists the rotation first, so a round never leaves with the expired
+    /// token that is otherwise sitting in `secrets.json` most of the time.
+    async fn env_for_run(&self) -> BTreeMap<String, String> {
         use pacewright_core::secrets::{SecretStore, CLAUDE_CODE};
         let mut env = BTreeMap::new();
+
         if let Ok(store) = SecretStore::load(&self.secrets_path) {
             if let Some(t) = store.static_token(CLAUDE_CODE) {
                 env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), t.to_string());
+                return env;
             }
+        }
+
+        let ahora = crate::now_ms();
+        let http = crate::anthropic_oauth::ReqwestTokenHttp::default();
+        match crate::anthropic_oauth::resolve_access_token(&self.secrets_path, &http, ahora).await {
+            Ok(Some(t)) => {
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), t);
+            }
+            Ok(None) => {}
+            // Se dice y se sigue sin credencial: la ronda va a fallar igual,
+            // pero con el motivo escrito acá y no sólo en la salida de `claude`.
+            Err(e) => eprintln!("claude_cli: no hay credencial utilizable: {e}"),
         }
         env
     }
@@ -292,7 +321,7 @@ impl Adapter for ClaudeCliAdapter {
             )));
         }
         let mut spec = build_run(&params)?;
-        spec.env = self.env_for_run();
+        spec.env = self.env_for_run().await;
         let cap = spec.cap_secs;
         let outcome = self.runner.run(&spec).await?;
         if outcome.timed_out {
