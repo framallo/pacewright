@@ -6,5 +6,8 @@ docs/
 e2e/
 donut-sync/
 packaging/
+# …salvo el ojo de la ronda de autoría, que SÍ va adentro de la imagen: el
+# resto de packaging/ son cosas del anfitrión (launchd, scripts de la Mac).
+!packaging/pw-dom.mjs
 .github/
 *.md
