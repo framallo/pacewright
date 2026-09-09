@@ -47,6 +47,12 @@ pub struct ProviderSecret {
     pub author_urn: Option<String>,
 }
 
+/// Provider key for the Claude Code setup token (`claude setup-token`). Kept
+/// apart from `anthropic`, which is the OAuth login for the Messages API: they
+/// are different credentials with different powers, and conflating them is how
+/// you end up with a green light over something that cannot run.
+pub const CLAUDE_CODE: &str = "claude_code";
+
 /// The on-disk secret store, keyed by provider name.
 #[derive(Debug, Clone, Default)]
 pub struct SecretStore {
@@ -144,6 +150,38 @@ impl SecretStore {
             rec.scope = scope;
         }
         Ok(())
+    }
+
+    /// Store a token that has no clock expiry — today, the `claude setup-token`
+    /// output (`sk-ant-oat01-…`), which the `claude` CLI accepts and the
+    /// Messages API rejects.
+    ///
+    /// Unlike [`Self::set_tokens`] this does not require [`Self::set_app`]
+    /// first: there is no OAuth app behind it, just a token a human pasted. It
+    /// deliberately leaves `expires_at_ms` unset, which is what marks the
+    /// record as static — [`Self::valid_access_token`] returns `None` for it,
+    /// because "is it fresh?" is a question a static token cannot answer.
+    pub fn set_static_token(&mut self, provider: &str, token: impl Into<String>) {
+        let rec = self.providers.entry(provider.to_string()).or_default();
+        rec.access_token = Some(token.into());
+        rec.expires_at_ms = None;
+        rec.refresh_token = None;
+    }
+
+    /// The stored static token for `provider`, if there is one. Only returns a
+    /// token stored by [`Self::set_static_token`]: a record carrying an expiry
+    /// is an OAuth login and belongs to [`Self::valid_access_token`].
+    pub fn static_token(&self, provider: &str) -> Option<&str> {
+        let rec = self.providers.get(provider)?;
+        if rec.expires_at_ms.is_some() {
+            return None;
+        }
+        rec.access_token.as_deref()
+    }
+
+    /// Forget a provider completely. `true` if there was one.
+    pub fn remove_provider(&mut self, provider: &str) -> bool {
+        self.providers.remove(provider).is_some()
     }
 
     /// Clear a provider's tokens + author URN (keeps its app credentials). No-op if absent.
@@ -322,4 +360,46 @@ mod tests {
         s.clear_tokens("acme"); // must not panic
         assert!(s.get("acme").is_none());
     }
+
+    #[test]
+    fn a_static_token_survives_a_round_trip_and_is_not_an_oauth_login() {
+        let p = tmp_path();
+        let mut s = SecretStore::load(&p).unwrap();
+        s.set_static_token(CLAUDE_CODE, "sk-ant-oat01-xyz");
+        s.save().unwrap();
+
+        let s = SecretStore::load(&p).unwrap();
+        assert_eq!(s.static_token(CLAUDE_CODE), Some("sk-ant-oat01-xyz"));
+        // Sin vencimiento: preguntarle a un token estático si está fresco no
+        // tiene respuesta, así que la vía de OAuth no lo devuelve.
+        assert_eq!(s.valid_access_token(CLAUDE_CODE, 0, 0), None);
+        // Y no tiene con qué refrescarse, porque no hay nada que refrescar.
+        assert!(s.get(CLAUDE_CODE).unwrap().refresh_token.is_none());
+        // `needs_refresh` sí dice `true` para un registro sin vencimiento —es
+        // su regla para "no sé cuándo vence, mirá otra vez"—, pero nadie se lo
+        // pregunta a éste: el único llamador lo consulta con `anthropic` fijo
+        // (`anthropic_oauth.rs`), nunca recorriendo los proveedores.
+        assert!(s.needs_refresh(CLAUDE_CODE, 0, 0));
+    }
+
+    #[test]
+    fn an_oauth_login_is_not_mistaken_for_a_static_token() {
+        let p = tmp_path();
+        let mut s = SecretStore::load(&p).unwrap();
+        s.set_app("anthropic", "id", "sec");
+        s.set_tokens("anthropic", "oauth-tok", None, 9_999_999_999_999, None)
+            .unwrap();
+        assert_eq!(s.static_token("anthropic"), None, "tiene vencimiento: no es estático");
+    }
+
+    #[test]
+    fn removing_a_provider_reports_whether_there_was_one() {
+        let p = tmp_path();
+        let mut s = SecretStore::load(&p).unwrap();
+        s.set_static_token(CLAUDE_CODE, "sk-ant-oat01-xyz");
+        assert!(s.remove_provider(CLAUDE_CODE));
+        assert!(!s.remove_provider(CLAUDE_CODE));
+        assert_eq!(s.static_token(CLAUDE_CODE), None);
+    }
+
 }

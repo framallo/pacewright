@@ -7,12 +7,17 @@
 # (`secrets.json`) viven en `~/.pacewright`, que en compose es un volumen
 # compartido con ese vecino.
 #
-# Qué NO trae, a propósito: Chrome ni el CLI `claude`. Eso lo necesita la
-# AUTORÍA de recetas de verdad (`claude_cli/run` explorando el portal), que es
-# la capa siguiente —y el navegador anti-detect va por ahí. Con esta imagen ya
-# funciona el login web de Claude en producción y el encolado; correr el
-# aprendizaje headless pide agregar `claude` + un Chrome (anti-detect) a esta
-# imagen o a un sidecar.
+# Trae el CLI `claude`, que es lo que corre `claude_cli/run`. Se autentica con
+# el token de `claude setup-token` que el daemon guarda en `secrets.json`
+# (método `claude_token_set`) y que el adaptador le pasa al hijo como
+# `CLAUDE_CODE_OAUTH_TOKEN`. Es el único token que puede gastar una suscripción
+# Max: la API de mensajes lo rechaza, y el OAuth de `anthropic_login` —que sirve
+# para esa API— no sirve para esto. Son dos credenciales distintas.
+#
+# Qué NO trae todavía: Chrome. El prompt de autoría le pide a Claude EXPLORAR el
+# portal, y eso es un navegador. Con esta imagen la ronda arranca y se autentica;
+# lo que falte de navegador lo va a decir la primera corrida de verdad, que es
+# mejor guía que adivinar acá cuál anti-detect hace falta.
 #
 # reqwest usa rustls y rusqlite es `bundled`, así que no hace falta openssl ni
 # libsqlite: el runtime solo necesita las raíces TLS (`ca-certificates`).
@@ -29,13 +34,26 @@ COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release -p pacewright-daemon --bin pacewrightd
 
-FROM debian:bookworm-slim AS runtime
+# node:22 y no debian:bookworm-slim: es el MISMO bookworm, más un Node que le
+# sirve al CLI `claude`, que pide >= 22 (el `nodejs` de bookworm es 18 y no
+# arranca). Traer Node por NodeSource sobre la imagen pelada daba lo mismo con
+# más pasos.
+FROM node:22-bookworm-slim AS runtime
+# Versión exacta a propósito: una ronda desatendida no es lugar para enterarse
+# de un cambio de comportamiento del CLI. Subirla es un commit, no un rebuild.
+ARG CLAUDE_CODE_VERSION=2.1.266
 # ca-certificates: raíces TLS para el OAuth de Claude (api.anthropic.com).
 # El uid 10001 coincide a propósito con el del server de CazaFacturas: el socket
 # que crea el daemon queda accesible para ese vecino, que corre con ese uid.
+# El CLI se instala ANTES del `USER`, porque npm global escribe en /usr/local.
+# `claude --version` al final es la prueba de que quedó ejecutable: si no está,
+# el build falla acá y no seis semanas después en una ronda desatendida.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home --home-dir /home/pacewright pacewright
+    && npm install -g --no-fund --no-audit @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm cache clean --force \
+    && useradd --system --uid 10001 --create-home --home-dir /home/pacewright pacewright \
+    && claude --version
 COPY --from=builder /src/target/release/pacewrightd /usr/local/bin/pacewrightd
 USER pacewright
 ENV HOME=/home/pacewright

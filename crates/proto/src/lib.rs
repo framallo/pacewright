@@ -153,6 +153,19 @@ pub enum Request {
         verifier: String,
         state: String,
     },
+    /// Guarda el token de `claude setup-token` (`sk-ant-oat01-…`), que es el
+    /// único que puede gastar una suscripción Max: lo acepta el binario
+    /// `claude` y la API de mensajes lo rechaza. Es OTRA credencial que la de
+    /// [`Request::AnthropicLoginSubmit`], que es OAuth para la API.
+    ///
+    /// Va por acá y no en los `params` de la tarea a propósito: los params se
+    /// guardan en la base, y un secreto ahí queda en claro.
+    ClaudeTokenSet {
+        token: String,
+    },
+    /// Olvida ese token. Después de esto las rondas de `claude_cli` corren sin
+    /// credencial propia.
+    ClaudeTokenClear,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

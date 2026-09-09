@@ -559,10 +559,18 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                     }
                     _ => (false, None, "signed_out"),
                 };
+                // La OTRA credencial: el token de `claude setup-token`. Es la
+                // única que puede correr una ronda de `claude_cli`, así que el
+                // panel que mira esto necesita las dos por separado. Presencia,
+                // nunca el valor.
+                let setup_token = SecretStore::load(&path)
+                    .ok()
+                    .is_some_and(|s| s.static_token(pacewright_core::secrets::CLAUDE_CODE).is_some());
                 Ok(serde_json::json!({
                     "signed_in": signed_in,
                     "state": state,
                     "expires_at_ms": expires_at,
+                    "setup_token": setup_token,
                 }))
             }
             Request::Subscribe => Ok(
@@ -642,6 +650,32 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
             | Request::AuthRecheck { .. }
             | Request::AuthLogin { .. }
             | Request::AuthLoginAll => unreachable!("auth requests are handled by handle_auth"),
+            Request::ClaudeTokenSet { token } => {
+                use pacewright_core::secrets::{SecretStore, CLAUDE_CODE};
+                let token = token.trim();
+                // Se valida la forma acá también, no sólo del lado del que
+                // pega: este socket es una interfaz propia, y una interfaz que
+                // confía en que el llamador ya validó es una que se rompe con
+                // el segundo llamador. El valor no entra en el error.
+                if !token.starts_with("sk-ant-oat01-") || token.len() < 33 {
+                    return Err("that does not look like `claude setup-token` output \
+                                (expected `sk-ant-oat01-…`)"
+                        .to_string());
+                }
+                let path = pacewright_core::run::home_dir().join("secrets.json");
+                let mut store = SecretStore::load(&path).map_err(|e| e.to_string())?;
+                store.set_static_token(CLAUDE_CODE, token);
+                store.save().map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({ "stored": true }))
+            }
+            Request::ClaudeTokenClear => {
+                use pacewright_core::secrets::{SecretStore, CLAUDE_CODE};
+                let path = pacewright_core::run::home_dir().join("secrets.json");
+                let mut store = SecretStore::load(&path).map_err(|e| e.to_string())?;
+                let had = store.remove_provider(CLAUDE_CODE);
+                store.save().map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({ "cleared": had }))
+            }
             Request::AnthropicLoginUrl | Request::AnthropicLoginSubmit { .. } => {
                 unreachable!("anthropic login is handled by handle_anthropic_login")
             }

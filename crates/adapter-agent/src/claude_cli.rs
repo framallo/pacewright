@@ -10,6 +10,8 @@
 //!
 //! The CLI invocation is behind a [`ClaudeRunner`] trait so the adapter's param-shaping + failure
 //! classification are unit-testable without spawning a process.
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use pacewright_core::adapter::{Adapter, RunCtx};
 use pacewright_core::model::{ActionSpec, AdapterError};
@@ -31,6 +33,11 @@ pub struct ClaudeRun {
     pub model: Option<String>,
     pub add_dirs: Vec<String>,
     pub cap_secs: u64,
+    /// Extra environment for the child. **Never comes from the wire** — see
+    /// [`build_run`] — because task params are persisted in the daemon's DB and
+    /// a credential does not belong there. The adapter fills this at dispatch
+    /// from the secret store.
+    pub env: BTreeMap<String, String>,
 }
 
 /// The outcome of a round: stdout plus how it ended, so the adapter can classify the error class.
@@ -106,6 +113,13 @@ impl ClaudeRunner for ClaudeCliRunner {
             cmd.env_remove("ANTHROPIC_API_KEY");
             cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
         }
+        // After the strip, never before: whatever the adapter resolved for this
+        // run has to survive it. Today that is `CLAUDE_CODE_OAUTH_TOKEN`, which
+        // is not in the list above — but relying on that would make the order a
+        // silent trap for whoever adds the next name to it.
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
 
         let start = Instant::now();
         let output = cmd.output();
@@ -143,6 +157,9 @@ impl ClaudeRunner for ClaudeCliRunner {
 pub struct ClaudeCliAdapter {
     name: String,
     runner: Arc<dyn ClaudeRunner>,
+    /// Where the setup token lives. Read at dispatch, not at construction, so
+    /// rotating it takes effect on the next round without restarting the daemon.
+    secrets_path: std::path::PathBuf,
 }
 
 impl ClaudeCliAdapter {
@@ -150,13 +167,35 @@ impl ClaudeCliAdapter {
         ClaudeCliAdapter {
             name: name.into(),
             runner: Arc::new(ClaudeCliRunner::new()),
+            secrets_path: pacewright_core::run::home_dir().join("secrets.json"),
         }
     }
     pub fn with_runner(name: impl Into<String>, runner: Arc<dyn ClaudeRunner>) -> Self {
         ClaudeCliAdapter {
             name: name.into(),
             runner,
+            secrets_path: pacewright_core::run::home_dir().join("secrets.json"),
         }
+    }
+
+    /// Point the adapter at another secret store. For tests.
+    pub fn with_secrets_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.secrets_path = path.into();
+        self
+    }
+
+    /// The environment this round should carry. Empty when no setup token is
+    /// stored — and empty is the right answer there, not an empty-string
+    /// variable, which would shadow whatever the daemon's own environment has.
+    fn env_for_run(&self) -> BTreeMap<String, String> {
+        use pacewright_core::secrets::{SecretStore, CLAUDE_CODE};
+        let mut env = BTreeMap::new();
+        if let Ok(store) = SecretStore::load(&self.secrets_path) {
+            if let Some(t) = store.static_token(CLAUDE_CODE) {
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), t.to_string());
+            }
+        }
+        env
     }
 }
 
@@ -213,6 +252,10 @@ pub fn build_run(params: &Value) -> Result<ClaudeRun, AdapterError> {
         model,
         add_dirs,
         cap_secs,
+        // Deliberately not read from `params`: these are stored in the DB, so a
+        // secret arriving this way would be persisted in plaintext. The adapter
+        // injects the environment at dispatch instead.
+        env: BTreeMap::new(),
     })
 }
 
@@ -248,7 +291,8 @@ impl Adapter for ClaudeCliAdapter {
                 "claude_cli: unknown action `{action}` (expected `run`)"
             )));
         }
-        let spec = build_run(&params)?;
+        let mut spec = build_run(&params)?;
+        spec.env = self.env_for_run();
         let cap = spec.cap_secs;
         let outcome = self.runner.run(&spec).await?;
         if outcome.timed_out {
@@ -341,6 +385,82 @@ mod tests {
     #[test]
     fn build_run_requires_a_prompt_source() {
         assert!(build_run(&json!({ "model": "x" })).is_err());
+    }
+
+    fn ctx() -> RunCtx {
+        RunCtx {
+            task_id: "t".into(),
+            browser: Arc::new(pacewright_core::browser::NullBrowser),
+        }
+    }
+
+    /// Un directorio de secretos propio del test, para no tocar el del usuario.
+    fn tmp_secrets(nombre: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pw-claude-sec-{}-{nombre}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("secrets.json")
+    }
+
+    const OAT: &str = "sk-ant-oat01-0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn build_run_ignores_env_from_the_wire() {
+        // Es la garantía que importa: los params se guardan en la base, así que
+        // un secreto que llegue por ahí quedaría en claro. Que el llamador lo
+        // mande no alcanza para que se use.
+        let run = build_run(&json!({
+            "prompt": "hola",
+            "env": { "CLAUDE_CODE_OAUTH_TOKEN": OAT, "PATH": "/evil" }
+        }))
+        .unwrap();
+        assert!(run.env.is_empty(), "el env del cable no se usa: {:?}", run.env);
+    }
+
+    #[tokio::test]
+    async fn el_token_guardado_llega_al_hijo() {
+        use pacewright_core::secrets::{SecretStore, CLAUDE_CODE};
+        let path = tmp_secrets("con");
+        let mut store = SecretStore::load(&path).unwrap();
+        store.set_static_token(CLAUDE_CODE, OAT);
+        store.save().unwrap();
+
+        let fake = Arc::new(FakeRunner {
+            last: Mutex::new(None),
+            outcome: ok_outcome(),
+        });
+        let a = ClaudeCliAdapter::with_runner("claude_cli", fake.clone())
+            .with_secrets_path(&path);
+        a.execute(&ctx(), "run", json!({ "prompt": "hola" }))
+            .await
+            .unwrap();
+        let spec = fake.last.lock().clone().unwrap();
+        assert_eq!(
+            spec.env.get("CLAUDE_CODE_OAUTH_TOKEN").map(String::as_str),
+            Some(OAT)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn sin_token_guardado_no_va_la_variable() {
+        // Vacío, no vacía: una variable en "" taparía la que el daemon pudiera
+        // tener puesta por otro lado.
+        let path = tmp_secrets("sin");
+        std::fs::remove_file(&path).ok();
+        let fake = Arc::new(FakeRunner {
+            last: Mutex::new(None),
+            outcome: ok_outcome(),
+        });
+        let a = ClaudeCliAdapter::with_runner("claude_cli", fake.clone())
+            .with_secrets_path(&path);
+        a.execute(&ctx(), "run", json!({ "prompt": "hola" }))
+            .await
+            .unwrap();
+        let spec = fake.last.lock().clone().unwrap();
+        assert!(!spec.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"), "{:?}", spec.env);
     }
 
     #[test]
