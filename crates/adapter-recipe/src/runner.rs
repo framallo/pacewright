@@ -76,6 +76,22 @@ pub struct RunOpts {
     pub foreground: bool,
 }
 
+/// Page (tab) name for one run: the account's own tab, or `<base>-<unique>` so the tab is created
+/// for this run and closed after it. The suffix is nanoseconds plus a process-wide counter, so two
+/// runs started in the same instant on two Chromes still get distinct names.
+pub fn run_page_name(opts: &RunOpts, base: &str) -> String {
+    if let Some(account) = opts.account.as_deref() {
+        return account.to_string();
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{base}-{nanos:x}-{seq}")
+}
+
 impl RunOpts {
     pub fn account(name: impl Into<String>) -> Self {
         Self {
@@ -198,12 +214,21 @@ impl CliRecipeRunner {
         self
     }
 
-    fn args(&self, recipe_path: &Path, vars_json: &str, opts: &RunOpts) -> Vec<String> {
+    /// The tab a run drives. An `auth account` recipe keeps its named tab (that is where the human
+    /// signed in). Everything else gets a page name that is unique to this run, so chrome-agent
+    /// always CREATES the tab and, because it created it, closes it when the run ends (success or
+    /// failure). Reusing one shared name ("pacewright") adopted whatever tab carried that name from
+    /// an earlier, interrupted run and then never closed it: that is how X compose boxes were left
+    /// open on screen after a killed run.
+    fn run_page(&self, opts: &RunOpts) -> String {
+        run_page_name(opts, &self.page_name)
+    }
+
+    fn args(&self, recipe_path: &Path, vars_json: &str, page: &str, opts: &RunOpts) -> Vec<String> {
         // The inversion: an account no longer selects a *browser* (its own launched profile) but a
         // named *tab* inside the one attached Chrome. Verified live 2026-07-16 — named pages are
         // real, independent tabs and driving one does not clobber another. Public/shared recipes
-        // keep the runner's default page.
-        let page = opts.account.as_deref().unwrap_or(&self.page_name);
+        // get a per-run tab (see run_page).
         let mut v = vec![
             "--json".to_string(),
             "--timeout".to_string(),
@@ -250,15 +275,15 @@ impl RecipeRunner for CliRecipeRunner {
         let store = SecretStore::load(secrets_path()).unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let injected = inject_oauth_vars(&src, vars_json, &store, now_ms);
-        let args = self.args(recipe_path, &injected, opts);
+        let page = self.run_page(opts);
+        let args = self.args(recipe_path, &injected, &page, opts);
         let outcome = self.spawn_once(&args).await;
         // If the run failed because this page's cached CDP target is stale (its tab was closed
         // since chrome-agent recorded it), prune the page and run once more — chrome-agent then
         // opens a fresh tab. A closed tab would otherwise be a silent, permanent task failure. The
         // page is opts.account (its own tab) or the shared default page. See is_stale_page_target.
         if is_stale_outcome(&outcome) {
-            let page = opts.account.as_deref().unwrap_or(&self.page_name);
-            pacewright_core::browser::prune_stale_page(&self.browser_name, page);
+            pacewright_core::browser::prune_stale_page(&self.browser_name, &page);
             return self.spawn_once(&args).await;
         }
         outcome
@@ -389,10 +414,8 @@ impl NativeRecipeRunner {
         // Per-slot bookkeeping name: chrome-agent caches a page's CDP target id under
         // `--browser <name>`, so N Chromes under one name would look up each other's tabs.
         let browser_name = lease.browser_name(&self.browser_name);
-        let page = opts
-            .account
-            .clone()
-            .unwrap_or_else(|| self.page_name.clone());
+        // Same rule as the CLI runner: account tab, or a per-run tab that gets created and closed.
+        let page = run_page_name(opts, &self.page_name);
         let activate = opts.foreground;
 
         // First attempt, then the same stale-page recovery the CLI runner already had. The native
