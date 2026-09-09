@@ -14,10 +14,10 @@
 # Max: la API de mensajes lo rechaza, y el OAuth de `anthropic_login` —que sirve
 # para esa API— no sirve para esto. Son dos credenciales distintas.
 #
-# Qué NO trae todavía: Chrome. El prompt de autoría le pide a Claude EXPLORAR el
-# portal, y eso es un navegador. Con esta imagen la ronda arranca y se autentica;
-# lo que falte de navegador lo va a decir la primera corrida de verdad, que es
-# mejor guía que adivinar acá cuál anti-detect hace falta.
+# Chrome NO va acá adentro: corre en su propio contenedor y esta imagen lo
+# maneja por CDP con `pw-dom`. En el compose de CazaFacturas los dos comparten
+# la pila de red del server, que es donde Chrome escucha su 9222 (sólo en
+# loopback, aunque se le pida otra cosa).
 #
 # reqwest usa rustls y rusqlite es `bundled`, así que no hace falta openssl ni
 # libsqlite: el runtime solo necesita las raíces TLS (`ca-certificates`).
@@ -55,6 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && useradd --system --uid 10001 --create-home --home-dir /home/pacewright pacewright \
     && claude --version
 COPY --from=builder /src/target/release/pacewrightd /usr/local/bin/pacewrightd
+# El ojo de la ronda de autoría: muestra el DOM ya renderizado manejando el
+# Chrome de al lado por CDP. Sin esto, Claude sólo ve el HTML inicial —los
+# portales de facturación arman su formulario con JavaScript— y no puede
+# escribir un locator que exista.
+COPY packaging/pw-dom.mjs /usr/local/bin/pw-dom
+RUN chmod +x /usr/local/bin/pw-dom
 USER pacewright
 ENV HOME=/home/pacewright
 # El daemon crea ~/.pacewright (socket + secrets.json + pacewright.db) al
