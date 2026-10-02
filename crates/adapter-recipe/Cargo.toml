@@ -16,6 +16,7 @@ toml.workspace = true
 chrono.workspace = true
 rusqlite.workspace = true
 pacewright-chrome = { path = "../chrome" }
+base64.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

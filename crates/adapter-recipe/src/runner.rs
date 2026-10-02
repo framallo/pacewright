@@ -118,6 +118,75 @@ pub trait RecipeRunner: Send + Sync {
         vars_json: &str,
         opts: &RunOpts,
     ) -> Result<Value, AdapterError>;
+
+    /// Run a recipe from its **source** text rather than a file — for recipes that live in a
+    /// database row (the `recipe_src` adapter), not under `~/.pacewright/recipes/`.
+    ///
+    /// Default: spool `src` to a temp file and [`RecipeRunner::run`] it, so a path-only runner
+    /// (the `chrome-agent` CLI) still works. The in-process runner overrides this and never
+    /// touches the disk.
+    async fn run_src(
+        &self,
+        src: &str,
+        vars_json: &str,
+        opts: &RunOpts,
+    ) -> Result<Value, AdapterError> {
+        let path = std::env::temp_dir().join(format!(
+            "pacewright-recipe-src-{}-{}.kdl",
+            std::process::id(),
+            uuid_like()
+        ));
+        std::fs::write(&path, src)
+            .map_err(|e| AdapterError::Terminal(format!("spooling recipe source: {e}")))?;
+        let out = self.run(&path, vars_json, opts).await;
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+}
+
+/// A unique-enough suffix for a spool file name without pulling a uuid crate in here.
+fn uuid_like() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!("{nanos:x}")
+}
+
+/// Inline a `download` step's files by `base64` when they are at most this big (bytes); larger
+/// files are reported by `path` + `size` only. 4 MiB covers every CFDI/PDF a tax portal hands back
+/// while keeping a task row far from the SQLite blob limits.
+pub const DOWNLOAD_INLINE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The `downloads` object of a run envelope: `{"<key>": {"path", "size", "base64"?}}`, where
+/// `base64` is present only up to [`DOWNLOAD_INLINE_MAX_BYTES`]. A file that cannot be read back
+/// reports `{"path", "error"}` instead — a missing file is evidence, not a reason to fail a run
+/// that already succeeded. Empty when the recipe downloaded nothing.
+pub fn downloads_json(downloads: &[pacewright_chrome::recipe::engine::Download]) -> Value {
+    use base64::Engine as _;
+    let mut obj = serde_json::Map::new();
+    for d in downloads {
+        let entry = match std::fs::metadata(&d.path) {
+            Ok(meta) => {
+                let size = meta.len();
+                let mut e = serde_json::json!({ "path": d.path, "size": size });
+                if size <= DOWNLOAD_INLINE_MAX_BYTES {
+                    match std::fs::read(&d.path) {
+                        Ok(bytes) => {
+                            e["base64"] = Value::String(
+                                base64::engine::general_purpose::STANDARD.encode(bytes),
+                            );
+                        }
+                        Err(err) => e["error"] = Value::String(format!("reading: {err}")),
+                    }
+                }
+                e
+            }
+            Err(err) => serde_json::json!({ "path": d.path, "error": format!("stat: {err}") }),
+        };
+        obj.insert(d.key.clone(), entry);
+    }
+    Value::Object(obj)
 }
 
 /// The endpoint of the always-on Chrome. Re-exported from core so the two callers of chrome-agent
@@ -380,20 +449,19 @@ impl RecipeRunner for NativeRecipeRunner {
         vars_json: &str,
         opts: &RunOpts,
     ) -> Result<Value, AdapterError> {
-        let src = std::fs::read_to_string(recipe_path)
-            .map_err(|e| AdapterError::Terminal(format!("reading {}: {e}", recipe_path.display())))?;
+        let src = std::fs::read_to_string(recipe_path).map_err(|e| {
+            AdapterError::Terminal(format!("reading {}: {e}", recipe_path.display()))
+        })?;
         self.run_src(&src, vars_json, opts).await
     }
-}
 
-impl NativeRecipeRunner {
-    /// Run a recipe from its **source** rather than a path.
+    /// Run a recipe from its **source** rather than a path — in-process, no spool file.
     ///
     /// This is the real body; [`RecipeRunner::run`] reads the file and delegates here. Splitting it
     /// this way also removed a double read that was here from the start: the source was loaded to
     /// inject OAuth vars, thrown away, and the *path* handed to the worker — which opened and read
     /// the very same file again.
-    pub async fn run_src(
+    async fn run_src(
         &self,
         src: &str,
         vars_json: &str,
@@ -403,7 +471,7 @@ impl NativeRecipeRunner {
         // caller thread (Send), before crossing to the recipe worker.
         let store = SecretStore::load(secrets_path()).unwrap_or_default();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let injected = inject_oauth_vars(&src, vars_json, &store, now_ms);
+        let injected = inject_oauth_vars(src, vars_json, &store, now_ms);
         let vars = pacewright_chrome::api::parse_vars(&[], Some(&injected))
             .map_err(|e| AdapterError::Terminal(format!("recipe vars: {e}")))?;
 
@@ -422,14 +490,7 @@ impl NativeRecipeRunner {
         // path never got it, and the pool made it matter: more Chromes means more cached tabs, and
         // a tab closed since chrome-agent recorded it is otherwise a permanent task failure.
         let outcome = self
-            .attached(
-                &connect,
-                &browser_name,
-                &page,
-                src,
-                vars.clone(),
-                activate,
-            )
+            .attached(&connect, &browser_name, &page, src, vars.clone(), activate)
             .await;
         if is_stale_outcome(&outcome) {
             pacewright_core::browser::prune_stale_page(&browser_name, &page);
@@ -500,10 +561,21 @@ impl NativeRecipeRunner {
                 match pacewright_chrome::api::run_recipe_attached_src(&at, &src, vars, solver_ref)
                     .await
                 {
-                    Ok(o) => Ok(serde_json::json!({
-                        "ok": true, "result": o.result, "unexpected": o.unexpected,
-                    })),
-                    Err(e) => Err(classify(&e.to_string())),
+                    Ok(o) => {
+                        let mut env = serde_json::json!({
+                            "ok": true, "result": o.result, "unexpected": o.unexpected,
+                        });
+                        if !o.downloads.is_empty() {
+                            env["downloads"] = downloads_json(&o.downloads);
+                        }
+                        Ok(env)
+                    }
+                    // The class comes from the `[Class]` tag as before; the page state captured
+                    // at the failure rides along so the engine can persist it in `task.result`.
+                    Err(e) => Err(match e.failure {
+                        Some(detail) => classify(&e.message).with_detail(detail),
+                        None => classify(&e.message),
+                    }),
                 }
             });
             let _ = tx.send(res);
@@ -525,7 +597,12 @@ pub fn interpret_output(success: bool, stdout: &str, stderr: &str) -> Result<Val
                     .get("error")
                     .and_then(Value::as_str)
                     .unwrap_or("recipe run failed");
-                Err(classify(msg))
+                // A child that also reports where it died (`"failure": {…}`) gets that persisted
+                // exactly like the in-process runner's capture.
+                Err(match v.get("failure") {
+                    Some(detail) if !detail.is_null() => classify(msg).with_detail(detail.clone()),
+                    _ => classify(msg),
+                })
             } else {
                 Ok(v)
             }
@@ -603,14 +680,20 @@ pub mod fake {
 
     type Responder = Box<dyn Fn(&Path, &str) -> Result<Value, AdapterError> + Send + Sync>;
 
-    /// One recorded `run` call: (recipe path, vars_json, opts).
+    /// One recorded `run` call: (recipe path, vars_json, opts). A `run_src` call records the
+    /// pseudo-path [`SRC_PATH`] here and its source in `src_calls`.
     pub type Call = (String, String, RunOpts);
+
+    /// The path a `run_src` call is recorded under (and handed to the responder).
+    pub const SRC_PATH: &str = "<src>";
 
     /// A scriptable `RecipeRunner` for adapter tests. Records (path, vars_json, opts) calls
     /// and returns whatever the injected closure produces.
     pub struct FakeRecipeRunner {
         responder: Responder,
         pub calls: Mutex<Vec<Call>>,
+        /// The recipe sources handed to `run_src`, in order.
+        pub src_calls: Mutex<Vec<String>>,
     }
 
     impl FakeRecipeRunner {
@@ -620,6 +703,7 @@ pub mod fake {
             Self {
                 responder: Box::new(f),
                 calls: Mutex::new(Vec::new()),
+                src_calls: Mutex::new(Vec::new()),
             }
         }
         /// Always succeed with the given envelope.
@@ -645,6 +729,21 @@ pub mod fake {
                 opts.clone(),
             ));
             (self.responder)(recipe_path, vars_json)
+        }
+
+        async fn run_src(
+            &self,
+            src: &str,
+            vars_json: &str,
+            opts: &RunOpts,
+        ) -> Result<Value, AdapterError> {
+            self.src_calls.lock().unwrap().push(src.to_string());
+            self.calls.lock().unwrap().push((
+                SRC_PATH.to_string(),
+                vars_json.to_string(),
+                opts.clone(),
+            ));
+            (self.responder)(Path::new(SRC_PATH), vars_json)
         }
     }
 }
@@ -757,6 +856,72 @@ mod tests {
     }
 
     #[test]
+    fn in_band_failure_object_becomes_the_error_detail() {
+        let out = json!({"ok": false, "error": "[Terminal] auth wall", "failure": {"step_index": 1, "url": "https://x/login"}}).to_string();
+        let err = interpret_output(false, &out, "").unwrap_err();
+        assert!(
+            matches!(err, AdapterError::TerminalWith { ref message, .. } if message == "auth wall"),
+            "got {err:?}"
+        );
+        assert_eq!(err.detail().unwrap()["step_index"], 1);
+    }
+
+    #[test]
+    fn downloads_json_inlines_small_files_and_reports_missing_ones() {
+        use pacewright_chrome::recipe::engine::Download;
+        let dir =
+            std::env::temp_dir().join(format!("pcw-dl-{}-{}", std::process::id(), uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("factura.xml");
+        std::fs::write(&f, b"<cfdi/>").unwrap();
+        let v = downloads_json(&[
+            Download {
+                key: "xml".into(),
+                path: f.to_string_lossy().into_owned(),
+            },
+            Download {
+                key: "gone".into(),
+                path: dir.join("nope.pdf").to_string_lossy().into_owned(),
+            },
+        ]);
+        assert_eq!(v["xml"]["size"], 7);
+        assert_eq!(v["xml"]["base64"], "PGNmZGkvPg==");
+        assert!(v["gone"]["error"].as_str().unwrap().contains("stat"));
+        assert!(v["gone"].get("base64").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn default_run_src_spools_to_a_file_and_runs_it() {
+        // The trait default serves path-only runners: the source lands in a temp file that is
+        // gone again after the run.
+        struct PathOnly(Mutex<Option<String>>);
+        #[async_trait]
+        impl RecipeRunner for PathOnly {
+            async fn run(
+                &self,
+                recipe_path: &Path,
+                _vars_json: &str,
+                _opts: &RunOpts,
+            ) -> Result<Value, AdapterError> {
+                *self.0.lock().unwrap() = Some(std::fs::read_to_string(recipe_path).unwrap());
+                Ok(json!({"ok": true, "path": recipe_path.to_string_lossy()}))
+            }
+        }
+        use std::sync::Mutex;
+        let r = PathOnly(Mutex::new(None));
+        let v = r
+            .run_src("recipe \"a/b\" {}", "{}", &RunOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(r.0.lock().unwrap().as_deref(), Some("recipe \"a/b\" {}"));
+        assert!(
+            !Path::new(v["path"].as_str().unwrap()).exists(),
+            "spool file removed"
+        );
+    }
+
+    #[test]
     fn no_json_is_terminal() {
         let err = interpret_output(false, "usage: chrome-agent …", "some stderr").unwrap_err();
         assert!(
@@ -768,16 +933,20 @@ mod tests {
     #[test]
     fn cli_runner_builds_the_pinned_invocation() {
         let r = CliRecipeRunner::new().timeout_secs(90);
-        // a public recipe → the shared page, no account tab.
+        // a public recipe → a per-run tab named after the base page, no account tab.
         let args = r.args(
             Path::new("/r/hn.kdl"),
             r#"{"url":"u"}"#,
+            &r.run_page(&RunOpts::default()),
             &RunOpts::default(),
         );
         // pinned browser+page, stealth, then the subcommand + vars-json
         let find = |f: &str| args.iter().position(|a| a == f).expect("flag present");
         assert_eq!(args[find("--browser") + 1], "pacewright");
-        assert_eq!(args[find("--page") + 1], "pacewright");
+        assert!(
+            args[find("--page") + 1].starts_with("pacewright-"),
+            "per-run tab derives from the base page: {args:?}"
+        );
         assert!(args.contains(&"--stealth".to_string()));
         assert!(!args.contains(&"--copy-cookies".to_string()));
         assert!(args.contains(&"recipe".to_string()) && args.contains(&"run".to_string()));
@@ -802,6 +971,7 @@ mod tests {
         let args = r.args(
             Path::new("/r/li.kdl"),
             "{}",
+            &r.run_page(&RunOpts::account("acme-account")),
             &RunOpts::account("acme-account"),
         );
         let find = |f: &str| {
@@ -821,7 +991,7 @@ mod tests {
         // Chrome is visible by definition. Passing either is now meaningless at best.
         let r = CliRecipeRunner::new().connect("http://127.0.0.1:9222");
         for opts in [RunOpts::account("acme-account"), RunOpts::default()] {
-            let args = r.args(Path::new("/r/x.kdl"), "{}", &opts);
+            let args = r.args(Path::new("/r/x.kdl"), "{}", &r.run_page(&opts), &opts);
             assert!(
                 !args.contains(&"--headed".to_string()),
                 "attached must not pass --headed: {args:?}"
@@ -842,11 +1012,13 @@ mod tests {
         let li = r.args(
             Path::new("/r/li.kdl"),
             "{}",
+            &r.run_page(&RunOpts::account("acme-account")),
             &RunOpts::account("acme-account"),
         );
         let rv = r.args(
             Path::new("/r/rv.kdl"),
             "{}",
+            &r.run_page(&RunOpts::account("globex-account")),
             &RunOpts::account("globex-account"),
         );
         let page = |a: &Vec<String>| a[a.iter().position(|x| x == "--page").unwrap() + 1].clone();
@@ -861,9 +1033,17 @@ mod tests {
             browser(&rv),
             "one attached Chrome for every account"
         );
-        // A public/shared recipe keeps the runner's default page.
-        let pubrec = r.args(Path::new("/r/hn.kdl"), "{}", &RunOpts::default());
-        assert_eq!(page(&pubrec), "pacewright");
+        // A public/shared recipe gets a tab of its own per run — created for the run, closed
+        // after it — named after the runner's default page, never the bare shared name.
+        let pubrec = r.args(
+            Path::new("/r/hn.kdl"),
+            "{}",
+            &r.run_page(&RunOpts::default()),
+            &RunOpts::default(),
+        );
+        assert!(page(&pubrec).starts_with("pacewright-"), "{pubrec:?}");
+        let again = r.run_page(&RunOpts::default());
+        assert_ne!(page(&pubrec), again, "every run gets a fresh tab name");
     }
 
     #[test]
@@ -874,6 +1054,7 @@ mod tests {
         let fg = r.args(
             Path::new("/r/rv.kdl"),
             "{}",
+            &r.run_page(&RunOpts::account("globex-account").foreground(true)),
             &RunOpts::account("globex-account").foreground(true),
         );
         assert!(
@@ -893,6 +1074,7 @@ mod tests {
         let bg = r.args(
             Path::new("/r/li.kdl"),
             "{}",
+            &r.run_page(&RunOpts::account("acme-account")),
             &RunOpts::account("acme-account"),
         );
         assert!(
@@ -911,6 +1093,7 @@ mod tests {
         let args = r.args(
             Path::new("/r/li.kdl"),
             "{}",
+            &r.run_page(&RunOpts::account("acme-account")),
             &RunOpts::account("acme-account"),
         );
         let browser = &args[args.iter().position(|a| a == "--browser").unwrap() + 1];

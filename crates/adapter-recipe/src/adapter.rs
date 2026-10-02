@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use pacewright_core::adapter::{Adapter, RunCtx};
 use pacewright_core::model::{ActionSpec, AdapterError};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::registry::{RecipeMeta, RecipeRegistry};
@@ -49,6 +49,43 @@ impl RecipeAdapter {
                 self.adapter
             ))
         })
+    }
+}
+
+/// Turn a run envelope `{"ok":true,"result":{…},"unexpected":[…],"downloads":{…}?}` into the
+/// task's `result`: the capture map, plus a `downloads` key when the recipe saved files (so a
+/// backend on another host can read small ones inline). Shared by [`RecipeAdapter`] and
+/// [`crate::RecipeSrcAdapter`] so the two can never drift. A capture literally named `downloads`
+/// is shadowed when both exist.
+pub(crate) fn result_from_envelope(envelope: &Value) -> Result<Value, AdapterError> {
+    // `Response::Ok(Value)` must be a JSON object; a recipe's result map already is.
+    let mut result = match envelope.get("result") {
+        Some(Value::Object(m)) => m.clone(),
+        // A result-less recipe (all side effects via `output` files) → an empty object.
+        None | Some(Value::Null) => serde_json::Map::new(),
+        Some(other) => {
+            return Err(AdapterError::Terminal(format!(
+                "recipe result was not an object: {other}"
+            )))
+        }
+    };
+    if let Some(Value::Object(d)) = envelope.get("downloads") {
+        if !d.is_empty() {
+            result.insert("downloads".into(), Value::Object(d.clone()));
+        }
+    }
+    Ok(Value::Object(result))
+}
+
+/// Log a run's soft expectation misses. An `unexpected` run (e.g. a cardinality miss) is not a
+/// failure — surface it in the log but return the (possibly under-delivered) result, matching
+/// engine semantics.
+pub(crate) fn warn_unexpected(task_id: &str, what: &str, envelope: &Value) {
+    if let Some(unexpected) = envelope.get("unexpected").and_then(Value::as_array) {
+        if !unexpected.is_empty() {
+            let msgs: Vec<&str> = unexpected.iter().filter_map(Value::as_str).collect();
+            tracing::warn!(task = %task_id, "recipe `{what}` unexpected: {}", msgs.join("; "));
+        }
     }
 }
 
@@ -135,27 +172,11 @@ impl Adapter for RecipeAdapter {
             )
             .await?;
 
-        // An `unexpected` run (e.g. a cardinality miss) is not a failure — surface it in the
-        // log but return the (possibly under-delivered) result, matching engine semantics.
-        if let Some(unexpected) = envelope.get("unexpected").and_then(Value::as_array) {
-            if !unexpected.is_empty() {
-                let msgs: Vec<&str> = unexpected.iter().filter_map(Value::as_str).collect();
-                tracing::warn!(task = %ctx.task_id, "recipe `{}/{action}` unexpected: {}", self.adapter, msgs.join("; "));
-            }
-        }
-
-        // `Response::Ok(Value)` must be a JSON object; a recipe's result map already is.
-        match envelope.get("result") {
-            Some(Value::Object(m)) => {
-                tracing::info!(task = %ctx.task_id, "ran recipe `{}/{action}`", self.adapter);
-                Ok(Value::Object(m.clone()))
-            }
-            // A result-less recipe (all side effects via `output` files) → an empty object.
-            None | Some(Value::Null) => Ok(json!({})),
-            Some(other) => Err(AdapterError::Terminal(format!(
-                "recipe result was not an object: {other}"
-            ))),
-        }
+        let what = format!("{}/{action}", self.adapter);
+        warn_unexpected(&ctx.task_id, &what, &envelope);
+        let result = result_from_envelope(&envelope)?;
+        tracing::info!(task = %ctx.task_id, "ran recipe `{what}`");
+        Ok(result)
     }
 }
 
@@ -165,6 +186,7 @@ mod tests {
     use crate::registry::RecipeRegistry;
     use crate::runner::fake::FakeRecipeRunner;
     use pacewright_core::browser::NullBrowser;
+    use serde_json::json;
     use std::path::Path;
 
     const ACME: &str = r#"recipe "acme/scrape_profile" {
@@ -280,6 +302,40 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AdapterError::Retryable(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn downloads_ride_along_in_the_result() {
+        let runner = Arc::new(FakeRecipeRunner::ok(json!({
+            "ok": true, "result": {"folio": "A1"}, "unexpected": [],
+            "downloads": {"xml": {"path": "/tmp/a.xml", "size": 7, "base64": "PGNmZGkvPg=="}}
+        })));
+        let a = RecipeAdapter::new("acme", reg_from(ACME), runner);
+        let out = a
+            .execute(&ctx(), "scrape_profile", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(out["folio"], "A1");
+        assert_eq!(out["downloads"]["xml"]["size"], 7);
+        // an empty downloads object stays out of the result
+        let out = result_from_envelope(&json!({"result": {"a": 1}, "downloads": {}})).unwrap();
+        assert_eq!(out, json!({"a": 1}));
+    }
+
+    #[tokio::test]
+    async fn detailed_runner_failure_passes_through_untouched() {
+        let runner = Arc::new(FakeRecipeRunner::new(|_: &Path, _: &str| {
+            Err(AdapterError::TerminalWith {
+                message: "auth wall".into(),
+                detail: json!({"step_index": 0}),
+            })
+        }));
+        let a = RecipeAdapter::new("acme", reg_from(ACME), runner);
+        let err = a
+            .execute(&ctx(), "scrape_profile", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.detail(), Some(&json!({"step_index": 0})));
     }
 
     #[tokio::test]

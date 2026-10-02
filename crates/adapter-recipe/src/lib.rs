@@ -10,6 +10,8 @@
 //!   (name, `limit-key`s, `var`s) with a shallow KDL walk; no chrome-agent process needed.
 //! - [`runner`] — the `chrome-agent recipe run` subprocess boundary + error-class recovery.
 //! - [`adapter`] — the `Adapter` impl gluing the two together.
+//! - [`src_adapter`] — `recipe_src/run`: the same, for a recipe handed over as **source** in the
+//!   task params (a backend's database row) instead of a file under `~/.pacewright/recipes/`.
 
 pub mod adapter;
 pub mod auth;
@@ -17,15 +19,17 @@ pub mod pool;
 pub mod registry;
 pub mod runner;
 pub mod schedule;
+pub mod src_adapter;
 
 pub use adapter::RecipeAdapter;
 pub use auth::{
     AccountInfo, AccountStatus, AuthManager, CliLoginLauncher, LoginLauncher, NativeLoginLauncher,
 };
 pub use pool::{ChromeLease, ChromePool};
-pub use registry::{RecipeMeta, RecipeRegistry, RecipeVar};
+pub use registry::{parse_meta_from_src, RecipeMeta, RecipeRegistry, RecipeVar};
 pub use runner::{
     chrome_agent_bin, recipe_subcommand_available, CliRecipeRunner, NativeRecipeRunner,
     RecipeRunner, RunOpts,
 };
 pub use schedule::{partition, reconcile, validate, ReconcileReport, ScheduleEntry, Timing};
+pub use src_adapter::{RecipeSrcAdapter, RECIPE_SRC_ADAPTER, RECIPE_SRC_KEY, RECIPE_SRC_NAME_KEY};

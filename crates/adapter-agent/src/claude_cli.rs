@@ -25,6 +25,23 @@ pub const DEFAULT_CAP_SECS: u64 = 2100;
 /// A failure faster than this is treated as a startup/API error, not a finished round, so it is
 /// retryable (the engine backs off and retries) rather than a terminal give-up (R4).
 const FAST_FAIL_SECS: u64 = 90;
+/// `full_output: true` returns the whole stdout in the result — up to this many bytes; a longer
+/// one is cut (on a char boundary) and flagged `truncated: true`. Task results live in a SQLite
+/// row, so this is a sanity cap, not a limit a round should ever approach.
+pub const FULL_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// `(output, truncated)` for the `output` field: the whole of `stdout`, or its first
+/// [`FULL_OUTPUT_MAX_BYTES`] cut on a char boundary.
+fn full_output(stdout: &str) -> (String, bool) {
+    if stdout.len() <= FULL_OUTPUT_MAX_BYTES {
+        return (stdout.to_string(), false);
+    }
+    let mut end = FULL_OUTPUT_MAX_BYTES;
+    while !stdout.is_char_boundary(end) {
+        end -= 1;
+    }
+    (stdout[..end].to_string(), true)
+}
 
 /// One headless-claude round.
 #[derive(Debug, Clone, PartialEq)]
@@ -303,7 +320,8 @@ impl Adapter for ClaudeCliAdapter {
                 "prompt_file?": "string (path to a prompt file, ~ expanded)",
                 "model?": "string (e.g. claude-opus-4-8)",
                 "add_dir?": "string | array of dirs claude may read/write",
-                "cap_secs?": "int wall-clock cap; default 2100"
+                "cap_secs?": "int wall-clock cap; default 2100",
+                "full_output?": "bool — also return the whole stdout as `output` (capped at 2 MiB, then `truncated: true`)"
             }),
             description: "Run a headless `claude -p` round with a daemon-owned wall-clock cap. Retryable if it dies fast (startup error); terminal if it exhausts the cap.".into(),
         }]
@@ -320,6 +338,10 @@ impl Adapter for ClaudeCliAdapter {
                 "claude_cli: unknown action `{action}` (expected `run`)"
             )));
         }
+        let want_full = params
+            .get("full_output")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut spec = build_run(&params)?;
         spec.env = self.env_for_run().await;
         let cap = spec.cap_secs;
@@ -333,11 +355,21 @@ impl Adapter for ClaudeCliAdapter {
         match outcome.code {
             Some(0) => {
                 let preview: String = outcome.stdout.chars().take(200).collect();
-                Ok(json!({
+                let mut res = json!({
                     "chars": outcome.stdout.len(),
                     "elapsed_secs": outcome.elapsed_secs,
                     "preview": preview,
-                }))
+                });
+                // Opt-in: a caller that parses the round's answer (a backend asking for a repaired
+                // recipe) needs all of it, not a 200-char preview. Default unchanged.
+                if want_full {
+                    let (output, truncated) = full_output(&outcome.stdout);
+                    res["output"] = Value::String(output);
+                    if truncated {
+                        res["truncated"] = Value::Bool(true);
+                    }
+                }
+                Ok(res)
             }
             other => {
                 let msg = format!(
@@ -425,10 +457,8 @@ mod tests {
 
     /// Un directorio de secretos propio del test, para no tocar el del usuario.
     fn tmp_secrets(nombre: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "pw-claude-sec-{}-{nombre}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pw-claude-sec-{}-{nombre}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("secrets.json")
     }
@@ -445,7 +475,11 @@ mod tests {
             "env": { "CLAUDE_CODE_OAUTH_TOKEN": OAT, "PATH": "/evil" }
         }))
         .unwrap();
-        assert!(run.env.is_empty(), "el env del cable no se usa: {:?}", run.env);
+        assert!(
+            run.env.is_empty(),
+            "el env del cable no se usa: {:?}",
+            run.env
+        );
     }
 
     #[tokio::test]
@@ -460,8 +494,7 @@ mod tests {
             last: Mutex::new(None),
             outcome: ok_outcome(),
         });
-        let a = ClaudeCliAdapter::with_runner("claude_cli", fake.clone())
-            .with_secrets_path(&path);
+        let a = ClaudeCliAdapter::with_runner("claude_cli", fake.clone()).with_secrets_path(&path);
         a.execute(&ctx(), "run", json!({ "prompt": "hola" }))
             .await
             .unwrap();
@@ -483,13 +516,16 @@ mod tests {
             last: Mutex::new(None),
             outcome: ok_outcome(),
         });
-        let a = ClaudeCliAdapter::with_runner("claude_cli", fake.clone())
-            .with_secrets_path(&path);
+        let a = ClaudeCliAdapter::with_runner("claude_cli", fake.clone()).with_secrets_path(&path);
         a.execute(&ctx(), "run", json!({ "prompt": "hola" }))
             .await
             .unwrap();
         let spec = fake.last.lock().clone().unwrap();
-        assert!(!spec.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"), "{:?}", spec.env);
+        assert!(
+            !spec.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"),
+            "{:?}",
+            spec.env
+        );
     }
 
     #[test]
@@ -563,6 +599,46 @@ mod tests {
             slow.execute(&ctx, "run", json!({ "prompt": "x" })).await,
             Err(AdapterError::Terminal(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn full_output_is_opt_in_and_capped() {
+        let big = "é".repeat(FULL_OUTPUT_MAX_BYTES / 2 + 10); // 2 bytes each → over the cap
+        let runner = Arc::new(FakeRunner {
+            last: Mutex::new(None),
+            outcome: ClaudeOutcome {
+                stdout: big.clone(),
+                ..ok_outcome()
+            },
+        });
+        let a = ClaudeCliAdapter::with_runner("claude_cli", runner);
+        let ctx = RunCtx {
+            task_id: "t".into(),
+            browser: Arc::new(pacewright_core::browser::NullBrowser),
+        };
+        // default: no `output` at all — existing callers see exactly what they saw before
+        let out = a
+            .execute(&ctx, "run", json!({ "prompt": "hi" }))
+            .await
+            .unwrap();
+        assert!(out.get("output").is_none());
+        assert!(out.get("truncated").is_none());
+        assert_eq!(out["chars"], big.len());
+
+        // opted in: the whole output, cut on a char boundary at the cap and flagged
+        let out = a
+            .execute(&ctx, "run", json!({ "prompt": "hi", "full_output": true }))
+            .await
+            .unwrap();
+        let got = out["output"].as_str().unwrap();
+        assert_eq!(out["truncated"], true);
+        assert!(got.len() <= FULL_OUTPUT_MAX_BYTES);
+        assert_eq!(got.len(), FULL_OUTPUT_MAX_BYTES); // 2-byte chars tile the cap exactly
+        assert!(big.starts_with(got));
+
+        // under the cap: verbatim, no flag
+        let (o, t) = full_output("hola");
+        assert_eq!((o.as_str(), t), ("hola", false));
     }
 
     #[tokio::test]

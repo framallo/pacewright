@@ -198,6 +198,108 @@ fn native_repair_context(src: &str, recipe: &model::Recipe, failure: &str) -> St
     )
 }
 
+/// Truncate to at most `max_bytes`, backing off to a char boundary (`String::truncate` panics
+/// mid-character, and page text is anything but ASCII).
+pub fn truncate_at(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
+/// Each capture in [`failure_context`] gets this long; the page may be gone (a closed tab is the
+/// single most likely failure), and the failure path must never hang the run.
+const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// `page_text` / `ax_tree` caps (bytes) and the screenshot cap (decoded PNG bytes, estimated
+/// from the base64 length) — above it the screenshot is omitted rather than bloating a task row.
+const PAGE_TEXT_MAX: usize = 8_000;
+const AX_TREE_MAX: usize = 12_000;
+const SCREENSHOT_MAX_BYTES: usize = 1_500_000;
+
+/// The live accessibility tree as text, capped at `max_bytes`; a one-line note when unavailable.
+async fn ax_snapshot(client: &CdpClient, max_bytes: usize) -> String {
+    match tokio::time::timeout(
+        CAPTURE_TIMEOUT,
+        crate::commands::inspect::run(client, false, Some(12), None, None),
+    )
+    .await
+    {
+        Ok(Ok(s)) => {
+            let mut t = s.text;
+            truncate_at(&mut t, max_bytes);
+            t
+        }
+        Ok(Err(e)) => format!("(accessibility snapshot unavailable: {e})"),
+        Err(_) => "(accessibility snapshot timed out)".to_string(),
+    }
+}
+
+async fn eval_string(client: &CdpClient, js: &str) -> Option<String> {
+    match tokio::time::timeout(CAPTURE_TIMEOUT, crate::commands::eval::run_raw(client, js)).await {
+        Ok(Ok(Value::String(s))) => Some(s),
+        Ok(Ok(Value::Null)) | Ok(Err(_)) | Err(_) => None,
+        Ok(Ok(other)) => Some(other.to_string()),
+    }
+}
+
+/// What the page looked like when a run died, as one JSON object a self-heal loop can read back
+/// from the task row:
+///
+/// ```json
+/// {"error": "…", "step_index": 3, "step": "click { locator text=\"Consultar\" }",
+///  "url": "…", "title": "…", "page_text": "…", "ax_tree": "…", "screenshot_b64": "…",
+///  "unexpected": ["…"]}
+/// ```
+///
+/// Every capture is best-effort and individually bounded by [`CAPTURE_TIMEOUT`]: a field is
+/// `null` when the page could not answer. `screenshot_b64` is omitted above
+/// [`SCREENSHOT_MAX_BYTES`]. `client` should be the *active* page (a followed tab, if any).
+pub async fn failure_context(client: &CdpClient, e: &engine::RecipeError) -> Value {
+    let url = eval_string(client, "location.href").await;
+    let title = eval_string(client, "document.title").await;
+    let page_text = eval_string(client, "(document.body ? document.body.innerText : '')")
+        .await
+        .map(|mut t| {
+            truncate_at(&mut t, PAGE_TEXT_MAX);
+            t
+        });
+    let ax_tree = ax_snapshot(client, AX_TREE_MAX).await;
+    let screenshot_b64 = match tokio::time::timeout(
+        CAPTURE_TIMEOUT,
+        client.call::<_, Value>(
+            "Page.captureScreenshot",
+            serde_json::json!({ "format": "png" }),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v
+            .get("data")
+            .and_then(Value::as_str)
+            .filter(|b64| b64.len() / 4 * 3 <= SCREENSHOT_MAX_BYTES)
+            .map(str::to_string),
+        _ => None,
+    };
+    let mut obj = serde_json::json!({
+        "error": e.message,
+        "step_index": e.step_index,
+        "step": e.step,
+        "url": url,
+        "title": title,
+        "page_text": page_text,
+        "ax_tree": ax_tree,
+        "unexpected": e.unexpected,
+    });
+    if let Some(shot) = screenshot_b64 {
+        obj["screenshot_b64"] = Value::String(shot);
+    }
+    obj
+}
+
 /// Assemble the Claude repair context: a fixed system instruction, the failure, the recipe
 /// source (for a surgical edit), the author's repair prompt, and a live accessibility snapshot to
 /// re-anchor locators against.
@@ -212,14 +314,7 @@ recipe. Change locator nodes only; preserve every step key, the step order, and 
 schema; add no executable JS; prefer the highest robustness tier that resolves (semantic \
 role/text > relative after/near > positional nth/within > css).";
 
-    let snapshot = match crate::commands::inspect::run(client, false, Some(12), None, None).await {
-        Ok(s) => {
-            let mut t = s.text;
-            t.truncate(6000);
-            t
-        }
-        Err(e) => format!("(accessibility snapshot unavailable: {e})"),
-    };
+    let snapshot = ax_snapshot(client, 6000).await;
     let guidance = recipe.repair_prompt.as_deref().unwrap_or("(none)");
 
     format!(
@@ -258,4 +353,22 @@ pub fn check(path: &str, json: bool) -> Result<(), BoxError> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_at;
+
+    #[test]
+    fn truncate_at_backs_off_to_a_char_boundary() {
+        let mut s = "ñandú".to_string(); // ñ = 2 bytes, ú = 2 bytes
+        truncate_at(&mut s, 2); // inside ñ? no: ñ ends at 2 → "ñ"
+        assert_eq!(s, "ñ");
+        let mut s = "ñandú".to_string();
+        truncate_at(&mut s, 1); // mid-ñ → back off to 0
+        assert_eq!(s, "");
+        let mut s = "abc".to_string();
+        truncate_at(&mut s, 10);
+        assert_eq!(s, "abc");
+    }
 }

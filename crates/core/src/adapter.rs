@@ -31,6 +31,14 @@ pub trait Adapter: Send + Sync {
             .map(|a| a.limit_keys)
             .unwrap_or_default()
     }
+
+    /// Like [`Adapter::limit_keys_for`], but with the task's params in hand — for an adapter
+    /// whose pacing key lives in the params rather than the action (`recipe_src/run` carries
+    /// the whole recipe, `limit-key` included). The engine consults THIS one, both to decide
+    /// when a task may run and to spend after it ran; the default is the action-only answer.
+    fn limit_keys_for_task(&self, action: &str, _params: &Value) -> Vec<String> {
+        self.limit_keys_for(action)
+    }
 }
 
 #[derive(Default, Clone)]
@@ -89,6 +97,11 @@ mod tests {
         assert_eq!(a.name(), "fake");
         assert_eq!(a.limit_keys_for("go"), vec!["fake.go".to_string()]);
         assert!(a.limit_keys_for("missing").is_empty());
+        // the params-aware hook defaults to the action-only answer
+        assert_eq!(
+            a.limit_keys_for_task("go", &serde_json::json!({"x": 1})),
+            vec!["fake.go".to_string()]
+        );
         let ctx = RunCtx {
             task_id: "t1".into(),
             browser: Arc::new(crate::browser::NullBrowser),

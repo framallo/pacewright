@@ -389,7 +389,11 @@ mod tests {
         s.set_app("anthropic", "id", "sec");
         s.set_tokens("anthropic", "oauth-tok", None, 9_999_999_999_999, None)
             .unwrap();
-        assert_eq!(s.static_token("anthropic"), None, "tiene vencimiento: no es estático");
+        assert_eq!(
+            s.static_token("anthropic"),
+            None,
+            "tiene vencimiento: no es estático"
+        );
     }
 
     #[test]
@@ -401,5 +405,4 @@ mod tests {
         assert!(!s.remove_provider(CLAUDE_CODE));
         assert_eq!(s.static_token(CLAUDE_CODE), None);
     }
-
 }

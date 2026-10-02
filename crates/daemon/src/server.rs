@@ -2,7 +2,8 @@ use anyhow::Result;
 use pacewright_adapter_agent::{AgentAdapter, AnthropicCompleter, Completer};
 use pacewright_adapter_dummy::DummyAdapter;
 use pacewright_adapter_recipe::{
-    schedule, AuthManager, RecipeAdapter, RecipeRegistry, RecipeRunner,
+    schedule, AuthManager, RecipeAdapter, RecipeRegistry, RecipeRunner, RecipeSrcAdapter,
+    RECIPE_SRC_ADAPTER,
 };
 use pacewright_core::adapter::AdapterRegistry;
 use pacewright_core::config::LimitConfig;
@@ -71,6 +72,9 @@ pub fn build_adapter_registry(
         pacewright_core::datastore::Datastore::new(pacewright_core::run::home_dir().join("data")),
     )));
     reg.register(Arc::new(crate::http_adapter::HttpAdapter::new()));
+    // `recipe_src/run`: a recipe handed over as source by the `run_src` RPC (a backend's database
+    // row), run through the same runner as the installed recipes below.
+    reg.register(Arc::new(RecipeSrcAdapter::new(recipe_runner.clone())));
     for adapter_name in recipe_registry.adapters() {
         if reg.get(&adapter_name).is_some() {
             tracing::warn!("recipe prefix `{adapter_name}` collides with a built-in adapter — skipping the recipe-backed one");
@@ -258,6 +262,37 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                     t.priority = p;
                 }
                 if let Some(m) = a.max_attempts {
+                    t.max_attempts = m;
+                }
+                let id = e.add_task(t).map_err(|e| e.to_string())?;
+                Ok(serde_json::json!({ "id": id }))
+            }
+            Request::RunSrc(r) => {
+                if r.recipe_src.trim().is_empty() {
+                    return Err("run_src: `recipe_src` is empty".to_string());
+                }
+                let vars = match r.params {
+                    serde_json::Value::Null => serde_json::json!({}),
+                    v @ serde_json::Value::Object(_) => v,
+                    other => {
+                        return Err(format!(
+                            "run_src: `params` must be a JSON object of recipe vars, got {other}"
+                        ))
+                    }
+                };
+                // Same task shape as `add`, on the built-in source adapter; the vars nest under
+                // `vars` so they can never collide with the two reserved keys.
+                let mut t = Task::new_now(
+                    RECIPE_SRC_ADAPTER,
+                    "run",
+                    RecipeSrcAdapter::params(&r.recipe_src, r.name.as_deref(), vars),
+                    r.scheduled_for.unwrap_or(now),
+                );
+                t.dedup_key = r.dedup_key;
+                if let Some(p) = r.priority {
+                    t.priority = p;
+                }
+                if let Some(m) = r.max_attempts {
                     t.max_attempts = m;
                 }
                 let id = e.add_task(t).map_err(|e| e.to_string())?;
@@ -563,9 +598,10 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 // única que puede correr una ronda de `claude_cli`, así que el
                 // panel que mira esto necesita las dos por separado. Presencia,
                 // nunca el valor.
-                let setup_token = SecretStore::load(&path)
-                    .ok()
-                    .is_some_and(|s| s.static_token(pacewright_core::secrets::CLAUDE_CODE).is_some());
+                let setup_token = SecretStore::load(&path).ok().is_some_and(|s| {
+                    s.static_token(pacewright_core::secrets::CLAUDE_CODE)
+                        .is_some()
+                });
                 Ok(serde_json::json!({
                     "signed_in": signed_in,
                     "state": state,
@@ -1024,6 +1060,106 @@ mod tests {
             Response::Ok(v) => assert_eq!(v["task"]["action"], "echo"),
             _ => panic!("get failed"),
         };
+    }
+
+    #[tokio::test]
+    async fn test_run_src_enqueues_a_recipe_src_task_with_add_semantics() {
+        use pacewright_proto::RunSrcReq;
+        let srv = test_server().await;
+        let src = "recipe \"facturagas/facturar\" {\n  limit-key \"facturagas.facturar\"\n}";
+        let req = |dedup: Option<&str>| {
+            Request::RunSrc(RunSrcReq {
+                recipe_src: src.into(),
+                params: serde_json::json!({"rfc": "XAXX010101000"}),
+                dedup_key: dedup.map(str::to_string),
+                priority: Some(5),
+                max_attempts: Some(1),
+                scheduled_for: Some(123_456),
+                name: Some("facturagas/facturar".into()),
+            })
+        };
+        let id = match handle_request(&srv, req(Some("inv-1"))).await {
+            Response::Ok(v) => v["id"].as_str().unwrap().to_string(),
+            other => panic!("run_src failed: {other:?}"),
+        };
+        let task = match handle_request(&srv, Request::Get { id: id.clone() }).await {
+            Response::Ok(v) => v["task"].clone(),
+            _ => panic!("get failed"),
+        };
+        assert_eq!(task["adapter"], "recipe_src");
+        assert_eq!(task["action"], "run");
+        assert_eq!(task["params"]["__recipe_src"], src);
+        assert_eq!(task["params"]["__name"], "facturagas/facturar");
+        assert_eq!(
+            task["params"]["vars"],
+            serde_json::json!({"rfc": "XAXX010101000"})
+        );
+        assert_eq!(
+            task["max_attempts"], 1,
+            "a backend's `1` must be honored verbatim"
+        );
+        assert_eq!(task["priority"], 5);
+        assert_eq!(task["scheduled_for"], 123_456);
+        assert_eq!(task["dedup_key"], "inv-1");
+
+        // dedup: the same key while the first is still active returns the SAME id
+        match handle_request(&srv, req(Some("inv-1"))).await {
+            Response::Ok(v) => assert_eq!(v["id"], id),
+            other => panic!("{other:?}"),
+        }
+        // no key → a fresh task
+        match handle_request(&srv, req(None)).await {
+            Response::Ok(v) => assert_ne!(v["id"], id),
+            other => panic!("{other:?}"),
+        }
+
+        // `build_adapter_registry` (what boot and `RecipeReload` share) registers the built-in,
+        // so the task will be claimed, not failed with no_adapter — and paced by the key
+        // declared IN the source
+        assert!(matches!(
+            handle_request(&srv, Request::RecipeReload).await,
+            Response::Ok(_)
+        ));
+        let adapter = srv
+            .engine
+            .lock()
+            .await
+            .registry
+            .get("recipe_src")
+            .expect("recipe_src registered as a built-in");
+        let t: Task = serde_json::from_value(task).unwrap();
+        assert_eq!(
+            adapter.limit_keys_for_task(&t.action, &t.params),
+            vec!["facturagas.facturar".to_string()]
+        );
+
+        // bad input is refused up front
+        let bad = Request::RunSrc(RunSrcReq {
+            recipe_src: "  ".into(),
+            params: serde_json::Value::Null,
+            dedup_key: None,
+            priority: None,
+            max_attempts: None,
+            scheduled_for: None,
+            name: None,
+        });
+        assert!(matches!(
+            handle_request(&srv, bad).await,
+            Response::Error { .. }
+        ));
+        let bad = Request::RunSrc(RunSrcReq {
+            recipe_src: src.into(),
+            params: serde_json::json!([1, 2]),
+            dedup_key: None,
+            priority: None,
+            max_attempts: None,
+            scheduled_for: None,
+            name: None,
+        });
+        assert!(matches!(
+            handle_request(&srv, bad).await,
+            Response::Error { .. }
+        ));
     }
 
     #[tokio::test]

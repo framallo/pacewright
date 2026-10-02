@@ -246,7 +246,7 @@ pub async fn execute_and_record(
 
     match result {
         Ok(v) => {
-            let keys = adapter.limit_keys_for(&task.action);
+            let keys = adapter.limit_keys_for_task(&task.action, &task.params);
             spend_limits(store, clock, &keys)?;
             task.status = TaskStatus::Succeeded;
             task.result = Some(v);
@@ -358,7 +358,14 @@ pub async fn execute_and_record(
                 }
             }
         }
-        Err(AdapterError::Retryable(msg)) => {
+        Err(e @ (AdapterError::Retryable(_) | AdapterError::RetryableWith { .. })) => {
+            let msg = e.message().to_string();
+            // A structured failure context (page state, failing step) is persisted in `result`
+            // even though the task did not succeed — `{"failure": …}` — so a self-heal loop can
+            // read it back. On a later successful attempt the real result replaces it.
+            if let Some(detail) = e.detail() {
+                task.result = Some(serde_json::json!({ "failure": detail }));
+            }
             task.attempts += 1;
             if task.attempts < task.max_attempts {
                 let delay = backoff_ms(task.attempts);
@@ -391,7 +398,11 @@ pub async fn execute_and_record(
                 escalate(&notifier, &task);
             }
         }
-        Err(AdapterError::Terminal(msg)) => {
+        Err(e @ (AdapterError::Terminal(_) | AdapterError::TerminalWith { .. })) => {
+            let msg = e.message().to_string();
+            if let Some(detail) = e.detail() {
+                task.result = Some(serde_json::json!({ "failure": detail }));
+            }
             task.status = TaskStatus::Failed;
             task.last_error = Some(msg.clone());
             task.finished_at = Some(now);
@@ -465,6 +476,14 @@ mod tests {
             match action {
                 "echo" | "rate_heavy" => Ok(params),
                 "always_fail" => Err(AdapterError::Terminal("boom".into())),
+                "fail_with_detail" => Err(AdapterError::TerminalWith {
+                    message: "step 3 died".into(),
+                    detail: json!({"step_index": 2, "url": "https://x.test/p"}),
+                }),
+                "retry_with_detail" => Err(AdapterError::RetryableWith {
+                    message: "not ready".into(),
+                    detail: json!({"step_index": 0}),
+                }),
                 "flaky" => {
                     let n = {
                         let mut g = self.flaky.lock().unwrap();
@@ -574,6 +593,58 @@ mod tests {
             store.get_task(&t.id).unwrap().unwrap().status,
             TaskStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn test_terminal_with_detail_persists_failure_in_result() {
+        let store = Store::open_in_memory().unwrap();
+        let clock = TestClock::new(1_000);
+        let a = StubAdapter::default();
+        let t = Task::new_now("dummy", "fail_with_detail", json!({}), 500);
+        store.insert_task(&t).unwrap();
+        run_task(&store, &a, &clock, fake(), notifier(), t.clone())
+            .await
+            .unwrap();
+        let got = store.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Failed);
+        assert_eq!(got.last_error.as_deref(), Some("step 3 died"));
+        assert_eq!(
+            got.result,
+            Some(json!({"failure": {"step_index": 2, "url": "https://x.test/p"}}))
+        );
+        let last = store.events_for(&t.id).unwrap().pop().unwrap();
+        assert_eq!(last.detail["error"], "step 3 died");
+    }
+
+    #[tokio::test]
+    async fn test_retryable_with_detail_honors_max_attempts_and_keeps_context() {
+        // max_attempts = 1: the first retryable failure is already the last one. The backend relies
+        // on this for recipes that must never be re-run by the engine (a real invoice was issued).
+        let store = Store::open_in_memory().unwrap();
+        let clock = TestClock::new(1_000);
+        let a = StubAdapter::default();
+        let mut t = Task::new_now("dummy", "retry_with_detail", json!({}), 500);
+        t.max_attempts = 1;
+        store.insert_task(&t).unwrap();
+        run_task(&store, &a, &clock, fake(), notifier(), t.clone())
+            .await
+            .unwrap();
+        let got = store.get_task(&t.id).unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Failed);
+        assert_eq!(got.attempts, 1);
+        assert_eq!(got.last_error.as_deref(), Some("not ready"));
+        assert_eq!(got.result, Some(json!({"failure": {"step_index": 0}})));
+
+        // With room to retry, the task goes back to Pending but KEEPS the last attempt's context.
+        let mut t2 = Task::new_now("dummy", "retry_with_detail", json!({}), 500);
+        t2.max_attempts = 3;
+        store.insert_task(&t2).unwrap();
+        run_task(&store, &a, &clock, fake(), notifier(), t2.clone())
+            .await
+            .unwrap();
+        let g2 = store.get_task(&t2.id).unwrap().unwrap();
+        assert_eq!(g2.status, TaskStatus::Pending);
+        assert_eq!(g2.result, Some(json!({"failure": {"step_index": 0}})));
     }
 
     #[tokio::test]

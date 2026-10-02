@@ -277,9 +277,13 @@ impl AuthManager {
         let signed_in = match outcome {
             Ok(_) => Some(true),
             // The recipe's `expect on-fail="terminal"` fires when signed out.
-            Err(AdapterError::Terminal(_)) => Some(false),
+            Err(AdapterError::Terminal(_) | AdapterError::TerminalWith { .. }) => Some(false),
             // Launch/navigation hiccup — we genuinely couldn't tell.
-            Err(AdapterError::Retryable(_) | AdapterError::RateLimited { .. }) => None,
+            Err(
+                AdapterError::Retryable(_)
+                | AdapterError::RetryableWith { .. }
+                | AdapterError::RateLimited { .. },
+            ) => None,
         };
         self.set(account, |s| {
             s.signed_in = signed_in;

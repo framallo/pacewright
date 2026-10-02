@@ -209,6 +209,10 @@ pub enum Step {
         out: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
+        /// `key="…"` — the name the saved file is reported under in the run outcome's
+        /// `downloads`; defaults to the file name of `out`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     // HTTP request executed in the page context (inherits session cookies).
     Request(Request),
@@ -519,6 +523,7 @@ fn parse_step(node: &KdlNode) -> Result<Step, BoxError> {
                 .ok_or("download requires out=\"…\" (the local destination path)")?
                 .to_string(),
             timeout_secs: prop_u64(verb, "timeout")?,
+            key: prop_str(verb, "key").map(str::to_string),
         }),
         "request" => Ok(Step::Request(parse_request(verb)?)),
         "api" => Ok(Step::Api(parse_api(verb)?)),

@@ -177,7 +177,7 @@ impl Engine {
                 })?;
                 continue;
             };
-            let keys = adapter.limit_keys_for(&task.action);
+            let keys = adapter.limit_keys_for_task(&task.action, &task.params);
             let decision = check_limits(&self.store, &self.cfg, &*self.clock, &*self.rng, &keys)?;
             match decision {
                 LimitDecision::Allow => {

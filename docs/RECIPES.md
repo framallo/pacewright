@@ -13,6 +13,18 @@ hand-written per-site code. This is the reference for an agent (or human) author
   `add_task`, a schedule, or a pipeline `fanout recipe=linkedin/comment_post`.
 - **Run envelope:** on success a recipe yields `{ "ok": true, "result": { … }, "unexpected": [ … ] }`.
   `result` is the accumulated capture map; `unexpected` flags soft expectation misses (not failures).
+  When `download` steps saved files the envelope also carries
+  `"downloads": { "<key or file name>": { "path", "size", "base64"? } }` (`base64` inline up to
+  4 MiB), which the adapter copies into the task's `result` under `downloads` (shadowing a capture of
+  that name).
+- **Failure context:** a failed run leaves `task.result = { "failure": { "error", "step_index"
+  (0-based), "step" (a KDL one-liner of the failing step), "url", "title", "page_text" (≤ 8 000
+  chars), "ax_tree" (≤ 12 000), "screenshot_b64"? (omitted above ~1.5 MB), "unexpected" } }` next
+  to `last_error` — the raw material for a repair/self-heal loop. Each capture is best-effort and
+  bounded (10 s); a field is `null` when the page could not answer.
+- **Source, not file:** the `run_src` RPC runs a recipe handed over as KDL text (built-in adapter
+  `recipe_src`, action `run`), for a backend that stores recipes as rows. Pacing follows the
+  source's `limit-key`s; `foreground` is honored; the run is accountless.
 - **Validate offline:** `pcw schedule check` (and the boot loader) parse every recipe through the same
   engine parser — a malformed recipe is reported, never silently half-run.
 
@@ -81,7 +93,7 @@ Targeting verbs take a required `locator { … }` child. Write verbs act on the 
 | `screenshot` | `screenshot "key"` | capture PNG (base64) into `result[key]` |
 | `eval` | `eval "key" js="…" retry-if-positive="dotted.path"` | run in-page JS, capture returned JSON; `retry-if-positive` polls (retryable) while a numeric path is > 0 |
 | `tab` | `tab "follow"\|"back"\|"close" url-contains="…"` | multi-tab control |
-| `download` | `download url="…" out="…" timeout=<secs>` | native auth-preserving download; same-origin 4xx = "not ready" → retryable |
+| `download` | `download url="…" out="…" timeout=<secs> key="…"` | native auth-preserving download; same-origin 4xx = "not ready" → retryable; reported in the result's `downloads` under `key` (default: the file name of `out`) |
 | `request` | `request "GET" url="…" expect-status=200 { header "k" "v"; body #"…"#; capture "key" path="a.b" }` | in-page `fetch` (rides session cookies) |
 | `api` | `api "POST" url="…" bearer="{{ token }}" { header …; body …; capture "key" path=… \| header=… }` | native TLS call, bearer auth injected by pacewright; a recipe built only of `api` steps runs with **no Chrome** |
 | `solve` | `solve "prompt" key="answer" { locator … }` | **captcha / visual challenge** — screenshot the page, ask Claude vision to read it, type the answer into the locator (and capture it under `key`). Needs a solver wired (the daemon does); a bare run without one fails terminal |

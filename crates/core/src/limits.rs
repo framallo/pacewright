@@ -303,7 +303,7 @@ spread = "45m"
         let window_open = local_time_at_minute_ms(morning_ms(), 9 * 60);
         let spread_ms = 45 * 60_000i64;
 
-        let d1 = check_limits(&store, &cfg, &clock, &rng, &[key.clone()]).unwrap();
+        let d1 = check_limits(&store, &cfg, &clock, &rng, std::slice::from_ref(&key)).unwrap();
         let until1 = match &d1 {
             LimitDecision::Defer { until_ms, reason } => {
                 assert!(reason.starts_with("before_active"));
@@ -326,7 +326,10 @@ spread = "45m"
         assert_eq!(until1, until2);
 
         // And spread=0 collapses back to the exact window open (byte-identical to old behavior).
-        assert_eq!(day_spread_offset_ms("dummy.capped", &local_date_str(morning_ms()), 0), 0);
+        assert_eq!(
+            day_spread_offset_ms("dummy.capped", &local_date_str(morning_ms()), 0),
+            0
+        );
     }
 
     #[test]

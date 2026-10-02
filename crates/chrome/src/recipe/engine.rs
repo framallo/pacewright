@@ -53,11 +53,21 @@ pub trait Solver {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, crate::BoxError>> + 'a>>;
 }
 
-/// A recipe failure carrying the pacewright error class the runner should map to.
+/// A recipe failure carrying the pacewright error class the runner should map to, plus *where*
+/// it happened: the 0-based index and a KDL-ish summary of the failing step, and the soft
+/// `unexpected` notes accumulated before it (an `Outcome` only exists on success, so without this
+/// they were lost on the error path). A self-heal loop needs all three.
 #[derive(Debug, Clone)]
 pub struct RecipeError {
     pub class: ErrorClass,
     pub message: String,
+    /// 0-based index into `Recipe::steps` of the step that failed (`None` before the first step,
+    /// e.g. a missing var or a runtime-injection failure).
+    pub step_index: Option<usize>,
+    /// A one-line KDL-ish rendering of that step, e.g. `click { locator text="Consultar" }`.
+    pub step: Option<String>,
+    /// Expectation misses noted by earlier steps in the same run.
+    pub unexpected: Vec<String>,
 }
 
 impl std::fmt::Display for RecipeError {
@@ -69,26 +79,147 @@ impl std::fmt::Display for RecipeError {
 impl std::error::Error for RecipeError {}
 
 impl RecipeError {
-    fn terminal(msg: impl Into<String>) -> Self {
+    fn classed(class: ErrorClass, msg: impl Into<String>) -> Self {
         Self {
-            class: ErrorClass::Terminal,
+            class,
             message: msg.into(),
+            step_index: None,
+            step: None,
+            unexpected: Vec::new(),
         }
     }
+    fn terminal(msg: impl Into<String>) -> Self {
+        Self::classed(ErrorClass::Terminal, msg)
+    }
     fn retryable(msg: impl Into<String>) -> Self {
-        Self {
-            class: ErrorClass::Retryable,
-            message: msg.into(),
-        }
+        Self::classed(ErrorClass::Retryable, msg)
     }
 }
 
+/// A file a `download` step saved: `key` is the step's `key=` if declared, else the file name of
+/// its `out` path. The runner reads the file back by `path` to ship small ones inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Download {
+    pub key: String,
+    pub path: String,
+}
+
 /// A completed run: the accumulated result map plus any unmet expectations (the `unexpected`
-/// marker — a soft signal that triggers repair, not a failure).
+/// marker — a soft signal that triggers repair, not a failure), and the files `download` steps
+/// produced.
 #[derive(Debug)]
 pub struct Outcome {
     pub result: Value,
     pub unexpected: Vec<String>,
+    pub downloads: Vec<Download>,
+}
+
+fn kdl_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+}
+
+/// Render a locator the way it is written in a recipe: `role="button" text="Consultar" { within … }`.
+fn kdl_locator(l: &Locator) -> String {
+    let mut props = Vec::new();
+    for (k, v) in [
+        ("role", &l.role),
+        ("name", &l.name),
+        ("text", &l.text),
+        ("label", &l.label),
+        ("tag", &l.tag),
+        ("css", &l.css),
+    ] {
+        if let Some(v) = v {
+            props.push(format!("{k}={}", kdl_str(v)));
+        }
+    }
+    if let Some(n) = l.level {
+        props.push(format!("level={n}"));
+    }
+    if let Some(n) = l.nth {
+        props.push(format!("nth={n}"));
+    }
+    let mut children = Vec::new();
+    for (k, v) in [
+        ("within", &l.within),
+        ("fallback", &l.fallback),
+        ("after", &l.after),
+        ("near", &l.near),
+    ] {
+        if let Some(v) = v {
+            children.push(format!("{k} {}", kdl_locator(v)));
+        }
+    }
+    let mut out = props.join(" ");
+    if !children.is_empty() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("{{ {} }}", children.join("; ")));
+    }
+    out
+}
+
+fn with_locator(verb: String, l: &Locator) -> String {
+    format!("{verb} {{ locator {} }}", kdl_locator(l))
+}
+
+/// A one-line KDL-ish summary of a step for failure context — the verb, its scalar props and its
+/// locator, written the way the recipe author wrote them. Not a round-trippable serialization.
+pub fn summarize_step(step: &Step) -> String {
+    match step {
+        Step::Goto { url } => format!("goto {}", kdl_str(url)),
+        Step::Reload => "reload".into(),
+        Step::Extract {
+            key, many, locator, ..
+        } => with_locator(
+            format!(
+                "extract {}{}",
+                kdl_str(key),
+                if *many { " many=#true" } else { "" }
+            ),
+            locator,
+        ),
+        Step::Expect {
+            on_fail,
+            message,
+            condition,
+        } => format!(
+            "expect on-fail={} message={} {{ {} }}",
+            kdl_str(&format!("{on_fail:?}").to_lowercase()),
+            kdl_str(message),
+            serde_json::to_string(condition).unwrap_or_default()
+        ),
+        Step::Wait { locator, .. } => with_locator("wait".into(), locator),
+        Step::Screenshot { key } => format!("screenshot {}", kdl_str(key)),
+        Step::Eval { key, .. } => format!("eval {}", kdl_str(key)),
+        Step::Tab {
+            action,
+            url_contains,
+        } => match url_contains {
+            Some(u) => format!("tab {} url-contains={}", kdl_str(action), kdl_str(u)),
+            None => format!("tab {}", kdl_str(action)),
+        },
+        Step::Click { locator } => with_locator("click".into(), locator),
+        Step::Fill { value, locator } => with_locator(format!("fill {}", kdl_str(value)), locator),
+        Step::Insert { value, locator } => {
+            with_locator(format!("insert {}", kdl_str(value)), locator)
+        }
+        Step::Select { value, locator } => {
+            with_locator(format!("select {}", kdl_str(value)), locator)
+        }
+        Step::Upload { path, locator } => {
+            with_locator(format!("upload {}", kdl_str(path)), locator)
+        }
+        Step::Solve {
+            prompt, locator, ..
+        } => with_locator(format!("solve {}", kdl_str(prompt)), locator),
+        Step::Download { url, out, .. } => {
+            format!("download url={} out={}", kdl_str(url), kdl_str(out))
+        }
+        Step::Request(r) => format!("request {} url={}", kdl_str(&r.method), kdl_str(&r.url)),
+        Step::Api(r) => format!("api {} url={}", kdl_str(&r.method), kdl_str(&r.url)),
+    }
 }
 
 /// Bind vars: start from what the caller provided, fill declared defaults, error on a missing
@@ -332,300 +463,28 @@ pub async fn run<B: RecipeBrowser>(
 
     let mut result = Map::new();
     let mut unexpected = Vec::new();
+    let mut downloads = Vec::new();
 
     for (i, step) in recipe.steps.iter().enumerate() {
-        let n = i + 1;
-        match step {
-            Step::Goto { url } => {
-                let u = interpolate(url, &vars);
-                let nav = browser
-                    .goto(&u)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(
-                    opts,
-                    &format!("step {n} goto {} → \"{}\"", nav.url, nav.title),
-                );
-            }
-            Step::Reload => {
-                let nav = browser
-                    .reload()
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(
-                    opts,
-                    &format!("step {n} reload {} → \"{}\"", nav.url, nav.title),
-                );
-            }
-            Step::Expect {
-                on_fail,
-                message,
-                condition,
-            } => {
-                if condition_holds(condition, browser, &vars).await? {
-                    let msg = interpolate(message, &vars);
-                    log_step(
-                        opts,
-                        &format!("step {n} expect → TRIPPED ({on_fail:?}): {msg}"),
-                    );
-                    return Err(RecipeError {
-                        class: *on_fail,
-                        message: msg,
-                    });
-                }
-                log_step(opts, &format!("step {n} expect → ok"));
-            }
-            Step::Extract {
-                key,
-                many,
-                locator,
-                expect,
-            } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                let val = browser
-                    .extract(&spec, *many)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                if let Some(msg) = check_expectation(expect, &val, *many, key) {
-                    log_step(opts, &format!("step {n} extract {key} → UNEXPECTED: {msg}"));
-                    unexpected.push(msg);
-                } else {
-                    log_step(
-                        opts,
-                        &format!(
-                            "step {n} extract {key} → {} item(s)",
-                            cardinality(&val, *many)
-                        ),
-                    );
-                }
-                result.insert(key.clone(), val);
-            }
-            Step::Wait {
-                locator,
-                timeout_ms,
-            } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, timeout_ms.unwrap_or(opts.step_timeout_ms)).await?;
-                log_step(opts, &format!("step {n} wait → present"));
-            }
-            Step::Screenshot { key } => {
-                let b64 = browser
-                    .screenshot()
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                result.insert(key.clone(), Value::String(b64));
-                log_step(opts, &format!("step {n} screenshot {key} → captured"));
-            }
-            Step::Eval {
-                key,
-                js,
-                retry_if_positive,
-            } => {
-                let j = interpolate(js, &vars);
-                let val = browser
-                    .eval(&j)
-                    .await
-                    .map_err(|e| RecipeError::retryable(format!("eval failed: {e}")))?;
-                let retry = retry_if_positive
-                    .as_deref()
-                    .and_then(|p| dig_number(&val, p).map(|x| (p, x)))
-                    .filter(|(_, x)| *x > 0.0);
-                log_step(opts, &format!("step {n} eval {key} → captured"));
-                result.insert(key.clone(), val);
-                if let Some((p, x)) = retry {
-                    return Err(RecipeError::retryable(format!(
-                        "step {n} eval {key}: {p} = {x} (> 0), retrying"
-                    )));
-                }
-            }
-            Step::Tab {
-                action,
-                url_contains,
-            } => {
-                let uc = url_contains.as_ref().map(|s| interpolate(s, &vars));
-                browser
-                    .tab(action, uc.as_deref())
-                    .await
-                    .map_err(|e| RecipeError::retryable(format!("tab {action} failed: {e}")))?;
-                log_step(opts, &format!("step {n} tab {action} → done"));
-            }
-            Step::Click { locator } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                browser
-                    .click(&spec)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(opts, &format!("step {n} click → done"));
-            }
-            Step::Fill { value, locator } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                let v = interpolate(value, &vars);
-                browser
-                    .fill(&spec, &v)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(opts, &format!("step {n} fill → done"));
-            }
-            Step::Solve {
-                prompt,
-                locator,
-                key,
-            } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                let p = interpolate(prompt, &vars);
-                let shot = browser
-                    .screenshot()
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                let solver = solver.ok_or_else(|| {
-                    RecipeError::terminal(
-                        "recipe has a `solve` step but no solver is configured — pacewright wires \
-                         Claude vision behind it; a bare `chrome-agent recipe run` has none",
-                    )
-                })?;
-                let answer = solver
-                    .solve(&shot, &p)
-                    .await
-                    .map_err(|e| RecipeError::retryable(format!("solver failed: {e}")))?;
-                browser
-                    .fill(&spec, &answer)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                if let Some(k) = key {
-                    result.insert(k.clone(), Value::String(answer));
-                }
-                log_step(opts, &format!("step {n} solve → filled"));
-            }
-            Step::Insert { value, locator } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                let v = interpolate(value, &vars);
-                browser
-                    .insert(&spec, &v)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(opts, &format!("step {n} insert → done"));
-            }
-            Step::Select { value, locator } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                let v = interpolate(value, &vars);
-                browser
-                    .select(&spec, &v)
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(opts, &format!("step {n} select {v} → done"));
-            }
-            Step::Upload { path, locator } => {
-                let spec = locator_spec(locator);
-                wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
-                let p = interpolate(path, &vars);
-                browser
-                    .upload(&spec, std::slice::from_ref(&p))
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                log_step(opts, &format!("step {n} upload {p} → done"));
-            }
-            Step::Download {
-                url,
-                out,
-                timeout_secs,
-            } => {
-                let u = interpolate(url, &vars);
-                let o = interpolate(out, &vars);
-                // Videos are large; default generous. A recipe can override with `timeout=<secs>`.
-                let t = timeout_secs.unwrap_or(600);
-                match browser.download(&u, &o, t).await {
-                    Ok(true) => log_step(opts, &format!("step {n} download → {o}")),
-                    // Not rendered yet — retryable so the task polls again (backoff ramps to ~hourly).
-                    Ok(false) => {
-                        log_step(opts, &format!("step {n} download → not ready yet"));
-                        return Err(RecipeError::retryable(format!("download not ready: {u}")));
-                    }
-                    Err(e) => return Err(RecipeError::retryable(format!("download failed: {e}"))),
-                }
-            }
-            Step::Request(req) => {
-                let url = interpolate(&req.url, &vars);
-                let headers: Vec<(String, String)> = req
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), interpolate(v, &vars)))
-                    .collect();
-                let body = req.body.as_ref().map(|b| interpolate(b, &vars));
-                let resp = browser
-                    .request(&req.method, &url, &headers, body.as_deref())
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                if let Some(expected) = req.expect_status
-                    && resp.status != expected
-                {
-                    return Err(RecipeError::retryable(format!(
-                        "request {} {} → status {} (expected {expected})",
-                        req.method, url, resp.status
-                    )));
-                }
-                let captured = capture_response(&resp.body, req.capture_path.as_deref());
-                result.insert(req.capture_key.clone(), captured);
-                log_step(
-                    opts,
-                    &format!(
-                        "step {n} request {} {url} → {} ({})",
-                        req.method, resp.status, req.capture_key
-                    ),
-                );
-            }
-            Step::Api(req) => {
-                let url = interpolate(&req.url, &vars);
-                let mut headers: Vec<(String, String)> = req
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), interpolate(v, &vars)))
-                    .collect();
-                // The bearer token is injected as an Authorization header (kept out of the recipe
-                // file — pacewright fills the `{{ token }}` var at run time).
-                if let Some(bearer) = &req.bearer {
-                    headers.push((
-                        "Authorization".into(),
-                        format!("Bearer {}", interpolate(bearer, &vars)),
-                    ));
-                }
-                let body = req.body.as_ref().map(|b| interpolate(b, &vars));
-                let resp = browser
-                    .api_request(&req.method, &url, &headers, body.as_deref())
-                    .await
-                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
-                if let Some(expected) = req.expect_status
-                    && resp.status != expected
-                {
-                    return Err(RecipeError::retryable(format!(
-                        "api {} {} → status {} (expected {expected})",
-                        req.method, url, resp.status
-                    )));
-                }
-                // Capture a response header (e.g. LinkedIn's `x-restli-id` share URN) or a JSON body
-                // sub-path. A header capture wins when both are set.
-                let captured = if let Some(name) = &req.capture_header {
-                    resp.headers
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                        .map_or(Value::Null, |(_, v)| Value::String(v.clone()))
-                } else {
-                    capture_response(&resp.body, req.capture_path.as_deref())
-                };
-                result.insert(req.capture_key.clone(), captured);
-                log_step(
-                    opts,
-                    &format!(
-                        "step {n} api {} {url} → {} ({})",
-                        req.method, resp.status, req.capture_key
-                    ),
-                );
-            }
+        if let Err(mut e) = run_step(
+            i + 1,
+            step,
+            &vars,
+            browser,
+            opts,
+            solver,
+            &mut result,
+            &mut unexpected,
+            &mut downloads,
+        )
+        .await
+        {
+            // Attribute the failure to its step so a repair loop knows what to look at, and keep
+            // the soft misses noted so far — they are evidence too.
+            e.step_index = Some(i);
+            e.step = Some(summarize_step(step));
+            e.unexpected = unexpected.clone();
+            return Err(e);
         }
     }
 
@@ -648,7 +507,324 @@ pub async fn run<B: RecipeBrowser>(
     Ok(Outcome {
         result: Value::Object(result),
         unexpected,
+        downloads,
     })
+}
+
+/// Run one step (1-based `n` for the trace). Captures go to `result`, soft misses to `unexpected`,
+/// saved files to `downloads`; an `Err` is the step's failure, which [`run`] attributes to it.
+#[allow(clippy::too_many_arguments)]
+async fn run_step<B: RecipeBrowser>(
+    n: usize,
+    step: &Step,
+    vars: &BTreeMap<String, String>,
+    browser: &B,
+    opts: &RunOptions,
+    solver: Option<&dyn Solver>,
+    result: &mut Map<String, Value>,
+    unexpected: &mut Vec<String>,
+    downloads: &mut Vec<Download>,
+) -> Result<(), RecipeError> {
+    match step {
+        Step::Goto { url } => {
+            let u = interpolate(url, &vars);
+            let nav = browser
+                .goto(&u)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(
+                opts,
+                &format!("step {n} goto {} → \"{}\"", nav.url, nav.title),
+            );
+        }
+        Step::Reload => {
+            let nav = browser
+                .reload()
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(
+                opts,
+                &format!("step {n} reload {} → \"{}\"", nav.url, nav.title),
+            );
+        }
+        Step::Expect {
+            on_fail,
+            message,
+            condition,
+        } => {
+            if condition_holds(condition, browser, &vars).await? {
+                let msg = interpolate(message, &vars);
+                log_step(
+                    opts,
+                    &format!("step {n} expect → TRIPPED ({on_fail:?}): {msg}"),
+                );
+                return Err(RecipeError::classed(*on_fail, msg));
+            }
+            log_step(opts, &format!("step {n} expect → ok"));
+        }
+        Step::Extract {
+            key,
+            many,
+            locator,
+            expect,
+        } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            let val = browser
+                .extract(&spec, *many)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            if let Some(msg) = check_expectation(expect, &val, *many, key) {
+                log_step(opts, &format!("step {n} extract {key} → UNEXPECTED: {msg}"));
+                unexpected.push(msg);
+            } else {
+                log_step(
+                    opts,
+                    &format!(
+                        "step {n} extract {key} → {} item(s)",
+                        cardinality(&val, *many)
+                    ),
+                );
+            }
+            result.insert(key.clone(), val);
+        }
+        Step::Wait {
+            locator,
+            timeout_ms,
+        } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, timeout_ms.unwrap_or(opts.step_timeout_ms)).await?;
+            log_step(opts, &format!("step {n} wait → present"));
+        }
+        Step::Screenshot { key } => {
+            let b64 = browser
+                .screenshot()
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            result.insert(key.clone(), Value::String(b64));
+            log_step(opts, &format!("step {n} screenshot {key} → captured"));
+        }
+        Step::Eval {
+            key,
+            js,
+            retry_if_positive,
+        } => {
+            let j = interpolate(js, &vars);
+            let val = browser
+                .eval(&j)
+                .await
+                .map_err(|e| RecipeError::retryable(format!("eval failed: {e}")))?;
+            let retry = retry_if_positive
+                .as_deref()
+                .and_then(|p| dig_number(&val, p).map(|x| (p, x)))
+                .filter(|(_, x)| *x > 0.0);
+            log_step(opts, &format!("step {n} eval {key} → captured"));
+            result.insert(key.clone(), val);
+            if let Some((p, x)) = retry {
+                return Err(RecipeError::retryable(format!(
+                    "step {n} eval {key}: {p} = {x} (> 0), retrying"
+                )));
+            }
+        }
+        Step::Tab {
+            action,
+            url_contains,
+        } => {
+            let uc = url_contains.as_ref().map(|s| interpolate(s, &vars));
+            browser
+                .tab(action, uc.as_deref())
+                .await
+                .map_err(|e| RecipeError::retryable(format!("tab {action} failed: {e}")))?;
+            log_step(opts, &format!("step {n} tab {action} → done"));
+        }
+        Step::Click { locator } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            browser
+                .click(&spec)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(opts, &format!("step {n} click → done"));
+        }
+        Step::Fill { value, locator } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            let v = interpolate(value, &vars);
+            browser
+                .fill(&spec, &v)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(opts, &format!("step {n} fill → done"));
+        }
+        Step::Solve {
+            prompt,
+            locator,
+            key,
+        } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            let p = interpolate(prompt, &vars);
+            let shot = browser
+                .screenshot()
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            let solver = solver.ok_or_else(|| {
+                RecipeError::terminal(
+                    "recipe has a `solve` step but no solver is configured — pacewright wires \
+                         Claude vision behind it; a bare `chrome-agent recipe run` has none",
+                )
+            })?;
+            let answer = solver
+                .solve(&shot, &p)
+                .await
+                .map_err(|e| RecipeError::retryable(format!("solver failed: {e}")))?;
+            browser
+                .fill(&spec, &answer)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            if let Some(k) = key {
+                result.insert(k.clone(), Value::String(answer));
+            }
+            log_step(opts, &format!("step {n} solve → filled"));
+        }
+        Step::Insert { value, locator } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            let v = interpolate(value, &vars);
+            browser
+                .insert(&spec, &v)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(opts, &format!("step {n} insert → done"));
+        }
+        Step::Select { value, locator } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            let v = interpolate(value, &vars);
+            browser
+                .select(&spec, &v)
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(opts, &format!("step {n} select {v} → done"));
+        }
+        Step::Upload { path, locator } => {
+            let spec = locator_spec(locator);
+            wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            let p = interpolate(path, &vars);
+            browser
+                .upload(&spec, std::slice::from_ref(&p))
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            log_step(opts, &format!("step {n} upload {p} → done"));
+        }
+        Step::Download {
+            url,
+            out,
+            timeout_secs,
+            key,
+        } => {
+            let u = interpolate(url, &vars);
+            let o = interpolate(out, &vars);
+            // Videos are large; default generous. A recipe can override with `timeout=<secs>`.
+            let t = timeout_secs.unwrap_or(600);
+            match browser.download(&u, &o, t).await {
+                Ok(true) => {
+                    log_step(opts, &format!("step {n} download → {o}"));
+                    let k = key.clone().unwrap_or_else(|| {
+                        std::path::Path::new(&o)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| o.clone())
+                    });
+                    downloads.push(Download { key: k, path: o });
+                }
+                // Not rendered yet — retryable so the task polls again (backoff ramps to ~hourly).
+                Ok(false) => {
+                    log_step(opts, &format!("step {n} download → not ready yet"));
+                    return Err(RecipeError::retryable(format!("download not ready: {u}")));
+                }
+                Err(e) => return Err(RecipeError::retryable(format!("download failed: {e}"))),
+            }
+        }
+        Step::Request(req) => {
+            let url = interpolate(&req.url, &vars);
+            let headers: Vec<(String, String)> = req
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), interpolate(v, &vars)))
+                .collect();
+            let body = req.body.as_ref().map(|b| interpolate(b, &vars));
+            let resp = browser
+                .request(&req.method, &url, &headers, body.as_deref())
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            if let Some(expected) = req.expect_status
+                && resp.status != expected
+            {
+                return Err(RecipeError::retryable(format!(
+                    "request {} {} → status {} (expected {expected})",
+                    req.method, url, resp.status
+                )));
+            }
+            let captured = capture_response(&resp.body, req.capture_path.as_deref());
+            result.insert(req.capture_key.clone(), captured);
+            log_step(
+                opts,
+                &format!(
+                    "step {n} request {} {url} → {} ({})",
+                    req.method, resp.status, req.capture_key
+                ),
+            );
+        }
+        Step::Api(req) => {
+            let url = interpolate(&req.url, &vars);
+            let mut headers: Vec<(String, String)> = req
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), interpolate(v, &vars)))
+                .collect();
+            // The bearer token is injected as an Authorization header (kept out of the recipe
+            // file — pacewright fills the `{{ token }}` var at run time).
+            if let Some(bearer) = &req.bearer {
+                headers.push((
+                    "Authorization".into(),
+                    format!("Bearer {}", interpolate(bearer, &vars)),
+                ));
+            }
+            let body = req.body.as_ref().map(|b| interpolate(b, &vars));
+            let resp = browser
+                .api_request(&req.method, &url, &headers, body.as_deref())
+                .await
+                .map_err(|e| RecipeError::retryable(e.to_string()))?;
+            if let Some(expected) = req.expect_status
+                && resp.status != expected
+            {
+                return Err(RecipeError::retryable(format!(
+                    "api {} {} → status {} (expected {expected})",
+                    req.method, url, resp.status
+                )));
+            }
+            // Capture a response header (e.g. LinkedIn's `x-restli-id` share URN) or a JSON body
+            // sub-path. A header capture wins when both are set.
+            let captured = if let Some(name) = &req.capture_header {
+                resp.headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map_or(Value::Null, |(_, v)| Value::String(v.clone()))
+            } else {
+                capture_response(&resp.body, req.capture_path.as_deref())
+            };
+            result.insert(req.capture_key.clone(), captured);
+            log_step(
+                opts,
+                &format!(
+                    "step {n} api {} {url} → {} ({})",
+                    req.method, resp.status, req.capture_key
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -755,6 +931,116 @@ mod tests {
         let err = run(&r, &novars(), &fb, &opts(), None).await.unwrap_err();
         assert_eq!(err.class, ErrorClass::Terminal);
         assert_eq!(err.message, "auth wall");
+    }
+
+    #[tokio::test]
+    async fn failure_is_attributed_to_its_step_and_keeps_earlier_unexpected() {
+        let r = recipe(
+            r#"recipe "x/y" {
+            step { goto "https://a.test/" }
+            step { extract "rows" many=#true expect-min=1 { locator css=".row" } }
+            step { click { locator role="button" text="Consultar" { within role="form" } } }
+        }"#,
+        );
+        // extract finds nothing (→ unexpected, not a failure); the click's locator never resolves
+        let fb = FakeBrowser::new()
+            .extractor(|_, _| json!([]))
+            .resolver(|spec| Resolved {
+                found: spec.get("role") != Some(&json!("button")),
+                text: None,
+            });
+        let err = run(&r, &novars(), &fb, &opts(), None).await.unwrap_err();
+        assert_eq!(err.class, ErrorClass::Retryable);
+        assert_eq!(err.step_index, Some(2), "0-based index of the failing step");
+        assert_eq!(
+            err.step.as_deref(),
+            Some(r#"click { locator role="button" text="Consultar" { within role="form" } }"#)
+        );
+        assert_eq!(
+            err.unexpected.len(),
+            1,
+            "the extract's miss is carried on the error"
+        );
+        assert!(err.unexpected[0].contains("rows"));
+        // Display is still the `[Class] message` the runner classifies on
+        assert!(err.to_string().starts_with("[Retryable] "));
+        assert_eq!(fb.gotos.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_step_failures_have_no_step() {
+        let r = recipe(
+            r#"recipe "x/y" {
+            var "needed" required=#true
+            step { goto "{{ needed }}" }
+        }"#,
+        );
+        let err = run(&r, &novars(), &FakeBrowser::new(), &opts(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.class, ErrorClass::Terminal);
+        assert_eq!(err.step_index, None);
+        assert_eq!(err.step, None);
+    }
+
+    #[tokio::test]
+    async fn download_steps_are_reported_keyed_by_key_or_file_name() {
+        let r = recipe(
+            r#"recipe "x/y" {
+            var "folio" default="F-1"
+            step { download url="https://a.test/x.xml" out="/tmp/out/{{ folio }}.xml" key="xml" }
+            step { download url="https://a.test/x.pdf" out="/tmp/out/{{ folio }}.pdf" }
+        }"#,
+        );
+        let out = run(&r, &novars(), &FakeBrowser::new(), &opts(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.downloads,
+            vec![
+                super::Download {
+                    key: "xml".into(),
+                    path: "/tmp/out/F-1.xml".into()
+                },
+                super::Download {
+                    key: "F-1.pdf".into(),
+                    path: "/tmp/out/F-1.pdf".into()
+                },
+            ]
+        );
+        // a recipe without downloads reports none
+        let r = recipe(r#"recipe "x/y" { step { goto "https://a.test/" } }"#);
+        let out = run(&r, &novars(), &FakeBrowser::new(), &opts(), None)
+            .await
+            .unwrap();
+        assert!(out.downloads.is_empty());
+    }
+
+    #[test]
+    fn summarize_step_renders_kdl_like_lines() {
+        use super::summarize_step;
+        let r = recipe(
+            r#"recipe "x/y" {
+            var "rfc" default="X"
+            step { goto "https://a.test/" }
+            step { fill "{{ rfc }}" { locator label="RFC" } }
+            step { expect on-fail="terminal" message="auth wall" { settled-url-matches "/login/" } }
+            step { extract "name" { locator role="heading" nth=2 } }
+            step { tab "follow" url-contains="pdf" }
+            step { api "get" url="https://api.test/v1" { capture "r" } }
+        }"#,
+        );
+        let lines: Vec<String> = r.steps.iter().map(summarize_step).collect();
+        assert_eq!(lines[0], r#"goto "https://a.test/""#);
+        assert_eq!(lines[1], r#"fill "{{ rfc }}" { locator label="RFC" }"#);
+        assert!(lines[2].starts_with(r#"expect on-fail="terminal" message="auth wall" {"#));
+        assert!(lines[2].contains("settled-url-matches"));
+        assert_eq!(
+            lines[3],
+            r#"extract "name" { locator role="heading" nth=2 }"#
+        );
+        assert_eq!(lines[4], r#"tab "follow" url-contains="pdf""#);
+        assert_eq!(lines[5], r#"api "GET" url="https://api.test/v1""#);
     }
 
     #[tokio::test]

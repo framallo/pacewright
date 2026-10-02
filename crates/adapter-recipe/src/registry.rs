@@ -99,6 +99,16 @@ impl RecipeMeta {
     }
 }
 
+/// The pseudo-path recorded on metadata parsed from a source string (no file behind it).
+pub const INLINE_PATH: &str = "<inline>";
+
+/// [`parse_meta`] for a recipe that has no file — a database row handed to `run_src`. The
+/// `path` is [`INLINE_PATH`]; everything else (name, `limit-key`s, `foreground`, `auth`, vars)
+/// reads exactly as from a file, so pacing rules apply the same to both.
+pub fn parse_meta_from_src(text: &str) -> Result<Option<RecipeMeta>, String> {
+    parse_meta(text, Path::new(INLINE_PATH))
+}
+
 /// Parse a recipe file's routing metadata. `Ok(None)` = valid KDL but not a recipe (or a
 /// recipe whose name isn't `<adapter>/<action>`); skip it. `Err` = not valid KDL at all.
 pub fn parse_meta(text: &str, path: &Path) -> Result<Option<RecipeMeta>, String> {
@@ -373,6 +383,22 @@ mod tests {
         assert!(m.vars[2].has_default && !m.vars[2].required);
         // no `auth` node → a public recipe by default
         assert!(!m.auth);
+    }
+
+    #[test]
+    fn parse_meta_from_src_reads_pacing_without_a_file() {
+        let m = parse_meta_from_src(
+            "recipe \"facturagas/facturar\" {\n  limit-key \"facturagas.facturar\"\n  foreground #true\n}",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(m.adapter, "facturagas");
+        assert_eq!(m.action, "facturar");
+        assert_eq!(m.limit_keys, vec!["facturagas.facturar".to_string()]);
+        assert!(m.foreground);
+        assert_eq!(m.path, Path::new(INLINE_PATH));
+        assert!(parse_meta_from_src("not kdl {{{").is_err());
+        assert!(parse_meta_from_src("other \"x\" {}").unwrap().is_none());
     }
 
     #[test]

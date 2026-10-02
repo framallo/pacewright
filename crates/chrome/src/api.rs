@@ -29,6 +29,36 @@ pub fn parse_vars(
     recipe::parse_vars(pairs, vars_json)
 }
 
+/// Why a recipe run did not produce an [`recipe::engine::Outcome`].
+///
+/// `message` is what the error always was — `[Class] message` for an engine failure (the runner's
+/// `classify` keys on that prefix), or the attach/parse error verbatim — so `Display` is unchanged
+/// for callers that only ever read the string. `failure` is new: the page state captured right
+/// after an engine failure (see [`recipe::failure_context`]); `None` when the run never reached
+/// the engine (no Chrome, no page, unparseable recipe).
+#[derive(Debug)]
+pub struct RunFailure {
+    pub message: String,
+    pub failure: Option<serde_json::Value>,
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunFailure {}
+
+impl From<BoxError> for RunFailure {
+    fn from(e: BoxError) -> Self {
+        Self {
+            message: e.to_string(),
+            failure: None,
+        }
+    }
+}
+
 /// Attach, run the recipe at `file` with `vars`, return its [`recipe::engine::Outcome`]
 /// (`result` JSON + any `unexpected` notes). Never prints. In-process equivalent of
 /// `chrome-agent --connect <c> --browser <b> --page <p> recipe run <file> --vars-json …`.
@@ -41,8 +71,9 @@ pub async fn run_recipe_attached(
     file: &str,
     vars: BTreeMap<String, String>,
     solver: Option<&dyn recipe::engine::Solver>,
-) -> Result<recipe::engine::Outcome, BoxError> {
-    let src = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
+) -> Result<recipe::engine::Outcome, RunFailure> {
+    let src = std::fs::read_to_string(file)
+        .map_err(|e| BoxError::from(format!("reading {file}: {e}")))?;
     run_recipe_attached_src(at, &src, vars, solver).await
 }
 
@@ -57,8 +88,8 @@ pub async fn run_recipe_attached_src(
     src: &str,
     vars: BTreeMap<String, String>,
     solver: Option<&dyn recipe::engine::Solver>,
-) -> Result<recipe::engine::Outcome, BoxError> {
-    let mut store = session::load_session()?;
+) -> Result<recipe::engine::Outcome, RunFailure> {
+    let mut store = session::load_session().map_err(BoxError::from)?;
     let opts = browser::BrowserOptions {
         name: at.browser.to_string(),
         headless: true,
@@ -68,12 +99,16 @@ pub async fn run_recipe_attached_src(
         connect: Some(at.connect.to_string()),
         copy_cookies: false,
     };
-    let conn = browser::resolve_browser(&opts).await?;
-    let browser_client = CdpClient::connect(&conn.ws_endpoint).await?;
+    let conn = browser::resolve_browser(&opts)
+        .await
+        .map_err(BoxError::from)?;
+    let browser_client = CdpClient::connect(&conn.ws_endpoint)
+        .await
+        .map_err(BoxError::from)?;
     let http_endpoint = conn
         .http_endpoint
         .clone()
-        .ok_or("no HTTP endpoint on the browser connection")?;
+        .ok_or_else(|| BoxError::from("no HTTP endpoint on the browser connection"))?;
 
     // `we_created_tab` decides cleanup. pacewright shares the operator's always-on Chrome with
     // humans and other agents, and for `page = "default"` resolve_page_target *adopts* the first
@@ -128,13 +163,25 @@ pub async fn run_recipe_attached_src(
         step_timeout_ms: at.timeout_secs.saturating_mul(1000).max(1000),
         repair: false,
     };
-    let outcome = recipe::engine::run(&rec, &vars, &rb, &run_opts, solver).await;
+    // Run, then — on failure — capture the page the run died on BEFORE the tab is closed below.
+    // The ACTIVE client is inspected, so a followed tab is the one captured.
+    let outcome = match recipe::engine::run(&rec, &vars, &rb, &run_opts, solver).await {
+        Ok(outcome) => Ok(outcome),
+        Err(e) => {
+            let failure = recipe::failure_context(&rb.active_client(), &e).await;
+            Err(RunFailure {
+                message: e.to_string(),
+                failure: Some(failure),
+            })
+        }
+    };
 
     // Tab hygiene: close the tab this run used so tabs do not pile up across scheduled runs,
     // then unregister it so the next run creates a fresh one. Gated on `we_created_tab`, NOT on
     // the page name: this Chrome is shared with the operator and other agents, and a "default"
     // run may have adopted a tab that a human opened. Closing only what we created is the only
-    // safe rule. Runs on both success and failure. Dropping `rb` first releases its borrow of
+    // safe rule. Runs on both success and failure, and always AFTER the failure context above
+    // was captured from that same tab. Dropping `rb` first releases its borrow of
     // `browser_client`.
     drop(rb);
     if we_created_tab {
@@ -153,7 +200,7 @@ pub async fn run_recipe_attached_src(
         }
     }
 
-    outcome.map_err(|e| Box::new(e) as BoxError)
+    outcome
 }
 
 /// Attach and navigate the named page to `url`, raising the window — the in-process equivalent of

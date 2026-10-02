@@ -102,6 +102,34 @@ pacewright tui             # live dashboard (id · adapter · action · status �
 | `anthropic login [--paste] / status / logout` | sign the daemon into a Claude Max/Pro subscription for Claude calls |
 | `tui` | live dashboard (Feed / Schedule / Limits / Accounts panes — `tab` to cycle) |
 
+## Drive it from a backend (`POST /api`)
+
+The dashboard listener accepts the same JSON-RPC `Request` the socket does, so a controller that
+keeps its recipes in its **own database** (not under `~/.pacewright/recipes/`) can drive the daemon
+with three additions:
+
+- **`run_src`** — enqueue a run of a recipe handed over as KDL source. Same semantics as `add`
+  (`dedup_key`, `priority`, `max_attempts` — pass `1` for a run that must never be retried —
+  `scheduled_for`); pacing follows the source's own `limit-key`s.
+
+  ```json
+  {"method":"run_src","params":{"recipe_src":"recipe \"facturagas/facturar\" { … }",
+    "params":{"rfc":"…"},"dedup_key":"inv-1","priority":0,"max_attempts":1,
+    "scheduled_for":null,"name":"facturagas/facturar"}}
+  → {"type":"ok","id":"<task id>"}
+  ```
+
+  The task lands on the built-in `recipe_src` adapter (`action: run`) with params
+  `{"__recipe_src": …, "__name": …, "vars": {…}}`.
+- **Structured failure context.** When a recipe run fails (installed or from source), `task.result`
+  is `{"failure": {"error", "step_index", "step", "url", "title", "page_text", "ax_tree",
+  "screenshot_b64"?, "unexpected"}}` — the failing step (0-based + a KDL one-liner) and the page it
+  died on — next to `last_error`. On success `task.result` is the capture map as before, plus
+  `"downloads": {"<key or file name>": {"path", "size", "base64"?}}` when `download` steps saved
+  files (`base64` inline up to 4 MiB; `download … key="…"` names the entry).
+- **`claude_cli/run` with `"full_output": true`** returns the whole stdout as `output` (2 MiB cap,
+  then `"truncated": true`) alongside the usual `{chars, elapsed_secs, preview}`.
+
 ## Drive it from Claude (MCP)
 
 `pacewright-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes the daemon's

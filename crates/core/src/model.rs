@@ -150,6 +150,50 @@ pub enum AdapterError {
     Terminal(String),
     #[error("rate limited until {retry_after}")]
     RateLimited { retry_after: i64 },
+    /// `Retryable`, plus a structured failure context the engine persists in `task.result` as
+    /// `{"failure": detail}` (even though the task did not succeed), so a self-heal loop can see
+    /// *where* and *on what page* the run died instead of only `last_error`.
+    #[error("retryable: {message}")]
+    RetryableWith { message: String, detail: Value },
+    /// `Terminal`, plus the same structured failure context (see [`AdapterError::RetryableWith`]).
+    #[error("terminal: {message}")]
+    TerminalWith { message: String, detail: Value },
+}
+
+impl AdapterError {
+    /// Attach a structured failure context: `Terminal` → `TerminalWith`, `Retryable` →
+    /// `RetryableWith` (an existing detail is replaced). `RateLimited` carries none and is
+    /// returned unchanged.
+    pub fn with_detail(self, detail: Value) -> Self {
+        match self {
+            AdapterError::Retryable(message) | AdapterError::RetryableWith { message, .. } => {
+                AdapterError::RetryableWith { message, detail }
+            }
+            AdapterError::Terminal(message) | AdapterError::TerminalWith { message, .. } => {
+                AdapterError::TerminalWith { message, detail }
+            }
+            other => other,
+        }
+    }
+
+    /// The human message without the class prefix (`RateLimited` has none → empty).
+    pub fn message(&self) -> &str {
+        match self {
+            AdapterError::Retryable(m) | AdapterError::Terminal(m) => m,
+            AdapterError::RetryableWith { message, .. }
+            | AdapterError::TerminalWith { message, .. } => message,
+            AdapterError::RateLimited { .. } => "",
+        }
+    }
+
+    /// The structured failure context, if the adapter attached one.
+    pub fn detail(&self) -> Option<&Value> {
+        match self {
+            AdapterError::RetryableWith { detail, .. }
+            | AdapterError::TerminalWith { detail, .. } => Some(detail),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +229,22 @@ mod tests {
     fn test_status_serde_snake_case() {
         let j = serde_json::to_string(&TaskStatus::Deferred).unwrap();
         assert_eq!(j, "\"deferred\"");
+    }
+    #[test]
+    fn test_with_detail_upgrades_class_and_keeps_display() {
+        let d = serde_json::json!({"step_index": 2});
+        let e = AdapterError::Terminal("boom".into()).with_detail(d.clone());
+        assert!(matches!(e, AdapterError::TerminalWith { .. }));
+        assert_eq!(e.to_string(), "terminal: boom");
+        assert_eq!(e.message(), "boom");
+        assert_eq!(e.detail(), Some(&d));
+        let r = AdapterError::Retryable("slow".into()).with_detail(d.clone());
+        assert!(matches!(r, AdapterError::RetryableWith { .. }));
+        assert_eq!(r.to_string(), "retryable: slow");
+        // rate-limited has nowhere to put a detail and stays as is
+        let rl = AdapterError::RateLimited { retry_after: 5 }.with_detail(d);
+        assert!(matches!(rl, AdapterError::RateLimited { retry_after: 5 }));
+        assert!(rl.detail().is_none());
     }
     #[test]
     fn test_terminal_flag() {

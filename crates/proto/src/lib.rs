@@ -20,6 +20,33 @@ pub struct AddTaskReq {
     pub max_attempts: Option<i64>,
 }
 
+/// `run_src`: enqueue a task that runs a recipe handed over as **KDL source** — for a controller
+/// that keeps its recipes in its own database rather than under `~/.pacewright/recipes/`. The
+/// daemon turns it into a normal task on the built-in `recipe_src` adapter (`action = run`) with
+/// params `{"__recipe_src": <src>, "__name": <name>, "vars": <params>}`, so dedup, priority,
+/// `max_attempts` and `scheduled_for` behave exactly as in [`Request::Add`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunSrcReq {
+    /// The recipe's KDL text.
+    pub recipe_src: String,
+    /// The recipe's vars (a JSON object). Nested under `vars` in the task params.
+    #[serde(default)]
+    pub params: Value,
+    #[serde(default)]
+    pub dedup_key: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    /// Pass `1` for a run that must never be retried by the engine's own backoff loop (a recipe
+    /// that already issued a real invoice).
+    #[serde(default)]
+    pub max_attempts: Option<i64>,
+    #[serde(default)]
+    pub scheduled_for: Option<i64>,
+    /// Display name for logs/digest, e.g. `"facturagas/facturar"`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// A human-friendly pacing spec for `set_limit`, mirroring the `config.toml` shape
 /// (`min_gap`/`active` as strings). The daemon parses it into the engine's limit config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,6 +65,8 @@ pub struct LimitSpec {
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Add(AddTaskReq),
+    /// Enqueue a recipe run from source — see [`RunSrcReq`]. Answers `{"id": <task id>}`.
+    RunSrc(RunSrcReq),
     Get {
         id: String,
     },
@@ -194,6 +223,36 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&s).unwrap();
         assert_eq!(req, back);
+    }
+    #[test]
+    fn test_run_src_request_roundtrips_with_the_documented_wire_shape() {
+        let wire = r#"{"method":"run_src","params":{"recipe_src":"recipe \"a/b\" {}","params":{"rfc":"X"},"dedup_key":"inv-1","priority":0,"max_attempts":1,"scheduled_for":null,"name":"facturagas/facturar"}}"#;
+        let req: Request = serde_json::from_str(wire).unwrap();
+        let expected = Request::RunSrc(RunSrcReq {
+            recipe_src: "recipe \"a/b\" {}".into(),
+            params: serde_json::json!({"rfc": "X"}),
+            dedup_key: Some("inv-1".into()),
+            priority: Some(0),
+            max_attempts: Some(1),
+            scheduled_for: None,
+            name: Some("facturagas/facturar".into()),
+        });
+        assert_eq!(req, expected);
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"method\":\"run_src\""));
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, expected);
+        // every field but the source is optional
+        let minimal: Request =
+            serde_json::from_str(r#"{"method":"run_src","params":{"recipe_src":"x"}}"#).unwrap();
+        match minimal {
+            Request::RunSrc(r) => {
+                assert_eq!(r.recipe_src, "x");
+                assert!(r.params.is_null());
+                assert_eq!(r.max_attempts, None);
+            }
+            other => panic!("{other:?}"),
+        }
     }
     #[test]
     fn test_list_tagged_shape() {
