@@ -88,7 +88,7 @@ Targeting verbs take a required `locator { … }` child. Write verbs act on the 
 | `select` | `select "value" { locator … }` | `<select>` only; matches option value then visible text |
 | `upload` | `upload "path" { locator … }` | file input (often hidden — target with `css`) |
 | `extract` | `extract "key" many=#true { locator … }` `expect-count=` `expect-min=` `expect-max=` | capture text/array into `result[key]`; cardinality misses flag `unexpected` |
-| `wait` | `wait { locator … } timeout-ms=8000` | block until the locator resolves |
+| `wait` | `wait timeout-ms=8000 { locator … }` (properties before the block — KDL rejects them after it) | block until the locator resolves |
 | `expect` | `expect on-fail="terminal"\|"retryable" message="…" { <condition> }` | tripwire: if the condition holds, abort with that error class |
 | `screenshot` | `screenshot "key"` | capture PNG (base64) into `result[key]` |
 | `eval` | `eval "key" js="…" retry-if-positive="dotted.path"` | run in-page JS, capture returned JSON; `retry-if-positive` polls (retryable) while a numeric path is > 0 |
