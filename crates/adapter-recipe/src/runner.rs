@@ -63,6 +63,9 @@ fn inject_oauth_vars(src: &str, vars_json: &str, store: &SecretStore, now_ms: i6
     serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| vars_json.to_string())
 }
 
+/// Per-step wait cap for a dry run (see [`RunOpts::dry_run`]).
+pub const DRY_RUN_STEP_TIMEOUT_SECS: u64 = 30;
+
 /// How one recipe run should be driven. A struct rather than positional flags because the
 /// old `(auth: bool, account: Option<&str>)` pair no longer described anything: attaching to the
 /// live Chrome removed the throwaway profile that `auth` chose cookie-copying for, leaving it dead.
@@ -547,7 +550,13 @@ impl NativeRecipeRunner {
             src.to_string(),
         );
         let stealth = self.stealth;
-        let timeout_secs = self.timeout_secs;
+        // A dry run is someone iterating on a recipe: a wrong locator should come back in seconds,
+        // not after the full production wait.
+        let timeout_secs = if dry_run {
+            self.timeout_secs.min(DRY_RUN_STEP_TIMEOUT_SECS)
+        } else {
+            self.timeout_secs
+        };
         let solver = self.solver.clone();
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Value, AdapterError>>();
         std::thread::spawn(move || {
