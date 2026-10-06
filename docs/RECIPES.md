@@ -123,6 +123,30 @@ expect on-fail="retryable" message="not ready"  { text-matches "Processing" { lo
 expect on-fail="terminal" message="empty"       { value "{{ found }}" non-empty=#true }   // or equals= / not-equals=
 ```
 
+## Dry runs and the `commit` mark
+
+A recipe whose last action cannot be undone (issuing an invoice, sending a payment) marks that one
+step with `commit=#true`:
+
+```kdl
+step { click { locator role="button" name="Buscar ticket" } }
+step commit=#true { click { locator role="button" name="Generar factura" } }   // irreversible
+step { eval "cfdi" js="…" }
+```
+
+A normal run ignores the mark. A **dry run** (`run_src` with `"dry_run": true`, or the synchronous
+`try_src` RPC / `pw-try` tool) runs every step *before* the first marked one and stops there; the
+task result carries `dry_run: {stopped_before, step, page: {url, title, page_text, ax_tree,
+screenshot_b64?}}`. The engine refuses a dry run, before touching the browser, when:
+
+- no step is marked `commit=#true`;
+- a step before the mark is an `eval` whose JS calls `submit(` or `.click(`, or a `request`/`api`
+  with a method other than GET/HEAD.
+
+At run time, a pre-commit `click` whose target reads like a final submit ("emitir", "timbrar",
+"generar factura", "generar cfdi", "confirmar factura") is refused too: mark it instead. Steps after
+the mark (the result capture) are never exercised by a dry run.
+
 ## Error classes & pacing
 
 - A tripped `expect on-fail="terminal"` (or a bad var/recipe) → **Terminal**: the task fails and, if it

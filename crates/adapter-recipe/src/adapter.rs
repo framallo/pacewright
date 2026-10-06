@@ -74,6 +74,10 @@ pub(crate) fn result_from_envelope(envelope: &Value) -> Result<Value, AdapterErr
             result.insert("downloads".into(), Value::Object(d.clone()));
         }
     }
+    // A dry run says where it stopped (and what the page showed there) under `dry_run`.
+    if let Some(dr @ Value::Object(_)) = envelope.get("dry_run") {
+        result.insert("dry_run".into(), dr.clone());
+    }
     Ok(Value::Object(result))
 }
 
@@ -168,6 +172,7 @@ impl Adapter for RecipeAdapter {
                 &RunOpts {
                     account: meta.account.clone(),
                     foreground: meta.foreground,
+                    dry_run: false,
                 },
             )
             .await?;

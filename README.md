@@ -127,6 +127,12 @@ with three additions:
   died on — next to `last_error`. On success `task.result` is the capture map as before, plus
   `"downloads": {"<key or file name>": {"path", "size", "base64"?}}` when `download` steps saved
   files (`base64` inline up to 4 MiB; `download … key="…"` names the entry).
+- **Dry runs.** `run_src` takes `"dry_run": true`: the run stops before the step marked
+  `commit=#true` and never runs it (see [`docs/RECIPES.md`](docs/RECIPES.md#dry-runs-and-the-commit-mark)).
+  **`try_src`** `{recipe_src, params}` does the same synchronously, outside the queue, and answers
+  `{"ok": true, "dry_run": {…, "page"}}` or `{"ok": false, "error", "failure"}` — so a `claude_cli`
+  round can test the recipe it is writing (`pw-try receta.kdl --vars '{…}'` in the image) while its
+  own task holds the serial tick loop.
 - **`claude_cli/run` with `"full_output": true`** returns the whole stdout as `output` (2 MiB cap,
   then `"truncated": true`) alongside the usual `{chars, elapsed_secs, preview}`.
 

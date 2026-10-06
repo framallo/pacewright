@@ -60,7 +60,10 @@ COPY --from=builder /src/target/release/pacewrightd /usr/local/bin/pacewrightd
 # portales de facturación arman su formulario con JavaScript— y no puede
 # escribir un locator que exista.
 COPY packaging/pw-dom.mjs /usr/local/bin/pw-dom
-RUN chmod +x /usr/local/bin/pw-dom
+# Y sus manos: `pw-try` corre una receta EN SECO (hasta el paso `commit=#true`, nunca ese) contra
+# el portal real, por el método `try_src` del daemon, para que la ronda pruebe lo que escribe.
+COPY packaging/pw-try.mjs /usr/local/bin/pw-try
+RUN chmod +x /usr/local/bin/pw-dom /usr/local/bin/pw-try
 USER pacewright
 ENV HOME=/home/pacewright
 # El daemon crea ~/.pacewright (socket + secrets.json + pacewright.db) al

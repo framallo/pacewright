@@ -45,6 +45,24 @@ pub struct RunSrcReq {
     /// Display name for logs/digest, e.g. `"facturagas/facturar"`.
     #[serde(default)]
     pub name: Option<String>,
+    /// Dry run: run every step before the one marked `commit=#true` and stop there (the commit
+    /// step never runs). Refused when no step is marked. Defaults to `false`.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `try_src`: run a recipe from source **now**, synchronously, as a **dry run** — every step before
+/// the one marked `commit=#true`, never that step. Not queued: it answers in the same request, so a
+/// model that is writing a recipe can test it while its own (queued) round is still running. The
+/// answer is `{"ok": true, "result", "dry_run": {"stopped_before", "step", "page"}}` or
+/// `{"ok": false, "error", "failure": {step_index, step, url, page_text, ax_tree, …}}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrySrcReq {
+    pub recipe_src: String,
+    #[serde(default)]
+    pub params: Value,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A human-friendly pacing spec for `set_limit`, mirroring the `config.toml` shape
@@ -67,6 +85,8 @@ pub enum Request {
     Add(AddTaskReq),
     /// Enqueue a recipe run from source — see [`RunSrcReq`]. Answers `{"id": <task id>}`.
     RunSrc(RunSrcReq),
+    /// Dry-run a recipe from source synchronously — see [`TrySrcReq`]. Never runs the commit step.
+    TrySrc(TrySrcReq),
     Get {
         id: String,
     },
@@ -236,6 +256,7 @@ mod tests {
             max_attempts: Some(1),
             scheduled_for: None,
             name: Some("facturagas/facturar".into()),
+            dry_run: false,
         });
         assert_eq!(req, expected);
         let s = serde_json::to_string(&req).unwrap();
@@ -253,6 +274,24 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+    #[test]
+    fn test_run_src_dry_run_defaults_off_and_try_src_parses() {
+        let r: Request = serde_json::from_str(
+            r#"{"method":"run_src","params":{"recipe_src":"x","dry_run":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, Request::RunSrc(ref q) if q.dry_run));
+        let r: Request =
+            serde_json::from_str(r#"{"method":"run_src","params":{"recipe_src":"x"}}"#).unwrap();
+        assert!(matches!(r, Request::RunSrc(ref q) if !q.dry_run));
+        let r: Request = serde_json::from_str(
+            r#"{"method":"try_src","params":{"recipe_src":"x","params":{"rfc":"X"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(r, Request::TrySrc(ref q) if q.recipe_src == "x" && q.params["rfc"] == "X")
+        );
     }
     #[test]
     fn test_list_tagged_shape() {

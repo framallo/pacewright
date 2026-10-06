@@ -178,6 +178,7 @@ impl LoginLauncher for NativeLoginLauncher {
                     stealth,
                     timeout_secs: 30,
                     activate: true,
+                    dry_run: false,
                 };
                 pacewright_chrome::api::open_page(&at, &url)
                     .await

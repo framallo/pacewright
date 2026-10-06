@@ -33,6 +33,8 @@ pub const RECIPE_SRC_KEY: &str = "__recipe_src";
 pub const RECIPE_SRC_NAME_KEY: &str = "__name";
 /// Params key under which the recipe vars are nested.
 pub const RECIPE_SRC_VARS_KEY: &str = "vars";
+/// Params key that turns the run into a **dry run**: stop before the `commit=#true` step.
+pub const RECIPE_SRC_DRY_RUN_KEY: &str = "__dry_run";
 
 pub struct RecipeSrcAdapter {
     runner: Arc<dyn RecipeRunner>,
@@ -43,6 +45,7 @@ struct SrcParams {
     src: String,
     name: String,
     vars_json: String,
+    dry_run: bool,
 }
 
 fn parse_params(params: &Value) -> Result<SrcParams, AdapterError> {
@@ -74,10 +77,21 @@ fn parse_params(params: &Value) -> Result<SrcParams, AdapterError> {
         )))
         }
     };
+    let dry_run = match obj.get(RECIPE_SRC_DRY_RUN_KEY) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        // Anything else is a caller bug, and guessing "no" here could emit a real invoice.
+        Some(other) => {
+            return Err(AdapterError::Terminal(format!(
+                "recipe_src: `{RECIPE_SRC_DRY_RUN_KEY}` must be a boolean, got {other}"
+            )))
+        }
+    };
     Ok(SrcParams {
         src,
         name,
         vars_json,
+        dry_run,
     })
 }
 
@@ -94,6 +108,13 @@ impl RecipeSrcAdapter {
             RECIPE_SRC_NAME_KEY: name,
             RECIPE_SRC_VARS_KEY: vars,
         })
+    }
+
+    /// Same as [`Self::params`], for a dry run (stops before the `commit=#true` step).
+    pub fn dry_run_params(src: &str, name: Option<&str>, vars: Value) -> Value {
+        let mut p = Self::params(src, name, vars);
+        p[RECIPE_SRC_DRY_RUN_KEY] = Value::Bool(true);
+        p
     }
 }
 
@@ -152,11 +173,17 @@ impl Adapter for RecipeSrcAdapter {
         let opts = RunOpts {
             account: None,
             foreground,
+            dry_run: p.dry_run,
         };
         let envelope = self.runner.run_src(&p.src, &p.vars_json, &opts).await?;
         warn_unexpected(&ctx.task_id, &p.name, &envelope);
         let result = result_from_envelope(&envelope)?;
-        tracing::info!(task = %ctx.task_id, "ran source recipe `{}`", p.name);
+        tracing::info!(
+            task = %ctx.task_id,
+            "ran source recipe `{}`{}",
+            p.name,
+            if p.dry_run { " (dry run)" } else { "" }
+        );
         Ok(result)
     }
 }
@@ -206,6 +233,41 @@ mod tests {
             "foreground #true in the source is honored"
         );
         assert_eq!(call.2.account, None, "always accountless");
+    }
+
+    #[tokio::test]
+    async fn dry_run_flag_reaches_the_runner_and_only_when_asked() {
+        let runner = Arc::new(FakeRecipeRunner::ok(json!({
+            "ok": true, "result": {"folio": "F-1"},
+            "dry_run": {"stopped_before": 3, "step": "click { … }"}
+        })));
+        let a = RecipeSrcAdapter::new(runner.clone());
+        let out = a
+            .execute(
+                &ctx(),
+                "run",
+                RecipeSrcAdapter::dry_run_params(SRC, None, json!({})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["dry_run"]["stopped_before"], 3);
+        assert!(runner.calls.lock().unwrap()[0].2.dry_run);
+        a.execute(
+            &ctx(),
+            "run",
+            RecipeSrcAdapter::params(SRC, None, json!({})),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !runner.calls.lock().unwrap()[1].2.dry_run,
+            "a normal run stays normal"
+        );
+        // a non-boolean flag is refused, never read as "no"
+        let mut bad = RecipeSrcAdapter::params(SRC, None, json!({}));
+        bad[RECIPE_SRC_DRY_RUN_KEY] = json!("yes");
+        assert!(a.execute(&ctx(), "run", bad).await.is_err());
+        assert_eq!(runner.call_count(), 2);
     }
 
     #[tokio::test]

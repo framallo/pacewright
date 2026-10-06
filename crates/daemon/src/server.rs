@@ -237,8 +237,69 @@ async fn handle_anthropic_login(req: &Request) -> Option<Response> {
     })
 }
 
+/// `try_src`: a synchronous dry run, outside the engine lock (it drives Chrome for up to minutes)
+/// and outside the queue (its caller is usually a queued `claude_cli` round that is waiting for the
+/// answer — queuing it behind that round would deadlock the serial tick loop).
+async fn handle_try_src(srv: &Server, req: &Request) -> Option<Response> {
+    let Request::TrySrc(r) = req else {
+        return None;
+    };
+    if r.recipe_src.trim().is_empty() {
+        return Some(Response::Error {
+            message: "try_src: `recipe_src` is empty".into(),
+        });
+    }
+    let vars = match &r.params {
+        serde_json::Value::Null => serde_json::json!({}),
+        v @ serde_json::Value::Object(_) => v.clone(),
+        other => {
+            return Some(Response::Error {
+                message: format!("try_src: `params` must be a JSON object, got {other}"),
+            })
+        }
+    };
+    let opts = pacewright_adapter_recipe::RunOpts {
+        account: None,
+        foreground: false,
+        dry_run: true,
+    };
+    let name = r.name.as_deref().unwrap_or("<unnamed>");
+    tracing::info!("try_src: dry run of `{name}`");
+    let out = srv
+        .recipe_runner
+        .run_src(&r.recipe_src, &vars.to_string(), &opts)
+        .await;
+    Some(Response::Ok(try_src_answer(out)))
+}
+
+/// Shape a dry-run outcome for `try_src`: a failure is an *answer* (`ok: false` + where it died),
+/// not a protocol error — the caller is about to fix its recipe with exactly that context.
+fn try_src_answer(
+    out: Result<serde_json::Value, pacewright_core::model::AdapterError>,
+) -> serde_json::Value {
+    match out {
+        Ok(env) => serde_json::json!({
+            "ok": true,
+            "result": env.get("result").cloned().unwrap_or(serde_json::Value::Null),
+            "unexpected": env.get("unexpected").cloned().unwrap_or(serde_json::json!([])),
+            "dry_run": env.get("dry_run").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+        Err(e) => {
+            let mut failure = e.detail().cloned().unwrap_or(serde_json::Value::Null);
+            // The screenshot is for humans; a model reading this over a pipe only pays for it.
+            if let Some(o) = failure.as_object_mut() {
+                o.remove("screenshot_b64");
+            }
+            serde_json::json!({ "ok": false, "error": e.to_string(), "failure": failure })
+        }
+    }
+}
+
 pub async fn handle_request(srv: &Server, req: Request) -> Response {
     if let Some(resp) = handle_auth(srv, &req).await {
+        return resp;
+    }
+    if let Some(resp) = handle_try_src(srv, &req).await {
         return resp;
     }
     if let Some(resp) = handle_anthropic_login(&req).await {
@@ -282,10 +343,15 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
                 };
                 // Same task shape as `add`, on the built-in source adapter; the vars nest under
                 // `vars` so they can never collide with the two reserved keys.
+                let params = if r.dry_run {
+                    RecipeSrcAdapter::dry_run_params(&r.recipe_src, r.name.as_deref(), vars)
+                } else {
+                    RecipeSrcAdapter::params(&r.recipe_src, r.name.as_deref(), vars)
+                };
                 let mut t = Task::new_now(
                     RECIPE_SRC_ADAPTER,
                     "run",
-                    RecipeSrcAdapter::params(&r.recipe_src, r.name.as_deref(), vars),
+                    params,
                     r.scheduled_for.unwrap_or(now),
                 );
                 t.dedup_key = r.dedup_key;
@@ -686,6 +752,7 @@ pub async fn handle_request(srv: &Server, req: Request) -> Response {
             | Request::AuthRecheck { .. }
             | Request::AuthLogin { .. }
             | Request::AuthLoginAll => unreachable!("auth requests are handled by handle_auth"),
+            Request::TrySrc(_) => unreachable!("try_src is handled by handle_try_src"),
             Request::ClaudeTokenSet { token } => {
                 use pacewright_core::secrets::{SecretStore, CLAUDE_CODE};
                 let token = token.trim();
@@ -1036,6 +1103,125 @@ mod tests {
             .any(|n| n == "globex"));
     }
 
+    /// A recipe runner that records the options it was handed and answers with a fixed result.
+    struct RecordingRunner {
+        opts: std::sync::Mutex<Vec<pacewright_adapter_recipe::RunOpts>>,
+        answer: Box<
+            dyn Fn() -> Result<serde_json::Value, pacewright_core::model::AdapterError>
+                + Send
+                + Sync,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl RecipeRunner for RecordingRunner {
+        async fn run(
+            &self,
+            _p: &std::path::Path,
+            _v: &str,
+            opts: &pacewright_adapter_recipe::RunOpts,
+        ) -> Result<serde_json::Value, pacewright_core::model::AdapterError> {
+            self.opts.lock().unwrap().push(opts.clone());
+            (self.answer)()
+        }
+        async fn run_src(
+            &self,
+            _src: &str,
+            _v: &str,
+            opts: &pacewright_adapter_recipe::RunOpts,
+        ) -> Result<serde_json::Value, pacewright_core::model::AdapterError> {
+            self.opts.lock().unwrap().push(opts.clone());
+            (self.answer)()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_try_src_is_always_a_dry_run_and_answers_failures_with_context() {
+        use pacewright_core::model::AdapterError;
+        let ok = Arc::new(RecordingRunner {
+            opts: std::sync::Mutex::new(vec![]),
+            answer: Box::new(|| {
+                Ok(
+                    serde_json::json!({"ok": true, "result": {"a": 1}, "unexpected": [],
+                    "dry_run": {"stopped_before": 4, "step": "click { … }"}}),
+                )
+            }),
+        });
+        let mut srv = test_server().await;
+        srv.recipe_runner = ok.clone();
+        let req = Request::TrySrc(pacewright_proto::TrySrcReq {
+            recipe_src: "recipe \"x/y\" {}".into(),
+            params: serde_json::json!({"folio": "1"}),
+            name: None,
+        });
+        let v = match handle_request(&srv, req.clone()).await {
+            Response::Ok(v) => v,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["dry_run"]["stopped_before"], 4);
+        assert!(
+            ok.opts.lock().unwrap()[0].dry_run,
+            "try_src never runs a commit step"
+        );
+        // nothing was queued
+        let st = match handle_request(&srv, Request::Status).await {
+            Response::Ok(v) => v,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(st["pending"], 0);
+
+        let failing = Arc::new(RecordingRunner {
+            opts: std::sync::Mutex::new(vec![]),
+            answer: Box::new(|| {
+                Err(AdapterError::Retryable("[Retryable] locator not found".into()).with_detail(
+                    serde_json::json!({"step_index": 2, "page_text": "Folio", "screenshot_b64": "AAAA"}),
+                ))
+            }),
+        });
+        srv.recipe_runner = failing;
+        let v = match handle_request(&srv, req).await {
+            Response::Ok(v) => v,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["failure"]["step_index"], 2);
+        assert!(v["failure"].get("screenshot_b64").is_none());
+        assert!(v["error"].as_str().unwrap().contains("locator not found"));
+    }
+
+    #[tokio::test]
+    async fn test_run_src_dry_run_marks_the_task_params() {
+        use pacewright_proto::RunSrcReq;
+        let srv = test_server().await;
+        let mk = |dry_run: bool| {
+            Request::RunSrc(RunSrcReq {
+                recipe_src: "recipe \"x/y\" {}".into(),
+                params: serde_json::json!({}),
+                dedup_key: None,
+                priority: None,
+                max_attempts: Some(1),
+                scheduled_for: None,
+                name: None,
+                dry_run,
+            })
+        };
+        for (dry, want) in [
+            (true, serde_json::json!(true)),
+            (false, serde_json::Value::Null),
+        ] {
+            let id = match handle_request(&srv, mk(dry)).await {
+                Response::Ok(v) => v["id"].as_str().unwrap().to_string(),
+                other => panic!("{other:?}"),
+            };
+            let task = match handle_request(&srv, Request::Get { id }).await {
+                Response::Ok(v) => v["task"].clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(task["params"]["__dry_run"], want);
+        }
+    }
+
     #[tokio::test]
     async fn test_add_then_get_via_dispatch() {
         let srv = test_server().await;
@@ -1076,6 +1262,7 @@ mod tests {
                 max_attempts: Some(1),
                 scheduled_for: Some(123_456),
                 name: Some("facturagas/facturar".into()),
+                dry_run: false,
             })
         };
         let id = match handle_request(&srv, req(Some("inv-1"))).await {
@@ -1142,6 +1329,7 @@ mod tests {
             max_attempts: None,
             scheduled_for: None,
             name: None,
+            dry_run: false,
         });
         assert!(matches!(
             handle_request(&srv, bad).await,
@@ -1155,6 +1343,7 @@ mod tests {
             max_attempts: None,
             scheduled_for: None,
             name: None,
+            dry_run: false,
         });
         assert!(matches!(
             handle_request(&srv, bad).await,

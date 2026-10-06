@@ -74,6 +74,9 @@ pub struct RunOpts {
     /// `foreground #true` — raise the tab (`--activate`) for the run. Chrome throttles background
     /// tabs, which stalls a heavy render.
     pub foreground: bool,
+    /// Stop before the recipe's `commit=#true` step and never run it (see the engine's
+    /// `RunOptions::dry_run`). The envelope then carries `dry_run: {stopped_before, step, page}`.
+    pub dry_run: bool,
 }
 
 /// Page (tab) name for one run: the account's own tab, or `<base>-<unique>` so the tab is created
@@ -97,6 +100,7 @@ impl RunOpts {
         Self {
             account: Some(name.into()),
             foreground: false,
+            dry_run: false,
         }
     }
     pub fn foreground(mut self, on: bool) -> Self {
@@ -337,6 +341,12 @@ impl RecipeRunner for CliRecipeRunner {
         vars_json: &str,
         opts: &RunOpts,
     ) -> Result<Value, AdapterError> {
+        // The legacy binary knows nothing of dry runs: running it would run the commit step too.
+        if opts.dry_run {
+            return Err(AdapterError::Terminal(
+                "dry run is not supported by the chrome-agent CLI runner".into(),
+            ));
+        }
         // Inject OAuth secrets (token/author_urn) for token-based recipes from the 0600 secret store,
         // just before spawning — so scheduled API posts fire headless with no auth wall. Best-effort:
         // a recipe that needs no token, or a provider with no valid token, passes through untouched.
@@ -485,17 +495,26 @@ impl RecipeRunner for NativeRecipeRunner {
         // Same rule as the CLI runner: account tab, or a per-run tab that gets created and closed.
         let page = run_page_name(opts, &self.page_name);
         let activate = opts.foreground;
+        let dry_run = opts.dry_run;
 
         // First attempt, then the same stale-page recovery the CLI runner already had. The native
         // path never got it, and the pool made it matter: more Chromes means more cached tabs, and
         // a tab closed since chrome-agent recorded it is otherwise a permanent task failure.
         let outcome = self
-            .attached(&connect, &browser_name, &page, src, vars.clone(), activate)
+            .attached(
+                &connect,
+                &browser_name,
+                &page,
+                src,
+                vars.clone(),
+                activate,
+                dry_run,
+            )
             .await;
         if is_stale_outcome(&outcome) {
             pacewright_core::browser::prune_stale_page(&browser_name, &page);
             return self
-                .attached(&connect, &browser_name, &page, src, vars, activate)
+                .attached(&connect, &browser_name, &page, src, vars, activate, dry_run)
                 .await;
         }
         outcome
@@ -517,6 +536,7 @@ impl NativeRecipeRunner {
         src: &str,
         vars: std::collections::BTreeMap<String, String>,
         activate: bool,
+        dry_run: bool,
     ) -> Result<Value, AdapterError> {
         // Todo lo que cruza al worker es dueño de sus datos: el future del motor es `!Send` y
         // corre en otro hilo, así que no puede quedarse con préstamos de este.
@@ -557,6 +577,7 @@ impl NativeRecipeRunner {
                     stealth,
                     timeout_secs,
                     activate,
+                    dry_run,
                 };
                 match pacewright_chrome::api::run_recipe_attached_src(&at, &src, vars, solver_ref)
                     .await
@@ -567,6 +588,9 @@ impl NativeRecipeRunner {
                         });
                         if !o.downloads.is_empty() {
                             env["downloads"] = downloads_json(&o.downloads);
+                        }
+                        if let Some(dr) = o.dry_run {
+                            env["dry_run"] = dr;
                         }
                         Ok(env)
                     }
