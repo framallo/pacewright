@@ -18,6 +18,9 @@ pub struct RecipeAttach<'a> {
     pub stealth: bool,
     pub timeout_secs: u64,
     pub activate: bool,
+    /// Stop before the `commit=#true` step (see [`recipe::engine::RunOptions::dry_run`]); the
+    /// outcome's `dry_run` then also carries a `page` snapshot of where it stopped.
+    pub dry_run: bool,
 }
 
 /// Parse `--var`-style pairs + a `--vars-json` object into the recipe var map (a thin re-export of
@@ -162,11 +165,18 @@ pub async fn run_recipe_attached_src(
         log: false,
         step_timeout_ms: at.timeout_secs.saturating_mul(1000).max(1000),
         repair: false,
+        dry_run: at.dry_run,
     };
     // Run, then — on failure — capture the page the run died on BEFORE the tab is closed below.
     // The ACTIVE client is inspected, so a followed tab is the one captured.
     let outcome = match recipe::engine::run(&rec, &vars, &rb, &run_opts, solver).await {
-        Ok(outcome) => Ok(outcome),
+        Ok(mut outcome) => {
+            // A dry run is a question about the page it reached: hand that page back.
+            if let Some(info) = outcome.dry_run.as_mut() {
+                info["page"] = recipe::page_snapshot(&rb.active_client()).await;
+            }
+            Ok(outcome)
+        }
         Err(e) => {
             let failure = recipe::failure_context(&rb.active_client(), &e).await;
             Err(RunFailure {

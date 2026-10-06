@@ -29,6 +29,13 @@ pub struct RunOptions {
     /// Repair mode: skip writing output files when the run is `unexpected` (the caller will
     /// instead assemble a repair context), so a stale note is never overwritten from a bad run.
     pub repair: bool,
+    /// Dry run: run every step BEFORE the one marked `commit=#true` and stop there, so a recipe
+    /// whose last action is irreversible (issuing an invoice) can be validated against the live
+    /// site without doing it. Refused outright when no step is marked, when a pre-commit step
+    /// could submit by itself (an `eval` calling `submit()`, a non-GET `request`/`api`), and,
+    /// at run time, when a pre-commit `click` lands on a button that reads like the final submit.
+    /// Output files are never written.
+    pub dry_run: bool,
 }
 
 impl Default for RunOptions {
@@ -37,8 +44,81 @@ impl Default for RunOptions {
             log: false,
             step_timeout_ms: DEFAULT_STEP_TIMEOUT_MS,
             repair: false,
+            dry_run: false,
         }
     }
+}
+
+/// Words that, on a button, mean "issue the document now". A dry run refuses to click one of
+/// these before the commit mark: better to reject a recipe than to emit a real invoice.
+const FINAL_SUBMIT_WORDS: &[&str] = &[
+    "emitir",
+    "timbrar",
+    "generar factura",
+    "generar la factura",
+    "generar cfdi",
+    "generar el cfdi",
+    "confirmar factura",
+    "confirmar y facturar",
+];
+
+/// Does this visible text read like the final, irreversible submit? Case- and accent-insensitive.
+pub fn looks_like_final_submit(text: &str) -> bool {
+    let plain: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' => 'a',
+            'é' => 'e',
+            'í' => 'i',
+            'ó' => 'o',
+            'ú' => 'u',
+            c if c.is_whitespace() => ' ',
+            c => c,
+        })
+        .collect();
+    let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    FINAL_SUBMIT_WORDS.iter().any(|w| plain.contains(w))
+}
+
+/// Static checks before a dry run touches the browser. Returns the commit index to stop at.
+fn dry_run_preflight(recipe: &Recipe) -> Result<usize, RecipeError> {
+    let commit = recipe.commit_step.ok_or_else(|| {
+        RecipeError::terminal(
+            "dry run refused: no step is marked `commit=#true` — mark the final submit \
+             (e.g. `step commit=#true { click { locator … } }`) so the dry run knows where to stop",
+        )
+    })?;
+    for (i, step) in recipe.steps[..commit].iter().enumerate() {
+        let bad = match step {
+            Step::Eval { js, .. } => {
+                let j = js.to_lowercase();
+                (j.contains("submit(") || j.contains(".click(")).then(|| {
+                    "an `eval` that submits or clicks by script — use a `click` step".to_string()
+                })
+            }
+            Step::Request(r) if !matches!(r.method.to_uppercase().as_str(), "GET" | "HEAD") => {
+                Some(format!(
+                    "a `request {}` (only GET may run before the commit)",
+                    r.method
+                ))
+            }
+            Step::Api(r) if !matches!(r.method.to_uppercase().as_str(), "GET" | "HEAD") => Some(
+                format!("an `api {}` (only GET may run before the commit)", r.method),
+            ),
+            _ => None,
+        };
+        if let Some(why) = bad {
+            let mut e = RecipeError::terminal(format!(
+                "dry run refused: step {} comes before the commit mark and is {why}",
+                i + 1
+            ));
+            e.step_index = Some(i);
+            e.step = Some(summarize_step(step));
+            return Err(e);
+        }
+    }
+    Ok(commit)
 }
 
 /// A challenge-solver seam: given a page screenshot (base64 PNG) and an instruction, return the
@@ -112,6 +192,9 @@ pub struct Outcome {
     pub result: Value,
     pub unexpected: Vec<String>,
     pub downloads: Vec<Download>,
+    /// Set only by a dry run: `{"stopped_before": <0-based index>, "step": "<kdl one-liner>"}` —
+    /// the commit step that was NOT executed.
+    pub dry_run: Option<Value>,
 }
 
 fn kdl_str(s: &str) -> String {
@@ -456,6 +539,12 @@ pub async fn run<B: RecipeBrowser>(
     solver: Option<&dyn Solver>,
 ) -> Result<Outcome, RecipeError> {
     let vars = bind_vars(recipe, provided)?;
+    // Before the browser is touched: a dry run that cannot prove where it stops never starts.
+    let stop_at = if opts.dry_run {
+        Some(dry_run_preflight(recipe)?)
+    } else {
+        None
+    };
     browser
         .inject_init_script(LOCATORS_JS)
         .await
@@ -465,7 +554,8 @@ pub async fn run<B: RecipeBrowser>(
     let mut unexpected = Vec::new();
     let mut downloads = Vec::new();
 
-    for (i, step) in recipe.steps.iter().enumerate() {
+    let steps = &recipe.steps[..stop_at.unwrap_or(recipe.steps.len())];
+    for (i, step) in steps.iter().enumerate() {
         if let Err(mut e) = run_step(
             i + 1,
             step,
@@ -488,6 +578,22 @@ pub async fn run<B: RecipeBrowser>(
         }
     }
 
+    if let Some(c) = stop_at {
+        log_step(
+            opts,
+            &format!("dry run: stopped before step {} (commit)", c + 1),
+        );
+        return Ok(Outcome {
+            result: Value::Object(result),
+            unexpected,
+            downloads,
+            dry_run: Some(serde_json::json!({
+                "stopped_before": c,
+                "step": summarize_step(&recipe.steps[c]),
+            })),
+        });
+    }
+
     // Last phase: render + write the recipe's output files (only reached on a fully successful
     // run — a tripped/failed run returns Err above and writes nothing). Under --repair, an
     // `unexpected` run also skips writing so a stale note isn't overwritten from a bad extract.
@@ -508,6 +614,7 @@ pub async fn run<B: RecipeBrowser>(
         result: Value::Object(result),
         unexpected,
         downloads,
+        dry_run: None,
     })
 }
 
@@ -640,6 +747,20 @@ async fn run_step<B: RecipeBrowser>(
         Step::Click { locator } => {
             let spec = locator_spec(locator);
             wait_resolved(browser, &spec, opts.step_timeout_ms).await?;
+            if opts.dry_run {
+                // Belt and braces for an unmarked final submit: read what the button says.
+                let r = browser
+                    .resolve(&spec)
+                    .await
+                    .map_err(|e| RecipeError::retryable(e.to_string()))?;
+                let text = r.text.unwrap_or_default();
+                if looks_like_final_submit(&text) {
+                    return Err(RecipeError::terminal(format!(
+                        "dry run guard: this click lands on {text:?}, which reads like the final \
+                         submit — mark that step `commit=#true`"
+                    )));
+                }
+            }
             browser
                 .click(&spec)
                 .await
@@ -880,7 +1001,169 @@ mod tests {
             log: false,
             step_timeout_ms: 0,
             repair: false,
+            dry_run: false,
         }
+    }
+
+    fn dry() -> RunOptions {
+        RunOptions {
+            dry_run: true,
+            ..opts()
+        }
+    }
+
+    const INVOICE: &str = r##"recipe "x/facturar" {
+        var "folio" required=#true
+        step { goto "https://portal.test/" }
+        step { fill "{{ folio }}" { locator css="#folio" } }
+        step { click { locator role="button" name="Buscar" } }
+        step commit=#true { click { locator role="button" name="Generar factura" } }
+        step { eval "cfdi" js="1" }
+    }"##;
+
+    fn folio() -> BTreeMap<String, String> {
+        BTreeMap::from([("folio".to_string(), "953445".to_string())])
+    }
+
+    #[test]
+    fn commit_mark_is_parsed_and_only_the_first_counts() {
+        assert_eq!(recipe(INVOICE).commit_step, Some(3));
+        assert_eq!(
+            recipe(r#"recipe "x/y" { step { goto "https://a.test/" } }"#).commit_step,
+            None
+        );
+        let two = recipe(
+            r#"recipe "x/y" {
+                step commit=#true { goto "https://a.test/" }
+                step commit=#true { goto "https://b.test/" }
+            }"#,
+        );
+        assert_eq!(two.commit_step, Some(0));
+    }
+
+    #[tokio::test]
+    async fn dry_run_stops_before_the_commit_step_and_never_clicks_it() {
+        // The fake resolves every locator with text "Buscar": the guard lets it through.
+        let fb = FakeBrowser::new().resolver(|_| Resolved {
+            found: true,
+            text: Some("Buscar".into()),
+        });
+        let out = run(&recipe(INVOICE), &folio(), &fb, &dry(), None)
+            .await
+            .unwrap();
+        let info = out.dry_run.expect("a dry run reports where it stopped");
+        assert_eq!(info["stopped_before"], 3);
+        assert!(info["step"].as_str().unwrap().contains("Generar factura"));
+        // goto + fill + ONE click (Buscar). The commit click and the eval after it never ran.
+        let acts = fb.actions.borrow();
+        assert_eq!(
+            acts.iter().filter(|a| matches!(a, Action::Click)).count(),
+            1,
+            "{acts:?}"
+        );
+        assert!(out.result.get("cfdi").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_normal_run_ignores_the_commit_mark() {
+        let fb = FakeBrowser::new();
+        let out = run(&recipe(INVOICE), &folio(), &fb, &opts(), None)
+            .await
+            .unwrap();
+        assert!(out.dry_run.is_none());
+        let clicks = fb
+            .actions
+            .borrow()
+            .iter()
+            .filter(|a| matches!(a, Action::Click))
+            .count();
+        assert_eq!(clicks, 2, "both clicks, the commit included");
+    }
+
+    #[tokio::test]
+    async fn dry_run_without_a_commit_mark_is_refused_before_touching_the_browser() {
+        let r = recipe(
+            r##"recipe "x/y" {
+                step { goto "https://portal.test/" }
+                step { click { locator css="#enviar" } }
+            }"##,
+        );
+        let fb = FakeBrowser::new();
+        let err = run(&r, &novars(), &fb, &dry(), None).await.unwrap_err();
+        assert_eq!(err.class, ErrorClass::Terminal);
+        assert!(err.message.contains("commit=#true"), "{}", err.message);
+        assert!(fb.gotos.borrow().is_empty());
+        assert!(
+            fb.injected.borrow().is_empty(),
+            "not even the runtime was injected"
+        );
+        assert!(fb.actions.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dry_run_refuses_pre_commit_steps_that_could_submit_on_their_own() {
+        for bad in [
+            r#"step { eval "x" js="document.forms[0].submit()" }"#,
+            r##"step { eval "x" js="document.querySelector('#ok').click()" }"##,
+            r#"step { request "POST" url="https://portal.test/api/emitir" { capture "r" } }"#,
+        ] {
+            let src = format!(
+                r##"recipe "x/y" {{
+                    step {{ goto "https://portal.test/" }}
+                    {bad}
+                    step commit=#true {{ click {{ locator css="#ok" }} }}
+                }}"##
+            );
+            let fb = FakeBrowser::new();
+            let err = run(&recipe(&src), &novars(), &fb, &dry(), None)
+                .await
+                .unwrap_err();
+            assert!(
+                err.message.starts_with("dry run refused"),
+                "{bad}: {}",
+                err.message
+            );
+            assert_eq!(err.step_index, Some(1));
+            assert!(
+                fb.gotos.borrow().is_empty(),
+                "{bad}: refused before any step"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_guard_refuses_an_unmarked_click_on_the_final_submit() {
+        // Marked commit is "Continuar", but step 2 clicks a button that reads "Generar Factura".
+        let r = recipe(
+            r##"recipe "x/y" {
+                step { goto "https://portal.test/" }
+                step { click { locator css="#btn" } }
+                step commit=#true { click { locator css="#continuar" } }
+            }"##,
+        );
+        let fb = FakeBrowser::new().resolver(|_| Resolved {
+            found: true,
+            text: Some("  Generar   Factura ".into()),
+        });
+        let err = run(&r, &novars(), &fb, &dry(), None).await.unwrap_err();
+        assert!(err.message.contains("dry run guard"), "{}", err.message);
+        assert_eq!(err.step_index, Some(1));
+        assert!(fb.actions.borrow().is_empty(), "the click never happened");
+    }
+
+    #[test]
+    fn final_submit_words() {
+        use super::looks_like_final_submit as f;
+        assert!(f("EMITIR CFDI"));
+        assert!(f("Generar factura"));
+        assert!(f("Timbrar"));
+        assert!(f("Confirmar y facturar"));
+        assert!(!f("Buscar ticket"));
+        assert!(
+            !f("Facturar"),
+            "the entry button of most portals is not the final submit"
+        );
+        assert!(!f("Continuar"));
     }
 
     #[tokio::test]

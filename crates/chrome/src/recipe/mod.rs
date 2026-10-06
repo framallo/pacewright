@@ -89,6 +89,7 @@ pub async fn run_recipe(
         log,
         step_timeout_ms: timeout_secs.saturating_mul(1000).max(1000),
         repair: repair.enabled,
+        dry_run: false,
     };
 
     match engine::run(&recipe, &vars, &browser, &opts, None).await {
@@ -151,6 +152,7 @@ pub async fn run_recipe_native(
         log,
         step_timeout_ms: 30_000,
         repair: repair.enabled,
+        dry_run: false,
     };
     match engine::run(&recipe, &vars, &browser, &opts, None).await {
         Ok(outcome) => {
@@ -259,6 +261,18 @@ async fn eval_string(client: &CdpClient, js: &str) -> Option<String> {
 /// `null` when the page could not answer. `screenshot_b64` is omitted above
 /// [`SCREENSHOT_MAX_BYTES`]. `client` should be the *active* page (a followed tab, if any).
 pub async fn failure_context(client: &CdpClient, e: &engine::RecipeError) -> Value {
+    let mut obj = page_snapshot(client).await;
+    obj["error"] = Value::from(e.message.clone());
+    obj["step_index"] = serde_json::json!(e.step_index);
+    obj["step"] = serde_json::json!(e.step);
+    obj["unexpected"] = serde_json::json!(e.unexpected);
+    obj
+}
+
+/// The page as it stands — `url`, `title`, `page_text` (bounded), `ax_tree` (bounded) and a
+/// `screenshot_b64` when small enough. Each capture is best-effort: `null` when the page could not
+/// answer. Shared by [`failure_context`] and the stop point of a dry run.
+pub async fn page_snapshot(client: &CdpClient) -> Value {
     let url = eval_string(client, "location.href").await;
     let title = eval_string(client, "document.title").await;
     let page_text = eval_string(client, "(document.body ? document.body.innerText : '')")
@@ -285,14 +299,10 @@ pub async fn failure_context(client: &CdpClient, e: &engine::RecipeError) -> Val
         _ => None,
     };
     let mut obj = serde_json::json!({
-        "error": e.message,
-        "step_index": e.step_index,
-        "step": e.step,
         "url": url,
         "title": title,
         "page_text": page_text,
         "ax_tree": ax_tree,
-        "unexpected": e.unexpected,
     });
     if let Some(shot) = screenshot_b64 {
         obj["screenshot_b64"] = Value::String(shot);

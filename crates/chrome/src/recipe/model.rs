@@ -292,6 +292,12 @@ pub struct Recipe {
     /// Optional author guidance for Claude-assisted repair (spec §5a).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair_prompt: Option<String>,
+    /// 0-based index of the first step marked `step commit=#true { … }`: the irreversible action
+    /// (the final "emitir factura" submit). A normal run ignores the mark; a **dry run** stops right
+    /// before this step and refuses to start at all when no step carries it. See
+    /// [`crate::recipe::engine::RunOptions::dry_run`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_step: Option<usize>,
 }
 
 // ---- kdl node helpers ------------------------------------------------------
@@ -714,6 +720,7 @@ impl Recipe {
             steps: Vec::new(),
             outputs: Vec::new(),
             repair_prompt: None,
+            commit_step: None,
         };
 
         for child in children(node) {
@@ -725,7 +732,12 @@ impl Recipe {
                     }
                 }
                 "var" => recipe.vars.push(parse_var(child)?),
-                "step" => recipe.steps.push(parse_step(child)?),
+                "step" => {
+                    if prop_bool(child, "commit") == Some(true) && recipe.commit_step.is_none() {
+                        recipe.commit_step = Some(recipe.steps.len());
+                    }
+                    recipe.steps.push(parse_step(child)?);
+                }
                 "output" => recipe.outputs.push(parse_output(child)?),
                 "repair" => {
                     recipe.repair_prompt = first_child(child, "prompt")
