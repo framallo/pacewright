@@ -706,3 +706,41 @@ async fn test_terminal_failure_escalates_to_notifier() {
     assert_eq!(events[0].paused_scope.as_deref(), Some("dummy"));
     assert!(events[0].error.is_some());
 }
+
+#[tokio::test]
+async fn test_claim_one_where_skips_background_tasks_when_the_lane_is_busy() {
+    use pacewright_core::engine::wants_background_lane;
+    let clock = TestClock::new(1_000);
+    let e = engine(clock.clone(), Config::default());
+    let bg = e
+        .add_task(Task::new_now(
+            "dummy",
+            "echo",
+            serde_json::json!({"background": true}),
+            100,
+        ))
+        .unwrap();
+    let fg = e
+        .add_task(Task::new_now("dummy", "echo", serde_json::json!({}), 200))
+        .unwrap();
+    // Lane busy: the background task is passed over (and stays pending), the other is claimed.
+    let c = e
+        .claim_one_where(&|t| wants_background_lane(t))
+        .unwrap()
+        .unwrap();
+    assert_eq!(c.task.id, fg);
+    assert_eq!(
+        e.store.get_task(&bg).unwrap().unwrap().status,
+        TaskStatus::Pending
+    );
+    // Lane free: it is claimed like any task.
+    let c = e.claim_one().unwrap().unwrap();
+    assert_eq!(c.task.id, bg);
+    assert!(wants_background_lane(&c.task));
+    assert!(!wants_background_lane(&Task::new_now(
+        "dummy",
+        "echo",
+        serde_json::json!({"background": "yes"}),
+        0
+    )));
+}

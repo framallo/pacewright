@@ -5,6 +5,17 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::limits::{check_limits, LimitDecision};
 use crate::model::{Task, TaskEvent, TaskStatus};
+
+/// A task asks for the **background lane** with `"background": true` in its params: it runs beside
+/// the serial queue instead of in it, one background task at a time. Meant for long model rounds
+/// (a recipe-authoring `claude_cli/run` can take 40 minutes) that must not hold up short, user-
+/// facing tasks behind them. Everything else keeps the original one-at-a-time order.
+pub fn wants_background_lane(task: &Task) -> bool {
+    task.params
+        .get("background")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
 use crate::rng::Rng;
 use crate::runner::{execute_and_record, mark_running};
 use crate::scheduler::{resolve_blocked, select_runnable};
@@ -146,6 +157,16 @@ impl Engine {
     /// `execute_and_record` on the claim — so the slow browser subprocess never holds the lock.
     /// Returns `None` when nothing is runnable this pass.
     pub fn claim_one(&self) -> rusqlite::Result<Option<Claimed>> {
+        self.claim_one_where(&|_| false)
+    }
+
+    /// [`Engine::claim_one`], passing over every runnable task for which `skip` is true (it stays
+    /// pending, untouched). The daemon uses it to keep a second background-lane task from being
+    /// claimed while one is already running.
+    pub fn claim_one_where(
+        &self,
+        skip: &dyn Fn(&Task) -> bool,
+    ) -> rusqlite::Result<Option<Claimed>> {
         // Snapshot the persisted pauses once (source of truth: survives restart, and the off-lock
         // runner can auto-pause a scope on failure). `all` halts the whole engine.
         let paused: HashSet<String> = self.store.paused_scopes()?.into_iter().collect();
@@ -155,7 +176,7 @@ impl Engine {
         resolve_blocked(&self.store, &*self.clock, &*self.rng)?;
         let runnable = select_runnable(&self.store, &*self.clock)?;
         for task in runnable {
-            if paused.contains(&task.adapter) {
+            if paused.contains(&task.adapter) || skip(&task) {
                 continue;
             }
             let Some(adapter) = self.registry.get(&task.adapter) else {

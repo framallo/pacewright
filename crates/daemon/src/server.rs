@@ -7,11 +7,12 @@ use pacewright_adapter_recipe::{
 };
 use pacewright_core::adapter::AdapterRegistry;
 use pacewright_core::config::LimitConfig;
-use pacewright_core::engine::Engine;
+use pacewright_core::engine::{wants_background_lane, Engine};
 use pacewright_core::model::{Task, TaskStatus};
 use pacewright_core::runner::execute_and_record;
 use pacewright_proto::{Request, Response};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -811,6 +812,16 @@ async fn handle_conn(srv: Arc<Server>, stream: UnixStream) {
     }
 }
 
+/// Log how a task execution ended (its own error, a panic, or a cancelled join).
+fn report_run<E: std::fmt::Display>(res: Result<Result<(), E>, tokio::task::JoinError>) {
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(run_err)) => tracing::error!("task run error: {run_err}"),
+        Err(join_err) if join_err.is_panic() => tracing::error!("task panicked: {join_err}"),
+        Err(join_err) => tracing::error!("task failed: {join_err}"),
+    }
+}
+
 pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
     let _ = std::fs::remove_file(socket_path);
     let listener = match UnixListener::bind(socket_path) {
@@ -827,6 +838,7 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
     // tick loop
     {
         let engine = srv.engine.clone();
+        let background_busy = Arc::new(AtomicBool::new(false));
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -837,9 +849,13 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                 // task runs. Each execute is isolated in its own task so an adapter/store panic
                 // can't take down the loop and silently freeze the scheduler.
                 loop {
+                    let lane_busy = background_busy.load(Ordering::SeqCst);
                     let claimed = {
                         let e = engine.lock().await;
-                        match e.claim_one() {
+                        // A second background task waits for the first: one model round at a
+                        // time beside the queue, never two.
+                        let skip = |t: &Task| lane_busy && wants_background_lane(t);
+                        match e.claim_one_where(&skip) {
                             Ok(Some(c)) => Some((
                                 c,
                                 e.store.clone(),
@@ -857,6 +873,10 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                     let Some((claimed, store, clock, browser, notifier)) = claimed else {
                         break;
                     };
+                    let background = wants_background_lane(&claimed.task);
+                    if background {
+                        background_busy.store(true, Ordering::SeqCst);
+                    }
                     let handle = tokio::spawn(async move {
                         execute_and_record(
                             &store,
@@ -868,13 +888,16 @@ pub async fn serve(srv: Arc<Server>, socket_path: &Path) -> Result<()> {
                         )
                         .await
                     });
-                    match handle.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(run_err)) => tracing::error!("task run error: {run_err}"),
-                        Err(join_err) if join_err.is_panic() => {
-                            tracing::error!("task panicked: {join_err}");
-                        }
-                        Err(join_err) => tracing::error!("task failed: {join_err}"),
+                    if background {
+                        // Not awaited: the queue keeps moving. The flag clears when it ends,
+                        // panic included.
+                        let busy = background_busy.clone();
+                        tokio::spawn(async move {
+                            report_run(handle.await);
+                            busy.store(false, Ordering::SeqCst);
+                        });
+                    } else {
+                        report_run(handle.await);
                     }
                 }
             }
