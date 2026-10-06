@@ -32,7 +32,14 @@ const flag = (n, def) => {
 const espera = Number(flag("esperar", 2500));
 const quiereTexto = args.includes("--texto");
 const quiereCampos = args.includes("--campos");
-const CDP = process.env.PW_CDP || "http://127.0.0.1:9222";
+// `PW_CDP` llega a veces sin esquema (`127.0.0.1:9222`, como lo escribe el compose de
+// CazaFacturas). `fetch` no acepta eso y la ronda de autoría leía el error como "pw-dom no está
+// disponible" — así se perdió la primera ronda de 7-Eleven en producción. Se normaliza.
+const cdpUrl = (raw) => {
+  const v = (raw || "").trim() || "http://127.0.0.1:9222";
+  return (/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? v : `http://${v}`).replace(/\/+$/, "");
+};
+const CDP = cdpUrl(process.env.PW_CDP);
 
 const fatal = (m) => {
   console.error(`pw-dom: ${m}`);
@@ -47,7 +54,10 @@ try {
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   objetivo = await r.json();
 } catch (e) {
-  fatal(`no pude abrir una pestaña en ${CDP}: ${e.message}`);
+  fatal(
+    `no pude abrir una pestaña en ${CDP} (PW_CDP=${process.env.PW_CDP ?? "sin definir"}): ${e.message}. ` +
+      "Es una falla de la herramienta, no del portal: repórtala tal cual.",
+  );
 }
 
 const ws = new WebSocket(objetivo.webSocketDebuggerUrl);
