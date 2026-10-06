@@ -108,11 +108,13 @@ locator css="#email"                          // CSS selector
 locator text="Sign in"                        // visible text
 locator role="heading" level=2                // heading level
 locator css=".row" nth=3                       // the 3rd match
-locator role="link" { within { locator css="nav" } }   // scope to an ancestor
+locator role="link" { within css="nav" }               // scope to an ancestor
+locator css="#ok" { fallback role="button" name="OK" }   // try this when the primary finds nothing
 ```
 
 Fields: `role`, `name`, `text`, `label`, `tag`, `css`, `level`, `nth`. Relational children:
-`within`, `fallback` (try if the primary resolves nothing), `after`, `near`.
+`within`, `fallback` (try if the primary resolves nothing), `after`, `near` — each carries its
+own match attributes on the child node itself (a nested `locator` inside it is rejected).
 
 ### `expect` conditions
 
